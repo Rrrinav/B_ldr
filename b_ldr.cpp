@@ -15,7 +15,7 @@ enum class Log_type
 
 namespace utl
 {
-  void Bldr_log(Log_type type, const std::string &msg)
+  void notify(Log_type type, const std::string &msg)
   {
     switch (type)
     {
@@ -50,7 +50,7 @@ struct Bldr
   {
     if (commands.empty())
     {
-      utl::Bldr_log(Log_type::ERROR, "No commands to execute.");
+      utl::notify(Log_type::ERROR, "No commands to execute.");
       return -1;
     }
 
@@ -66,13 +66,13 @@ struct Bldr
     if (pid == -1)
     {
       // Fork failed
-      utl::Bldr_log(Log_type::ERROR, "Failed to create child process.");
+      utl::notify(Log_type::ERROR, "Failed to create child process.");
       return -1;
     }
     else if (pid == 0)
     {
       // Child process
-      utl::Bldr_log(Log_type::INFO, "Executing command:");
+      utl::notify(Log_type::INFO, "Executing command:");
       for (const auto &cmd : commands)
         std::cout << cmd << " ";
       std::cout << std::endl;
@@ -96,19 +96,19 @@ struct Bldr
         int exit_code = WEXITSTATUS(status);
         if (exit_code == 0)
         {
-          utl::Bldr_log(Log_type::INFO, "Command executed successfully.");
+          utl::notify(Log_type::INFO, "Command executed successfully.");
           return 1;
         }
         else
         {
-          utl::Bldr_log(Log_type::ERROR, "Command failed with exit code: " + std::to_string(exit_code));
+          utl::notify(Log_type::ERROR, "Command failed with exit code: " + std::to_string(exit_code));
           return -1;
         }
       }
       else if (WIFSIGNALED(status))
       {
         int signal = WTERMSIG(status);
-        utl::Bldr_log(Log_type::ERROR, "Command terminated by signal: " + std::to_string(signal));
+        utl::notify(Log_type::ERROR, "Command terminated by signal: " + std::to_string(signal));
         return 0;
       }
     }
@@ -123,9 +123,7 @@ int main(int argc, char **argv)
   std::string output = "main";
   Bldr b;
   b.push_commands("g++", "main.cpp", "-o", output, "-Wall");
-
   // Execute the command
   b.execute();
-
   return 0;
 }
