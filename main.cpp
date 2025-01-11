@@ -3,7 +3,11 @@
 
 int main()
 {
-  Command cmd("ls", "-a");
-  execute(cmd);
+  b_ldr::Command cmd = {};
+
+  cmd.parts = {"g++", "hello.cpp", "-o", "hello"};
+
+  b_ldr::execute(cmd);
+
   return 0;
 }
