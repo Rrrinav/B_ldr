@@ -1,5 +1,9 @@
-#include <iostream>
+#define B_LDR_IMPLEMENTATION
+#include "./b_ldr.hpp"
 
-int main() {
-  std::cout << "Hello, World!" << std::endl
+int main()
+{
+  Command cmd("ls", "-a");
+  execute(cmd);
+  return 0;
 }
