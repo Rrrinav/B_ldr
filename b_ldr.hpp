@@ -54,7 +54,11 @@ namespace b_ldr
 
     // @return [bool]: Check if the command is empty
     bool is_empty() const { return parts.empty(); }
+
+    std::string get_print_string() const;
   };
+
+  bool validate_command(const Command &command);
 
   /* @brief: Execute the command
    * @param command [Command]: Command to execute, must be a valid process command and not shell command
@@ -72,6 +76,8 @@ namespace b_ldr
   // Execute the shell command with preprocessed parts
   int execute_shell(Command cmd);
 }  // namespace b_ldr
+
+//#define B_LDR_IMPLEMENTATION
 
 #ifdef B_LDR_IMPLEMENTATION
 
@@ -117,6 +123,21 @@ std::vector<char *> b_ldr::Command::to_exec_args() const
   return exec_args;
 }
 
+std::string b_ldr::Command::get_print_string() const
+{
+  std::stringstream ss;
+  ss << "'" << parts[0];
+  if (parts.size() == 1)
+    return ss.str() + "'";
+
+  for (int i = 1; i < parts.size(); i++)
+    ss << " " << parts[i];
+
+  ss << "'";
+
+  return ss.str();
+}
+
 template <typename... Args>
 b_ldr::Command::Command(Args... args)
 {
@@ -129,6 +150,15 @@ void b_ldr::Command::add_parts(Args... args)
   (parts.emplace_back(args), ...);
 }
 
+bool b_ldr::validate_command(const b_ldr::Command &command)
+{
+  b_ldr::log(b_ldr::Log_type::WARNING, "Do you want to execute " + command.get_print_string() + "in shell");
+  std::cerr << "  [WARNING]: Answer[y/n]: ";
+  std::string response;
+  std::getline(std::cin, response);
+  return (response == "y" || response == "Y");
+}
+
 int b_ldr::execute(const Command &command)
 {
   if (command.is_empty())
@@ -138,7 +168,7 @@ int b_ldr::execute(const Command &command)
   }
 
   auto args = command.to_exec_args();
-  b_ldr::log(Log_type::INFO, "Executing command: " + command.get_command_string());
+  b_ldr::log(Log_type::INFO, "Executing command: " + command.get_print_string());
 
   pid_t pid = fork();
   if (pid == -1)
@@ -242,10 +272,17 @@ b_ldr::Command b_ldr::preprocess_commands_for_shell(const b_ldr::Command &cmd)
 // Execute the shell command with preprocessed parts
 int b_ldr::execute_shell(b_ldr::Command cmd)
 {
-  // Preprocess the command for shell execution
-  auto cmd_s = preprocess_commands_for_shell(cmd);
+  if (validate_command(cmd))
+  {
+    // Preprocess the command for shell execution
+    auto cmd_s = preprocess_commands_for_shell(cmd);
 
-  // Execute the shell command using the original execute function
-  return execute(cmd_s);
+    // Execute the shell command using the original execute function
+    return execute(cmd_s);
+  }
+  else
+  {
+    return -1;
+  }
 }
 #endif
