@@ -83,13 +83,15 @@ bool read_output(const std::string &cmd, std::string &output, size_t buffer_size
 int main()
 {
   std::string command = "pkg-config --libs raylib";  // Command to execute
-  std::string command2 = "ls -l";                    // Command to execute
+  std::string command2 = "s -l";                     // Command to execute
   std::string output;
 
   if (read_output(command2, output, 1))
     std::cout << "Command Output:\n" << output << std::endl;
   else
+  {
     std::cerr << "Failed to execute command." << std::endl;
-
+    std::cerr << output << std::endl;
+  }
   return 0;
 }

@@ -6,8 +6,9 @@ int main()
   b_ldr::Command cmd = {};
 
   cmd.parts = {"g++", "hello.cpp", "-o", "hello"};
-  if (b_ldr::execute(cmd) != 1)
-    return 1;
+  cmd.parts = {"s", "-l"};
+  if (b_ldr::execute(cmd) <= 0)
+    return EXIT_FAILURE;
 
   return 0;
 }

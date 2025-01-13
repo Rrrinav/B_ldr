@@ -53,14 +53,15 @@ namespace b_ldr
   /* @brief: Execute the command
    * @param command [Command]: Command to execute
    * @return: returns a code to indicate success or failure
-   *    1: Command executed successfully
-   *    0: Command failed to execute or something wrong on system side
-   *   -1: No command to execute or something wrong on user side
+   *   >0 : Command executed successfully, return pid of fork.
+   *    0 : Command failed to execute or something wrong on system side
+   *   -1 : No command to execute or something wrong on user side
    * @description: Execute the command and log the status alongwith
    */
   int execute(const Command &command);
 }  // namespace b_ldr
 
+#define B_LDR_IMPLEMENTATION
 #ifdef B_LDR_IMPLEMENTATION
 
 #include <iostream>
@@ -165,6 +166,6 @@ int b_ldr::execute(const Command &command)
   }
 
   b_ldr::log(Log_type::INFO, "Command executed successfully.");
-  return 1;
+  return static_cast<int>(pid);
 }
 #endif
