@@ -54,8 +54,8 @@ namespace b_ldr
    * @param command [Command]: Command to execute
    * @return: returns a code to indicate success or failure
    *    1: Command executed successfully
-   *    0: Command failed to execute
-   *   -1: No command to execute
+   *    0: Command failed to execute or something wrong on system side
+   *   -1: No command to execute or something wrong on user side
    * @description: Execute the command and log the status alongwith
    */
   int execute(const Command &command);
