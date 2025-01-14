@@ -45,8 +45,8 @@ namespace b_ldr
     ERROR
   };
 
-  /* @param type [Log_type enum ]: Type of log
-   * @param msg [std::string]: Message to log
+  /* @param type ( Log_type enum ): Type of log
+   * @param msg ( std::string ): Message to log
    * @description: Function to log messages with type
    */
   void log(Log_type type, const std::string &msg);
@@ -59,40 +59,40 @@ namespace b_ldr
     // Default constructor
     Command() : parts{} {}
 
-    // @tparam args [variadic template]: Command parts
+    // @tparam args ( variadic template ): Command parts
     template <typename... Args>
     Command(Args... args);
 
-    // @tparam args [variadic template]: Command parts
+    // @tparam args ( variadic template ): Command parts
     template <typename... Args>
     void add_parts(Args... args);
 
-    // @return [std::string]: Get the full command as a single string
+    // @return ( std::string ): Get the full command as a single string
     // @description: Get the full command as a single string
     std::string get_command_string() const;
 
-    // @return [std::vector<char *>]: Get the full command but as C-style arguments for `execvp`
+    // @return ( std::vector<char *> ): Get the full command but as C-style arguments for `execvp`
     // @description: Get the full command as a C-style arguments for sys calls
     std::vector<char *> to_exec_args() const;
 
-    // @return [bool]: Check if the command is empty
+    // @return ( bool ): Check if the command is empty
     bool is_empty() const { return parts.empty(); }
 
-    // @return [std::string]: Get the command as a printable string wrapped in single quotes
+    // @return ( std::string ): Get the command as a printable string wrapped in single quotes
     std::string get_print_string() const;
   };
 
   // @beief: Validate the command before executing
-  // @param command [Command]: Command to validate
+  // @param command ( Command ): Command to validate
   bool validate_command(const Command &command);
 
   // @brief: Wait for the process to complete
-  // @param pid [pid_t]: Process ID to wait for
+  // @param pid ( pid_t ): Process ID to wait for
   // @description: Wait for the process to complete and log the status. Use this function instead of direct waitpid
   int wait_for_process(pid_t pid);
 
   /* @brief: Execute the command
-   * @param command [Command]: Command to execute, must be a valid process command and not shell command
+   * @param command ( Command ): Command to execute, must be a valid process command and not shell command
    * @return: returns a code to indicate success or failure
    *   >0 : Command executed successfully, returns pid of fork.
    *    0 : Command failed to execute or something wrong on system side
@@ -109,7 +109,7 @@ namespace b_ldr
   void print_metadata();
 
   // @brief: Preprocess the command for shell execution
-  // @param cmd [Command]: Command to preprocess
+  // @param cmd ( Command ): Command to preprocess
   // @return: Preprocessed command for shell execution
   // @description: Preprocess the command for shell execution by adding shell command and arguments
   //    Windows:     cmd.exe /c <command>
@@ -117,21 +117,38 @@ namespace b_ldr
   Command preprocess_commands_for_shell(const Command &cmd);
 
   // @brief: Execute the shell command with preprocessed parts
-  // param cmd [Command]: Command to execute in shell
+  // param cmd ( Command ): Command to execute in shell
   // @description: Execute the shell command with preprocessed parts
   //    Uses execute function to execute the preprocessed command
   //    return the return value of the execute function
-  int execute_shell(Command cmd);
+  int execute_shell(std::string command);
 
   // @brief: Execute the shell command with preprocessed parts but asks wether to execute or not first
-  // @param cmd [Command]: Command to execute in shell
-  // @param prompt [bool]: Ask for confirmation before executing
+  // @param cmd ( Command ): Command to execute in shell
+  // @param prompt ( bool ): Ask for confirmation before executing
   // @description: Execute the shell command with preprocessed parts with prompting
   //    Uses execute function to execute the preprocessed command
   //    return the return value of the execute function
-  int execute_shell(Command cmd, bool prompt);
+  int execute_shell(std::string command, bool prompt);
+
+  /* @brief: Read output from a process command execution
+   * @param cmd ( Command ): Command struct containing the process command and arguments
+   * @param output ( std::string& ): Reference to string where output will be stored
+   * @param buffer_size ( size_t ): Size of buffer for reading output (default: 4096)
+   * @return ( bool ): true if successful, false otherwise
+   */
+  bool read_process_output(const Command &cmd, std::string &output, size_t buffer_size = 4096);
+
+  /* @brief: Read output from a shell command execution
+   * @param shell_cmd ( std::string ): Shell command to execute and read output from
+   * @param output ( std::string& ): Reference to string where output will be stored
+   * @param buffer_size ( size_t ): Size of buffer for reading output (default: 4096)
+   * @return ( bool ): true if successful, false otherwise
+   */
+  bool read_shell_output(const std::string &shell_cmd, std::string &output, size_t buffer_size = 4096);
 }  // namespace b_ldr
 
+//#define B_LDR_IMPLEMENTATION
 #ifdef B_LDR_IMPLEMENTATION
 
 #include <iostream>
@@ -334,7 +351,7 @@ b_ldr::Command b_ldr::preprocess_commands_for_shell(const b_ldr::Command &cmd)
 }
 
 // Execute the shell command with preprocessed parts
-int b_ldr::execute_shell(b_ldr::Command cmd)
+int b_ldr::execute_shell(std::string cmd)
 {
   // Preprocess the command for shell execution
   auto cmd_s = preprocess_commands_for_shell(cmd);
@@ -343,7 +360,7 @@ int b_ldr::execute_shell(b_ldr::Command cmd)
   return execute(cmd_s);
 }
 
-int b_ldr::execute_shell(Command cmd, bool prompt)
+int b_ldr::execute_shell(std::string cmd, bool prompt)
 {
   if (prompt)
   {
@@ -365,4 +382,124 @@ int b_ldr::execute_shell(Command cmd, bool prompt)
   // Execute the shell command using the original execute function
   return execute(cmd_s);
 }
+
+bool b_ldr::read_process_output(const Command &cmd, std::string &output, size_t buffer_size)
+{
+  if (cmd.is_empty())
+  {
+    b_ldr::log(Log_type::ERROR, "No command to execute.");
+    return false;
+  }
+
+  if (buffer_size == 0)
+  {
+    b_ldr::log(Log_type::ERROR, "Buffer size cannot be zero.");
+    return false;
+  }
+
+  int pipefd[2];
+  if (pipe(pipefd) == -1)
+  {
+    b_ldr::log(Log_type::ERROR, "Failed to create pipe: " + std::string(strerror(errno)));
+    return false;
+  }
+
+  auto args = cmd.to_exec_args();
+  b_ldr::log(Log_type::INFO, "Extracting output from: " + cmd.get_print_string());
+
+  pid_t pid = fork();
+  if (pid == -1)
+  {
+    b_ldr::log(Log_type::ERROR, "Failed to create child process: " + std::string(strerror(errno)));
+    close(pipefd[0]);
+    close(pipefd[1]);
+    return false;
+  }
+  else if (pid == 0)
+  {
+    // Child process
+    close(pipefd[0]);                // Close the read end
+    dup2(pipefd[1], STDOUT_FILENO);  // Redirect stdout to the pipe
+    dup2(pipefd[1], STDERR_FILENO);  // Redirect stderr to the pipe
+    close(pipefd[1]);                // Close the write end
+
+    if (execvp(args[0], args.data()) == -1)
+    {
+      perror("execvp");
+      b_ldr::log(Log_type::ERROR, "Failed with error: " + std::string(strerror(errno)));
+      exit(EXIT_FAILURE);
+    }
+    abort();  // Should never reach here
+  }
+  else
+  {
+    // Parent process
+    close(pipefd[1]);  // Close the write end
+
+    std::vector<char> buffer(buffer_size);
+    ssize_t bytes_read;
+    output.clear();
+
+    while ((bytes_read = read(pipefd[0], buffer.data(), buffer.size())) > 0)
+      output.append(buffer.data(), bytes_read);
+    close(pipefd[0]);  // Close the read end
+
+    return b_ldr::wait_for_process(pid) > 0;  // Use wait_for_process to handle the exit status
+  }
+}
+
+bool b_ldr::read_shell_output(const std::string &cmd, std::string &output, size_t buffer_size)
+{
+  if (buffer_size == 0)
+  {
+    b_ldr::log(Log_type::ERROR, "Buffer size cannot be zero.");
+    return false;
+  }
+
+  int pipefd[2];
+  if (pipe(pipefd) == -1)
+  {
+    b_ldr::log(Log_type::ERROR, "Failed to create pipe: " + std::string(strerror(errno)));
+    return false;
+  }
+
+  pid_t pid = fork();
+  if (pid == -1)
+  {
+    b_ldr::log(Log_type::ERROR, "Failed to create child process: " + std::string(strerror(errno)));
+    return false;
+  }
+  else if (pid == 0)
+  {
+    close(pipefd[0]);                // Close the read end
+    dup2(pipefd[1], STDOUT_FILENO);  // Redirect stdout to the pipe
+    dup2(pipefd[1], STDERR_FILENO);  // Redirect stderr to the pipe
+    close(pipefd[1]);                // Close the write end
+
+    std::vector<char *> args;
+    args.push_back(const_cast<char *>("/bin/sh"));
+    args.push_back(const_cast<char *>("-c"));
+    args.push_back(const_cast<char *>(cmd.c_str()));
+    args.push_back(nullptr);
+
+    execvp(args[0], args.data());
+    perror("execvp");
+    exit(EXIT_FAILURE);
+  }
+  else
+  {
+    close(pipefd[1]);  // Close the write end
+
+    std::vector<char> buffer(buffer_size);
+    ssize_t bytes_read;
+    output.clear();
+
+    while ((bytes_read = read(pipefd[0], buffer.data(), buffer.size())) > 0)
+      output.append(buffer.data(), bytes_read);
+    close(pipefd[0]);  // Close the read end
+
+    return wait_for_process(pid) > 0;  // Use wait_for_process instead of direct waitpid
+  }
+}
+
 #endif
