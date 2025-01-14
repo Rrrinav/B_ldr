@@ -1,3 +1,23 @@
+/*
+Copyright Dec 2025, Rinav (github: rrrinav)
+
+  Permission is hereby granted, free of charge,
+  to any person obtaining a copy of this software and associated documentation files(the “Software”),
+  to deal in the Software without restriction, including without limitation the rights to use, copy, modify, merge, publish, distribute,
+  sublicense, and / or sell copies of the Software, and to permit persons to whom the Software is furnished to do so,
+  subject to the following conditions :
+
+  The above copyright notice and this permission notice shall be included in all copies
+  or
+  substantial portions of the Software.
+
+  THE SOFTWARE IS PROVIDED “AS IS”,
+  WITHOUT WARRANTY OF ANY KIND, EXPRESS OR IMPLIED, INCLUDING BUT NOT LIMITED TO THE WARRANTIES OF MERCHANTABILITY,
+  FITNESS FOR A PARTICULAR PURPOSE AND NONINFRINGEMENT.IN NO EVENT SHALL THE AUTHORS OR COPYRIGHT HOLDERS BE LIABLE FOR ANY CLAIM,
+  DAMAGES OR OTHER LIABILITY, WHETHER IN AN ACTION OF CONTRACT, TORT OR OTHERWISE, ARISING FROM,
+  OUT OF OR IN CONNECTION WITH THE SOFTWARE OR THE USE OR OTHER DEALINGS IN THE SOFTWARE.
+*/
+
 #pragma once
 #include <sys/types.h>
 #include <sys/utsname.h>
@@ -9,6 +29,9 @@
 #include <unistd.h>
 #endif
 
+#include <cerrno>
+#include <clocale>
+#include <cstring>
 #include <string>
 #include <vector>
 
@@ -55,10 +78,18 @@ namespace b_ldr
     // @return [bool]: Check if the command is empty
     bool is_empty() const { return parts.empty(); }
 
+    // @return [std::string]: Get the command as a printable string wrapped in single quotes
     std::string get_print_string() const;
   };
 
+  // @beief: Validate the command before executing
+  // @param command [Command]: Command to validate
   bool validate_command(const Command &command);
+
+  // @brief: Wait for the process to complete
+  // @param pid [pid_t]: Process ID to wait for
+  // @description: Wait for the process to complete and log the status. Use this function instead of direct waitpid
+  int wait_for_process(pid_t pid);
 
   /* @brief: Execute the command
    * @param command [Command]: Command to execute, must be a valid process command and not shell command
@@ -69,15 +100,37 @@ namespace b_ldr
    * @description: Execute the command using fork and log the status alongwith
    */
   int execute(const Command &command);
+
+  /* @description: Print system metadata:
+   *  1. Operating System
+   *  2. Compiler
+   *  3. Architecture
+   */
   void print_metadata();
-  // Preprocess the command to add shell invocation
+
+  // @brief: Preprocess the command for shell execution
+  // @param cmd [Command]: Command to preprocess
+  // @return: Preprocessed command for shell execution
+  // @description: Preprocess the command for shell execution by adding shell command and arguments
+  //    Windows:     cmd.exe /c <command>
+  //    Linux/macOS: /bin/sh -c <command>
   Command preprocess_commands_for_shell(const Command &cmd);
 
-  // Execute the shell command with preprocessed parts
+  // @brief: Execute the shell command with preprocessed parts
+  // param cmd [Command]: Command to execute in shell
+  // @description: Execute the shell command with preprocessed parts
+  //    Uses execute function to execute the preprocessed command
+  //    return the return value of the execute function
   int execute_shell(Command cmd);
-}  // namespace b_ldr
 
-//#define B_LDR_IMPLEMENTATION
+  // @brief: Execute the shell command with preprocessed parts but asks wether to execute or not first
+  // @param cmd [Command]: Command to execute in shell
+  // @param prompt [bool]: Ask for confirmation before executing
+  // @description: Execute the shell command with preprocessed parts with prompting
+  //    Uses execute function to execute the preprocessed command
+  //    return the return value of the execute function
+  int execute_shell(Command cmd, bool prompt);
+}  // namespace b_ldr
 
 #ifdef B_LDR_IMPLEMENTATION
 
@@ -90,16 +143,16 @@ void b_ldr::log(Log_type type, const std::string &msg)
   switch (type)
   {
     case Log_type::INFO:
-      std::clog << "  [INFO]: " << msg << std::endl;
+      std::cout << "  [INFO]: " << msg << std::endl;
       break;
     case Log_type::WARNING:
-      std::clog << "  [WARNING]: " << msg << std::endl;
+      std::cout << "  [WARNING]: " << msg << std::endl;
       break;
     case Log_type::ERROR:
-      std::clog << "  [ERROR]: " << msg << std::endl;
+      std::cerr << "  [ERROR]: " << msg << std::flush << std::endl;
       break;
     default:
-      std::clog << "  [UNKNOWN]: " << msg << std::endl;
+      std::cout << "  [UNKNOWN]: " << msg << std::endl;
       break;
   }
 }
@@ -126,14 +179,14 @@ std::vector<char *> b_ldr::Command::to_exec_args() const
 std::string b_ldr::Command::get_print_string() const
 {
   std::stringstream ss;
-  ss << "'" << parts[0];
+  ss << "' " << parts[0];
   if (parts.size() == 1)
     return ss.str() + "'";
 
   for (int i = 1; i < parts.size(); i++)
     ss << " " << parts[i];
 
-  ss << "'";
+  ss << " '";
 
   return ss.str();
 }
@@ -159,6 +212,35 @@ bool b_ldr::validate_command(const b_ldr::Command &command)
   return (response == "y" || response == "Y");
 }
 
+int b_ldr::wait_for_process(pid_t pid)
+{
+  int status;
+  waitpid(pid, &status, 0);  // Wait for the process to complete
+
+  if (WIFEXITED(status))
+  {
+    int exit_code = WEXITSTATUS(status);
+    if (exit_code != 0)
+    {
+      b_ldr::log(b_ldr::Log_type::ERROR, "Process exited with non-zero status: " + std::to_string(exit_code));
+      return exit_code;  // Return exit code for failure
+    }
+    b_ldr::log(b_ldr::Log_type::INFO, "Process exited successfully.");
+  }
+  else if (WIFSIGNALED(status))
+  {
+    int signal = WTERMSIG(status);
+    b_ldr::log(b_ldr::Log_type::ERROR, "Process terminated by signal: " + std::to_string(signal));
+    return -1;  // Indicate signal termination
+  }
+  else
+  {
+    b_ldr::log(b_ldr::Log_type::WARNING, "Unexpected process termination status.");
+  }
+
+  return static_cast<int>(pid);  // Indicate success
+}
+
 int b_ldr::execute(const Command &command)
 {
   if (command.is_empty())
@@ -182,33 +264,15 @@ int b_ldr::execute(const Command &command)
     if (execvp(args[0], args.data()) == -1)
     {
       perror("execvp");
+      b_ldr::log(Log_type::ERROR, "Failed with error: " + std::string(strerror(errno)));
       exit(EXIT_FAILURE);
     }
-  }
-  else
-  {
-    // Parent process
-    int status;
-    waitpid(pid, &status, 0);
-    if (WIFEXITED(status))
-    {
-      int exit_code = WEXITSTATUS(status);
-      if (exit_code != 0)
-      {
-        b_ldr::log(Log_type::ERROR, "Command failed with exit code: " + std::to_string(exit_code));
-        return 0;
-      }
-    }
-    else if (WIFSIGNALED(status))
-    {
-      int signal = WTERMSIG(status);
-      b_ldr::log(Log_type::ERROR, "Command terminated by signal: " + std::to_string(signal));
-      return 0;
-    }
+    // This line should never be reached
+    b_ldr::log(Log_type::ERROR, "Unexpected code execution after execvp. Did we find a bug? in libc or kernel?");
+    abort();
   }
 
-  b_ldr::log(Log_type::INFO, "Command executed successfully.");
-  return static_cast<int>(pid);
+  return b_ldr::wait_for_process(pid);  // Use wait_for_process instead of direct waitpid
 }
 
 void b_ldr::print_metadata()
@@ -272,17 +336,33 @@ b_ldr::Command b_ldr::preprocess_commands_for_shell(const b_ldr::Command &cmd)
 // Execute the shell command with preprocessed parts
 int b_ldr::execute_shell(b_ldr::Command cmd)
 {
-  if (validate_command(cmd))
-  {
-    // Preprocess the command for shell execution
-    auto cmd_s = preprocess_commands_for_shell(cmd);
+  // Preprocess the command for shell execution
+  auto cmd_s = preprocess_commands_for_shell(cmd);
 
-    // Execute the shell command using the original execute function
-    return execute(cmd_s);
-  }
-  else
+  // Execute the shell command using the original execute function
+  return execute(cmd_s);
+}
+
+int b_ldr::execute_shell(Command cmd, bool prompt)
+{
+  if (prompt)
   {
-    return -1;
+    if (validate_command(cmd))
+    {
+      // Preprocess the command for shell execution
+      auto cmd_s = preprocess_commands_for_shell(cmd);
+
+      // Execute the shell command using the original execute function
+      return execute(cmd_s);
+    }
+    else
+    {
+      return -1;
+    }
   }
+  auto cmd_s = preprocess_commands_for_shell(cmd);
+
+  // Execute the shell command using the original execute function
+  return execute(cmd_s);
 }
 #endif

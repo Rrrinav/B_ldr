@@ -7,13 +7,12 @@ int main()
 
   b_ldr::print_metadata();
 
-  //cmd.parts = {"g++", "hello.cpp", "-o", "hello"};
-  cmd.parts = {"ls", "-l"};
+  cmd.parts = {"g++", "hello.cpp", "-o", "hello"};
 
-  b_ldr::execute_shell({"curl 'wttr.in/Jammu?format=4'"});
+  if (b_ldr::execute(cmd) <= 0)
+    return EXIT_FAILURE;
 
-  //if (b_ldr::execute(cmd) <= 0)
-  //  return EXIT_FAILURE;
+  b_ldr::execute_shell({"curl -s 'wttr.in/jammu?format=4'"});
 
   return 0;
 }
