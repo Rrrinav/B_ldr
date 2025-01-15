@@ -79,10 +79,9 @@ Check if an executable is up-to-date with it's file:
 
 int main(int argc, char *argv[])
 {
-    if (!b_ldr::is_executable_outdated(__FILE__, argv[0]))
-      std::cout << "Executable is updated." << std::endl;
-    else
-      std::cout << "Executable is not updated." << std::endl;
+  // Check if the executable needs to be rebuilt and restart if necessary
+  BLD_REBUILD_YOURSELF_ONCHANGE();
+
 }
 ```
 

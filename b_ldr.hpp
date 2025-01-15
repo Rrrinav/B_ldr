@@ -32,10 +32,16 @@ Copyright Dec 2025, Rinav (github: rrrinav)
 #include <cerrno>
 #include <clocale>
 #include <cstring>
-#include <filesystem>
-#include <iostream>
 #include <string>
 #include <vector>
+
+/* @brief: Rebuild the build executable if the source file is newer than the executable and run it
+ * @description: Takes no parameters and calls b_ldr::rebuild_yourself_onchange_and_run() with the current file and executable.
+ *    b_ldr::rebuild_yourself_onchange() detects compiler itself (g++, clang++, cl supported) and rebuilds the executable
+ *    if the source file is newer than the executable. It then restarts the new executable and exits the current process.
+ * If you want more cntrol, use b_ldr::rebuild_yourself_onchange() or b_ldr::rebuild_yourself_onchange_and_run() directly.
+ */
+#define BLD_REBUILD_YOURSELF_ONCHANGE() b_ldr::rebuild_yourself_onchange_and_run(__FILE__, argv[0])
 
 namespace b_ldr
 {
@@ -44,7 +50,8 @@ namespace b_ldr
   {
     INFO,
     WARNING,
-    ERROR
+    ERROR,
+    DEBUG
   };
 
   /* @param type ( Log_type enum ): Type of log
@@ -149,11 +156,37 @@ namespace b_ldr
    */
   bool read_shell_output(const std::string &shell_cmd, std::string &output, size_t buffer_size = 4096);
 
+  /* @brief: Check if the executable is outdated i.e. source file is newer than the executable
+   * @param file_name ( std::string ): Source file name
+   * @param executable ( std::string ): Executable file name
+   * @description: Check if the source file is newer than the executable. Uses last write time to compare.
+   */
   bool is_executable_outdated(std::string file_name, std::string executable);
+
+  /* @brief: Rebuild the executable if the source file is newer than the executable and runs it
+   * @param filename ( std::string ): Source file name
+   * @param executable ( std::string ): Executable file name
+   * @param compiler ( std::string ): Compiler command to use (default: "")
+   *  It can detect compiler itself if not provided
+   *  Supported compilers: g++, clang++, cl
+   *  @description: Generally used for actual build script
+   */
+  void rebuild_yourself_onchange_and_run(const std::string &filename, const std::string &executable, std::string compiler = "");
+
+  /* @brief: Rebuild the executable if the source file is newer than the executable
+   * @param filename ( std::string ): Source file name (C++ only)
+   * @param executable ( std::string ): Executable file name
+   * @param compiler ( std::string ): Compiler command to use (default: "")
+   *  It can detect compiler itself if not provided
+   *  Supported compilers: g++, clang++, cl
+   *  @description: Actually for general use and can be used to rebuild any *C++* file since it doesn't restart the process
+   */
+  void rebuild_yourself_onchange(const std::string &filename, const std::string &executable, std::string compiler);
 }  // namespace b_ldr
 
 #ifdef B_LDR_IMPLEMENTATION
 
+#include <filesystem>
 #include <iostream>
 #include <ostream>
 #include <sstream>
@@ -163,16 +196,19 @@ void b_ldr::log(Log_type type, const std::string &msg)
   switch (type)
   {
     case Log_type::INFO:
-      std::cout << "  [INFO]: " << msg << std::endl;
+      std::cout << "[INFO]: " << msg << std::endl;
       break;
     case Log_type::WARNING:
-      std::cout << "  [WARNING]: " << msg << std::endl;
+      std::cout << "[WARNING]: " << msg << std::endl;
       break;
     case Log_type::ERROR:
-      std::cerr << "  [ERROR]: " << msg << std::flush << std::endl;
+      std::cerr << "[ERROR]: " << msg << std::flush << std::endl;
+      break;
+    case Log_type::DEBUG:
+      std::cout << "[DEBUG]: " << msg << std::flush << std::endl;
       break;
     default:
-      std::cout << "  [UNKNOWN]: " << msg << std::endl;
+      std::cout << "[UNKNOWN]: " << msg << std::endl;
       break;
   }
 }
@@ -297,6 +333,7 @@ int b_ldr::execute(const Command &command)
 
 void b_ldr::print_metadata()
 {
+  std::cout << '\n';
   log(Log_type::INFO, "Printing system metadata...........................................");
   // 1. Get OS information
   struct utsname sys_info;
@@ -536,6 +573,88 @@ bool b_ldr::is_executable_outdated(std::string file_name, std::string executable
   {
     b_ldr::log(Log_type::ERROR, std::string(e.what()));
     return false;  // Or handle the error differently
+  }
+}
+
+void b_ldr::rebuild_yourself_onchange_and_run(const std::string &filename, const std::string &executable, std::string compiler)
+{
+  if (b_ldr::is_executable_outdated(filename, executable))
+  {
+    b_ldr::log(Log_type::INFO, "Build executable not up-to-date. Rebuilding...");
+    b_ldr::Command cmd = {};
+
+    // Detect the compiler if not provided
+    if (compiler.empty())
+    {
+#ifdef __clang__
+      compiler = "clang++";
+#elif defined(__GNUC__)
+      compiler = "g++";
+#elif defined(_MSC_VER)
+      compiler = "cl";  // MSVC uses 'cl' as the compiler command
+#else
+      b_ldr::log(Log_type::ERROR, "Unknown compiler. Defaulting to g++.");
+      compiler = "g++";
+#endif
+    }
+
+    // Set up the compile command
+    cmd.parts = {compiler, filename, "-o", executable};
+
+    // Execute the compile command
+    if (b_ldr::execute(cmd) <= 0)
+    {
+      b_ldr::log(Log_type::ERROR, "Failed to rebuild executable.");
+      return;
+    }
+
+    b_ldr::log(Log_type::INFO, "Rebuild successful. Restarting...");
+
+    // Run the new executable using b_ldr::execute
+    b_ldr::Command restart_cmd = {};
+    restart_cmd.parts = {executable};
+    if (b_ldr::execute(restart_cmd) <= 0)
+    {
+      b_ldr::log(Log_type::ERROR, "Failed to restart executable.");
+      return;
+    }
+
+    // Exit the current process after successfully restarting
+    std::exit(EXIT_SUCCESS);
+  }
+}
+
+void b_ldr::rebuild_yourself_onchange(const std::string &filename, const std::string &executable, std::string compiler)
+{
+  if (b_ldr::is_executable_outdated(filename, executable))
+  {
+    b_ldr::log(Log_type::INFO, "Build executable not up-to-date. Rebuilding...");
+    b_ldr::Command cmd = {};
+
+    // Detect the compiler if not provided
+    if (compiler.empty())
+    {
+#ifdef __clang__
+      compiler = "clang++";
+#elif defined(__GNUC__)
+      compiler = "g++";
+#elif defined(_MSC_VER)
+      compiler = "cl";  // MSVC uses 'cl' as the compiler command
+#else
+      b_ldr::log(Log_type::ERROR, "Unknown compiler. Defaulting to g++.");
+      compiler = "g++";
+#endif
+    }
+
+    // Set up the compile command
+    cmd.parts = {compiler, filename, "-o", executable};
+
+    // Execute the compile command
+    if (b_ldr::execute(cmd) <= 0)
+    {
+      b_ldr::log(Log_type::ERROR, "Failed to rebuild executable.");
+      return;
+    }
   }
 }
 #endif

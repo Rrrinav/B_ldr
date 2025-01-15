@@ -1,21 +1,21 @@
 #define B_LDR_IMPLEMENTATION
+#include <cstdlib>  // For std::exit
+
 #include "./b_ldr.hpp"
 
 int main(int argc, char *argv[])
 {
-  if (!b_ldr::is_executable_outdated(__FILE__, argv[0]))
-    std::cout << "Executable is updated." << std::endl;
-  else
-    std::cout << "Executable is not updated." << std::endl;
+  // Check if the executable needs to be rebuilt and restart if necessary
+  BLD_REBUILD_YOURSELF_ONCHANGE();
 
   b_ldr::Command cmd = {};
-
   b_ldr::print_metadata();
 
-  cmd.parts = {"g++", "hello.cpp", "-o", "hello"};
+  std::cout << "Hello, World!" << std::endl;
 
-  if (b_ldr::execute(cmd) <= 0)
-    return EXIT_FAILURE;
+  //cmd.parts = {"g++", "hello.cpp", "-o", "hello"};
+  //if (b_ldr::execute(cmd) <= 0)
+  //  return EXIT_FAILURE;
 
   b_ldr::execute_shell("curl -s 'wttr.in/jammu?format=4'");
 
