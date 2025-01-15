@@ -70,6 +70,22 @@ std::string shell_cmd = "echo Hello, World!";
 bool success = b_ldr::read_shell_output(shell_cmd, output);
 ```
 
+### File System
+
+Check if an executable is up-to-date with it's file:
+    This specific example tracks it's own executable file.
+
+```cpp
+
+int main(int argc, char *argv[])
+{
+    if (!b_ldr::is_executable_outdated(__FILE__, argv[0]))
+      std::cout << "Executable is updated." << std::endl;
+    else
+      std::cout << "Executable is not updated." << std::endl;
+}
+```
+
 ### System Metadata
 
 Print system metadata:

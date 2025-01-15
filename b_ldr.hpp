@@ -32,6 +32,8 @@ Copyright Dec 2025, Rinav (github: rrrinav)
 #include <cerrno>
 #include <clocale>
 #include <cstring>
+#include <filesystem>
+#include <iostream>
 #include <string>
 #include <vector>
 
@@ -146,9 +148,10 @@ namespace b_ldr
    * @return ( bool ): true if successful, false otherwise
    */
   bool read_shell_output(const std::string &shell_cmd, std::string &output, size_t buffer_size = 4096);
+
+  bool is_executable_outdated(std::string file_name, std::string executable);
 }  // namespace b_ldr
 
-//#define B_LDR_IMPLEMENTATION
 #ifdef B_LDR_IMPLEMENTATION
 
 #include <iostream>
@@ -502,4 +505,37 @@ bool b_ldr::read_shell_output(const std::string &cmd, std::string &output, size_
   }
 }
 
+bool b_ldr::is_executable_outdated(std::string file_name, std::string executable)
+{
+  try
+  {
+    // Check if the source file exists
+    if (!std::filesystem::exists(file_name))
+    {
+      b_ldr::log(Log_type::ERROR, "Source file does not exist: " + file_name);
+      return false;  // Or handle this case differently
+    }
+
+    // Check if the executable exists
+    if (!std::filesystem::exists(executable))
+      return true;  // Treat as changed if the executable doesn't exist
+
+    // Get last write times
+    auto last_write_time = std::filesystem::last_write_time(file_name);
+    auto last_write_time_exec = std::filesystem::last_write_time(executable);
+
+    // Compare timestamps
+    return last_write_time > last_write_time_exec;
+  }
+  catch (const std::filesystem::filesystem_error &e)
+  {
+    b_ldr::log(Log_type::ERROR, "Filesystem error: " + std::string(e.what()));
+    return false;  // Or handle the error differently
+  }
+  catch (const std::exception &e)
+  {
+    b_ldr::log(Log_type::ERROR, std::string(e.what()));
+    return false;  // Or handle the error differently
+  }
+}
 #endif

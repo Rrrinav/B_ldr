@@ -1,8 +1,13 @@
 #define B_LDR_IMPLEMENTATION
 #include "./b_ldr.hpp"
 
-int main()
+int main(int argc, char *argv[])
 {
+  if (!b_ldr::is_executable_outdated(__FILE__, argv[0]))
+    std::cout << "Executable is updated." << std::endl;
+  else
+    std::cout << "Executable is not updated." << std::endl;
+
   b_ldr::Command cmd = {};
 
   b_ldr::print_metadata();
