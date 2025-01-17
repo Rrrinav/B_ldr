@@ -236,111 +236,36 @@ namespace bld
    */
   void rebuild_yourself_onchange(const std::string &filename, const std::string &executable, std::string compiler);
 
-  int handle_run_command(std::vector<std::string> args)
-  {
-    if (args.size() > 1)
-    {
-      bld::log(bld::Log_type::ERROR, "Too many args for 'run' command");
-      return -1;
-    }
-    if (args.size() == 2)
-    {
-      bld::log(bld::Log_type::WARNING, "Command 'run' specified with the command");
-      bld::log(bld::Log_type::INFO, "Proceeding to run the specified command: " + args[1]);
-      bld::Command cmd(args[1]);
-      return bld::execute(cmd);
-    }
+  /* @brief: Handle command-line arguments
+   * @param argc ( int ): Number of arguments
+   * @param argv ( char*[] ): Array of arguments
+   * @description: Handle command-line arguments and set the configuration.
+   *  Takes main function arguments and sets the configuration based on the arguments.
+   */
+  void handle_args(int argc, char *argv[]);
 
-    if (Config::get().target_executable.empty())
-    {
-      bld::log(bld::Log_type::ERROR, "No target executable specified in config");
-      return -1;
-    }
+  /* @brief: Handle the 'run' command
+   * @param args ( std::vector<std::string> ): Arguments for the command
+   * @description: Handle the 'run' command. If no arguments are provided, it runs the target executable from config.
+   */
+  int handle_run_command(std::vector<std::string> args);
 
-    bld::Command cmd;
-    cmd.parts.push_back(Config::get().target_executable);
+  /* @brief: Handle the 'config' command
+   * @param args ( std::vector<std::string> ): Arguments for the command
+   * @description: Handle the 'config' command. Sets the configuration based on the arguments.
+   */
+  void handle_config_command(std::vector<std::string> args, std::string name);
 
-    return bld::execute(cmd);
-  }
+  /* @brief: Check if a string starts with a prefix
+   * @param str ( std::string ): String to check
+   * @param prefix ( std::string ): Prefix to check
+   * @description: If size of prefix is greater than size of string, returns false
+   *  Uses std::string::compare() to compare the prefix with the string
+   */
+  bool starts_with(const std::string &str, const std::string &prefix);
 
-  bool starts_with(const std::string &str, const std::string &prefix)
-  {
-    if (prefix.size() > str.size())
-      return false;
-    return str.compare(0, prefix.size(), prefix) == 0;
-  }
-
-  void handle_config_command(std::vector<std::string> args, std::string name)
-  {
-    if (args.size() < 2)
-    {
-      log(Log_type::ERROR, "Config command requires arguments");
-      std::string usage = name + " config -[key]=value \n" + "        E.g: ' " + name + " config -verbose=true '";
-      log(Log_type::INFO, "Usage: " + usage);
-      return;
-    }
-
-    auto &config = Config::get();
-
-    for (size_t i = 1; i < args.size(); i++)
-    {
-      const auto &arg = args[i];
-      if (starts_with(arg, "-hreload="))
-        config.hot_reload = (arg.substr(9) == "true");
-      else if (starts_with(arg, "-hreload"))
-        config.hot_reload = true;
-      else if (starts_with(arg, "-compiler="))
-        config.compiler = arg.substr(10);
-      else if (starts_with(arg, "-target="))
-        config.target_executable = arg.substr(8);
-      else if (starts_with(arg, "-build_dir="))
-        config.build_dir = arg.substr(11);
-      else if (starts_with(arg, "-compiler_flags="))
-        config.compiler_flags = arg.substr(16);
-      else if (starts_with(arg, "-linker_flags="))
-        config.linker_flags = arg.substr(14);
-      else if (starts_with(arg, "-verbose="))
-        config.verbose = (arg.substr(9) == "true");
-      else if (starts_with(arg, "-v"))
-        config.verbose = true;
-      else if (starts_with(arg, "-pre_build_command="))
-        config.pre_build_command = arg.substr(19);
-      else if (starts_with(arg, "-post_build_command="))
-        config.post_build_command = arg.substr(20);
-      else if (starts_with(arg, "-default_run_args="))
-        config.default_run_args = arg.substr(18);
-      else if (starts_with(arg, "-override_run="))
-        config.override_run = (arg.substr(14) == "true");
-      else if (!config.extra_args)
-        bld::log(bld::Log_type::ERROR, "Unknown argument: " + arg);
-    }
-
-    // Save the updated configuration to file
-    config.save_to_file("build.conf");
-    bld::log(bld::Log_type::INFO, "Configuration saved to build.conf");
-  }
-
-  void handle_args(int argc, char *argv[])
-  {
-    std::vector<std::string> args;
-    if (args_to_vec(argc, argv, args))
-    {
-      Config::get().cmd_args = args;
-      if (args.size() <= 0)
-        return;
-      else
-      {
-        std::string command = args[0];
-        if (command == "run" && !Config::get().override_run)
-          handle_run_command(args);
-        else if (command == "config")
-          handle_config_command(args, argv[0]);
-      }
-    }
-  }
 }  // namespace bld
 
-//#define B_LDR_IMPLEMENTATION
 #ifdef B_LDR_IMPLEMENTATION
 
 #include <filesystem>
@@ -988,5 +913,108 @@ bool bld::Config::save_to_file(const std::string &filename)
   }
 
   return true;
+}
+
+int bld::handle_run_command(std::vector<std::string> args)
+{
+  if (args.size() > 1)
+  {
+    bld::log(bld::Log_type::ERROR, "Too many args for 'run' command");
+    return -1;
+  }
+  if (args.size() == 2)
+  {
+    bld::log(bld::Log_type::WARNING, "Command 'run' specified with the command");
+    bld::log(bld::Log_type::INFO, "Proceeding to run the specified command: " + args[1]);
+    bld::Command cmd(args[1]);
+    return bld::execute(cmd);
+  }
+
+  if (bld::Config::get().target_executable.empty())
+  {
+    bld::log(bld::Log_type::ERROR, "No target executable specified in config");
+    return -1;
+  }
+
+  bld::Command cmd;
+  cmd.parts.push_back(Config::get().target_executable);
+
+  return bld::execute(cmd);
+}
+
+bool bld::starts_with(const std::string &str, const std::string &prefix)
+{
+  if (prefix.size() > str.size())
+    return false;
+  return str.compare(0, prefix.size(), prefix) == 0;
+}
+
+void bld::handle_config_command(std::vector<std::string> args, std::string name)
+{
+  if (args.size() < 2)
+  {
+    log(bld::Log_type::ERROR, "Config command requires arguments");
+    std::string usage = name + " config -[key]=value \n" + "        E.g: ' " + name + " config -verbose=true '";
+    log(bld::Log_type::INFO, "Usage: " + usage);
+    return;
+  }
+
+  auto &config = bld::Config::get();
+
+  for (size_t i = 1; i < args.size(); i++)
+  {
+    const auto &arg = args[i];
+    if (bld::starts_with(arg, "-hreload="))
+      config.hot_reload = (arg.substr(9) == "true");
+    else if (bld::starts_with(arg, "-hreload"))
+      config.hot_reload = true;
+    else if (bld::starts_with(arg, "-compiler="))
+      config.compiler = arg.substr(10);
+    else if (bld::starts_with(arg, "-target="))
+      config.target_executable = arg.substr(8);
+    else if (bld::starts_with(arg, "-build_dir="))
+      config.build_dir = arg.substr(11);
+    else if (bld::starts_with(arg, "-compiler_flags="))
+      config.compiler_flags = arg.substr(16);
+    else if (bld::starts_with(arg, "-linker_flags="))
+      config.linker_flags = arg.substr(14);
+    else if (bld::starts_with(arg, "-verbose="))
+      config.verbose = (arg.substr(9) == "true");
+    else if (bld::starts_with(arg, "-v"))
+      config.verbose = true;
+    else if (bld::starts_with(arg, "-pre_build_command="))
+      config.pre_build_command = arg.substr(19);
+    else if (bld::starts_with(arg, "-post_build_command="))
+      config.post_build_command = arg.substr(20);
+    else if (bld::starts_with(arg, "-default_run_args="))
+      config.default_run_args = arg.substr(18);
+    else if (bld::starts_with(arg, "-override_run="))
+      config.override_run = (arg.substr(14) == "true");
+    else if (!config.extra_args)
+      bld::log(bld::Log_type::ERROR, "Unknown argument: " + arg);
+  }
+
+  // Save the updated configuration to file
+  config.save_to_file("build.conf");
+  bld::log(bld::Log_type::INFO, "Configuration saved to build.conf");
+}
+
+void bld::handle_args(int argc, char *argv[])
+{
+  std::vector<std::string> args;
+  if (bld::args_to_vec(argc, argv, args))
+  {
+    bld::Config::get().cmd_args = args;
+    if (args.size() <= 0)
+      return;
+    else
+    {
+      std::string command = args[0];
+      if (command == "run" && !Config::get().override_run)
+        bld::handle_run_command(args);
+      else if (command == "config")
+        bld::handle_config_command(args, argv[0]);
+    }
+  }
 }
 #endif

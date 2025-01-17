@@ -13,8 +13,6 @@ int main(int argc, char *argv[])
   // Initialize configuration
   auto &config = bld::Config::get();
 
-  config.compiler = "clang++";
-
   if (config.compiler == "clang++")
     std::cout << "Works!\n";
 
