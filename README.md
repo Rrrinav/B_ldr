@@ -1,4 +1,4 @@
-# Builder (b_ldr)
+# Builder (bld)
 
 A simple C++ build system that uses C++ as the scripting language thus doesn't need any new tools to be installed.
 Moreover, it is easier because well, it uses C++ as a scripting language.
@@ -17,11 +17,11 @@ Because [Tsoding](github.com/tsoding) said you should write your own build syste
 
 ## Installation
 
-To use `b_ldr` in your project, include the `b_ldr.hpp` header file and define `B_LDR_IMPLEMENTATION` in one of your source files to include the implementation.
+To use `bld` in your project, include the `bld.hpp` header file and define `B_LDR_IMPLEMENTATION` in one of your source files to include the implementation.
 
 ```cpp
 #define B_LDR_IMPLEMENTATION
-#include "b_ldr.hpp"
+#include "bld.hpp"
 ```
 
 ## Usage
@@ -31,9 +31,9 @@ To use `b_ldr` in your project, include the `b_ldr.hpp` header file and define `
 Log messages with different severity levels:
 
 ```cpp
-b_ldr::log(b_ldr::Log_type::INFO, "This is an info message.");
-b_ldr::log(b_ldr::Log_type::WARNING, "This is a warning message.");
-b_ldr::log(b_ldr::Log_type::ERROR, "This is an error message.");
+bld::log(bld::Log_type::INFO, "This is an info message.");
+bld::log(bld::Log_type::WARNING, "This is a warning message.");
+bld::log(bld::Log_type::ERROR, "This is an error message.");
 ```
 
 ### Command Execution
@@ -41,15 +41,15 @@ b_ldr::log(b_ldr::Log_type::ERROR, "This is an error message.");
 Create and execute commands:
 
 ```cpp
-b_ldr::Command cmd("ls", "-la");
-int result = b_ldr::execute(cmd);
+bld::Command cmd("ls", "-la");
+int result = bld::execute(cmd);
 ```
 
 Execute shell commands:
 
 ```cpp
 std::string shell_cmd = "echo Hello, World!";
-int result = b_ldr::execute_shell(shell_cmd);
+int result = bld::execute_shell(shell_cmd);
 ```
 
 ### Process Output
@@ -58,8 +58,8 @@ Capture the output of a command:
 
 ```cpp
 std::string output;
-b_ldr::Command cmd("ls", "-la");
-bool success = b_ldr::read_process_output(cmd, output);
+bld::Command cmd("ls", "-la");
+bool success = bld::read_process_output(cmd, output);
 ```
 
 Capture the output of a shell command:
@@ -67,7 +67,7 @@ Capture the output of a shell command:
 ```cpp
 std::string output;
 std::string shell_cmd = "echo Hello, World!";
-bool success = b_ldr::read_shell_output(shell_cmd, output);
+bool success = bld::read_shell_output(shell_cmd, output);
 ```
 
 ### File System
@@ -76,7 +76,7 @@ Check if an executable is up-to-date with it's file:
     This specific example tracks it's own executable file.
 
 ```cpp
-
+ // Requires arguments for main function
 int main(int argc, char *argv[])
 {
   // Check if the executable needs to be rebuilt and restart if necessary
@@ -90,7 +90,7 @@ int main(int argc, char *argv[])
 Print system metadata:
 
 ```cpp
-b_ldr::print_metadata();
+bld::print_metadata();
 ```
 
 
