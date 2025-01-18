@@ -46,7 +46,25 @@ Copyright Dec 2025, Rinav (github: rrrinav)
 // Same but with compiler specified...
 #define C_BLD_REBUILD_YOURSELF_ONCHANGE(compiler) bld::rebuild_yourself_onchange_and_run(__FILE__, argv[0], compiler)
 
+/* @brief: Handle command-line arguments
+ * @description: Takes argc and argv and calls bld::handle_args() with them.
+ *    Right now, it only handles 'run' and 'config' commands.
+ *    Read the documentation of function for more information.
+ */
 #define HANDLE_ARGS() bld::handle_args(argc, argv)
+
+/* File to save the configuration to.
+ * You can change this to any file name you want.
+ */
+#define DEFAULT_CONFIG_FILE "build.conf"
+
+/*
+ * INFO:The USE_CONFIG macro is used to enable or disable the configuration system in your build tool. When USE_CONFIG is defined, the Config class and its related
+ * functionality are included in the program because you can't access singleton using Config::get().
+ * When USE_CONFIG is not defined, the configuration system is disabled, and the program operates without it.
+ *
+ * I dont know why I didn't wrap whole class in the macro. Probably because I want to extend it later to not just be a singleton.
+*/
 
 namespace bld
 {
@@ -97,7 +115,7 @@ namespace bld
     // @return ( std::string ): Get the command as a printable string wrapped in single quotes
     std::string get_print_string() const;
   };
-  
+
   // Class to save configuration
   class Config
   {
@@ -119,7 +137,7 @@ namespace bld
     bool hot_reload;
     // if verbose output is enabled.
     bool verbose;
-    // Override the run command.. It will disable default run command ( runs target executable )
+    // Override the run command.. If true, it will disable default run command ( runs target executable )
     bool override_run;
     // If user wants to execute their own commands, won't log error if somehting other than "config" or "run" is passed
     bool extra_args;
@@ -155,13 +173,13 @@ namespace bld
      */
     void init();
 
-    /* @brief: Load the configuration from a file "./build.conf"
+    /* @brief: Load the configuration from a file (DEFAULT_CONFIG_FILE: "./build.conf")
      * @param filename ( std::string ): Name of the file to load the configuration from
      * @description: Load the configuration from a file. The file should be in the format of key=value pairs.
      */
     bool load_from_file(const std::string &filename);
 
-    /* @brief: Save the configuration to a file "./build.conf"
+    /* @brief: Save the configuration to a file (DEFAULT_CONFIG_FILE: "./build.conf")
      * @param filename ( std::string ): Name of the file to save the configuration to.
      * @description: Save the configuration to a file. The file will be in the format of key=value pairs.
      */
@@ -808,13 +826,19 @@ bld::Config::Config() : hot_reload_files(), cmd_args()
 
   init();
   // Automatically load configuration if the file exists
-  if (std::filesystem::exists("build.conf"))
-    load_from_file("build.conf");
+  if (std::filesystem::exists(DEFAULT_CONFIG_FILE))
+    load_from_file(DEFAULT_CONFIG_FILE);
 }
+
 bld::Config &bld::Config::get()
 {
+#ifdef USE_CONFIG
   static Config instance;
   return instance;
+#else
+  bld::log(bld::Log_type::ERROR, "Config is disabled. Please enable USE_CONFIG macro to use the Config class.");
+  exit(1);
+#endif  // USE_CONFIG
 }
 
 void bld::Config::init()
@@ -950,29 +974,54 @@ bool bld::Config::save_to_file(const std::string &filename)
 
 int bld::handle_run_command(std::vector<std::string> args)
 {
-  if (args.size() > 1)
-  {
-    bld::log(bld::Log_type::ERROR, "Too many args for 'run' command");
-    return -1;
-  }
+#ifdef USE_CONFIG
   if (args.size() == 2)
   {
-    bld::log(bld::Log_type::WARNING, "Command 'run' specified with the command");
+    bld::log(bld::Log_type::WARNING, "Command 'run' specified with the executable");
     bld::log(bld::Log_type::INFO, "Proceeding to run the specified command: " + args[1]);
     bld::Command cmd(args[1]);
     return bld::execute(cmd);
   }
-
+  else if (args.size() > 2)
+  {
+    bld::log(bld::Log_type::ERROR, "Too many arguments for 'run' command. Only executables are supported.");
+    bld::log(bld::Log_type::INFO, "Usage: run <executable>");
+    exit(EXIT_FAILURE);
+  }
   if (bld::Config::get().target_executable.empty())
   {
     bld::log(bld::Log_type::ERROR, "No target executable specified in config");
-    return -1;
+    exit(1);
   }
 
   bld::Command cmd;
   cmd.parts.push_back(Config::get().target_executable);
 
-  return bld::execute(cmd);
+  bld::execute(cmd);
+  exit(EXIT_SUCCESS);
+#else
+  if (args.size() < 2)
+  {
+    bld::log(bld::Log_type::ERROR,
+             "No target executable specified in config. Config is disabled. Please enable USE_CONFIG macro to use the Config class.");
+    exit(EXIT_FAILURE);
+  }
+  else if (args.size() == 2)
+  {
+    bld::log(bld::Log_type::WARNING, "Command 'run' specified with the executable");
+    bld::log(bld::Log_type::INFO, "Proceeding to run the specified command: " + args[1]);
+    bld::Command cmd(args[1]);
+    return bld::execute(cmd);
+  }
+  else if (args.size() > 2)
+  {
+    bld::log(bld::Log_type::ERROR, "Too many arguments for 'run' command. Only executables are supported.");
+    bld::log(bld::Log_type::INFO, "Usage: run <executable>");
+    exit(EXIT_FAILURE);
+  }
+#endif
+  bld::log(bld::Log_type::ERROR, "Should never be reached: " + std::to_string(__LINE__));
+  exit(EXIT_FAILURE);
 }
 
 bool bld::starts_with(const std::string &str, const std::string &prefix)
@@ -1026,8 +1075,8 @@ void bld::handle_config_command(std::vector<std::string> args, std::string name)
   }
 
   // Save the updated configuration to file
-  config.save_to_file("build.conf");
-  bld::log(bld::Log_type::INFO, "Configuration saved to build.conf");
+  config.save_to_file(DEFAULT_CONFIG_FILE);
+  bld::log(bld::Log_type::INFO, "Configuration saved to: " + std::string(DEFAULT_CONFIG_FILE));
 }
 
 void bld::handle_args(int argc, char *argv[])
@@ -1041,10 +1090,23 @@ void bld::handle_args(int argc, char *argv[])
     else
     {
       std::string command = args[0];
-      if (command == "run" && !Config::get().override_run)
+      if (command == "run")
+      {
+#ifdef USE_CONFIG
+        if (!bld::Config::get().override_run)
+          bld::handle_run_command(args);
+#else
         bld::handle_run_command(args);
+#endif
+      }
       else if (command == "config")
+      {
+#ifdef USE_CONFIG
         bld::handle_config_command(args, argv[0]);
+#else
+        bld::log(bld::Log_type::ERROR, "Config is disabled. Please enable USE_CONFIG macro to use the Config class.");
+#endif  // USE_CONFIG
+      }
     }
   }
 }

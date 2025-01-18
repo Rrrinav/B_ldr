@@ -1,5 +1,6 @@
 #define B_LDR_IMPLEMENTATION
 #include <cstdlib>  // For std::exit
+#define USE_CONFIG
 
 #include "./b_ldr.hpp"
 
@@ -13,14 +14,10 @@ int main(int argc, char *argv[])
   // Initialize configuration
   auto &config = bld::Config::get();
 
-  if (config.compiler == "clang++")
-    std::cout << "Works!\n";
-
-  if (config.hot_reload)
-    std::cout << "Hot reload is enabled" << std::endl;
+  if (config.compiler == "kk")
+    std::cout << "Compiler!\n";
 
   config.save_to_file("build.conf");
 
-  return 0;
   return 0;
 }
