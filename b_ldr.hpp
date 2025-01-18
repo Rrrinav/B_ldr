@@ -33,6 +33,8 @@ Copyright Dec 2025, Rinav (github: rrrinav)
 #include <cerrno>
 #include <clocale>
 #include <cstring>
+#include <filesystem>
+#include <fstream>
 #include <string>
 #include <vector>
 
@@ -68,7 +70,7 @@ Copyright Dec 2025, Rinav (github: rrrinav)
 
 namespace bld
 {
-  // Log type is enumeration for bld::function to show type of log
+  // Log type is enumeration for bld::function to show type of loc>
   enum class Log_type
   {
     INFO,
@@ -320,6 +322,94 @@ namespace bld
    */
   bool starts_with(const std::string &str, const std::string &prefix);
 
+  /* @brief: Read entire file content into a string
+   * @param path: Path to the file
+   * @param content: Reference to string where content will be stored
+   * @return: True if successful, false otherwise
+   */
+  bool read_file(const std::string &path, std::string &content);
+
+  /* @brief: Write string content to a file
+   * @param path: Path to the file
+   * @param content: Content to write
+   * @return: true if successful, false otherwise
+   */
+  bool write_entire_file(const std::string &path, const std::string &content);
+
+  /* @brief: Append string content to a file
+   * @param path: Path to the file
+   * @param content: Content to append
+   * @return: true if successful, false otherwise
+   */
+  bool append_file(const std::string &path, const std::string &content);
+
+  /* @brief: Read file line by line, calling a function for each line
+   * @param path: Path to the file
+   * @param func: Function to call for each line
+   * @return: true if successful, false otherwise
+   */
+  bool read_lines(const std::string &path, std::vector<std::string> &lines);
+
+  /* @brief: Replace text in file
+   * @param path: Path to the file
+   * @param from: Text to replace
+   * @param to: Text to replace with
+   * @return: true if successful, false otherwise
+   */
+  bool replace_in_file(const std::string &path, const std::string &from, const std::string &to);
+
+  /* @brief: Copy a file
+   * @param from: Source path
+   * @param to: Destination path
+   * @param overwrite = true: Whether to overwrite if destination exists
+   * @return: true if successful, false otherwise
+   */
+  bool copy_file(const std::string &from, const std::string &to, bool overwrite = false);
+
+  /* @brief: Move/Rename a file
+   * @param from: Source path
+   * @param to: Destination path
+   * @return: true if successful, false otherwise
+   */
+  bool move_file(const std::string &from, const std::string &to);
+
+  /* @brief: Get file extension
+   * @param path: Path to the file
+   * @return: File extension including the dot, or empty string if none
+   */
+  std::string get_extension(const std::string &path);
+
+  /* @brief: Create directory and all parent directories if they don't exist
+   * @param path: Path to create
+   * @return: true if successful, false otherwise
+   */
+  bool create_directory(const std::string &path);
+
+  /* @brief: Create directory and all parent directories if they don't exist
+   * @param path: Path to create
+   * @return: true if successful, false otherwise
+   */
+  bool create_dir_if_not_exists(const std::string &path);
+
+  /* @brief: Remove directory and all its contents if it exists
+   * @param path: Path to remove
+   * @return: true if successful, false otherwise
+   */
+  bool remove_dir(const std::string &path);
+
+  /* @brief: Get list of all files in directory
+   * @param path: Directory path
+   * @param recursive = true: Whether to include files in subdirectories
+   * @return: Vector of file paths
+   */
+  std::vector<std::string> list_files_in_dir(const std::string &path, bool recursive = false);
+
+  /* @brief: Get list of all directories in directory
+   * @param path: Directory path
+   * @param recursive = true: Whether to include subdirectories of subdirectories
+   * @return: Vector of directory paths
+   */
+  std::vector<std::string> list_directories(const std::string &path, bool recursive = false);
 }  // namespace bld
 
 #ifdef B_LDR_IMPLEMENTATION
@@ -1109,5 +1199,252 @@ void bld::handle_args(int argc, char *argv[])
       }
     }
   }
+}
+
+bool bld::read_file(const std::string &path, std::string &content)
+{
+  if (!std::filesystem::exists(path))
+  {
+    bld::log(bld::Log_type::ERROR, "File does not exist: " + path);
+    return false;
+  }
+
+  std::ifstream file(path, std::ios::binary);
+
+  if (!file)
+  {
+    bld::log(bld::Log_type::ERROR, "Failed to open file: " + path);
+    return false;
+  }
+
+  content = std::string(std::istreambuf_iterator<char>(file), std::istreambuf_iterator<char>());
+  file.close();
+  return true;
+}
+
+bool bld::write_entire_file(const std::string &path, const std::string &content)
+{
+  std::ofstream file(path, std::ios::binary);
+
+  if (!file)
+  {
+    bld::log(bld::Log_type::ERROR, "Failed to open file for writing: " + path);
+    return false;
+  }
+
+  file << content;
+  bool success = file.good();
+  file.close();
+  return success;
+}
+
+bool bld::append_file(const std::string &path, const std::string &content)
+{
+  std::ofstream file(path, std::ios::app | std::ios::binary);
+  if (!file)
+  {
+    bld::log(bld::Log_type::ERROR, "Failed to open file for appending: " + path);
+    return false;
+  }
+
+  file << content;
+  bool success = file.good();
+  file.close();
+  return success;
+}
+
+bool bld::read_lines(const std::string &path, std::vector<std::string> &lines)
+{
+  std::ifstream file(path);
+  if (!file)
+  {
+    bld::log(bld::Log_type::ERROR, "Failed to open file: " + path);
+    return false;
+  }
+
+  std::string line;
+  while (std::getline(file, line))
+    lines.push_back(line);
+
+  return true;
+}
+
+bool bld::replace_in_file(const std::string &path, const std::string &from, const std::string &to)
+{
+  std::string content = "";
+  if (!bld::read_file(path, content))
+  {
+    bld::log(bld::Log_type::ERROR, "Failed to read file: " + path);
+    return false;
+  }
+  if (content.empty())
+  {
+    bld::log(bld::Log_type::ERROR, "Failed to read file or it is empty: " + path);
+    return false;
+  }
+  size_t pos = 0;
+  while ((pos = content.find(from, pos)) != std::string::npos)
+  {
+    content.replace(pos, from.length(), to);
+    pos += to.length();
+  }
+
+  return bld::write_entire_file(path, content);
+}
+
+bool bld::copy_file(const std::string &from, const std::string &to, bool overwrite)
+{
+  try
+  {
+    if (!overwrite && std::filesystem::exists(to))
+    {
+      bld::log(bld::Log_type::ERROR, "Destination file already exists: " + to);
+      return false;
+    }
+    std::filesystem::copy_file(from, to,
+                               overwrite ? std::filesystem::copy_options::overwrite_existing : std::filesystem::copy_options::none);
+    return true;
+  }
+  catch (const std::filesystem::filesystem_error &e)
+  {
+    bld::log(bld::Log_type::ERROR, "Failed to copy file: " + std::string(e.what()));
+    return false;
+  }
+}
+
+bool bld::move_file(const std::string &from, const std::string &to)
+{
+  try
+  {
+    std::filesystem::rename(from, to);
+    return true;
+  }
+  catch (const std::filesystem::filesystem_error &e)
+  {
+    bld::log(bld::Log_type::ERROR, "Failed to move file: " + std::string(e.what()));
+    return false;
+  }
+}
+
+std::string bld::get_extension(const std::string &path)
+{
+  if (!std::filesystem::exists(path))
+  {
+    bld::log(bld::Log_type::ERROR, "File for extension request does not exist: " + path);
+    return "";
+  }
+  std::filesystem::path p(path);
+  return p.extension().string();
+}
+
+bool bld::create_directory(const std::string &path)
+{
+  try
+  {
+    return std::filesystem::create_directories(path);
+  }
+  catch (const std::filesystem::filesystem_error &e)
+  {
+    bld::log(bld::Log_type::ERROR, "Failed to create directory: " + std::string(e.what()));
+    return false;
+  }
+}
+
+bool bld::create_dir_if_not_exists(const std::string &path)
+{
+  if (std::filesystem::exists(path))
+  {
+    bld::log(bld::Log_type::INFO, "Directory to create already exists: " + path);
+    return true;
+  }
+
+  try
+  {
+    bool created = std::filesystem::create_directories(path);
+    if (created)
+      bld::log(bld::Log_type::INFO, "Directory created: " + path);
+    else
+      bld::log(bld::Log_type::ERROR, "Failed to create directory: " + path);
+    return created;
+  }
+  catch (const std::filesystem::filesystem_error &e)
+  {
+    bld::log(bld::Log_type::ERROR, "Failed to create directory: " + std::string(e.what()));
+    return false;
+  }
+}
+
+bool bld::remove_dir(const std::string &path)
+{
+  if (!std::filesystem::exists(path))
+  {
+    bld::log(bld::Log_type::INFO, "Directory does not exist: " + path);
+    return true;
+  }
+
+  try
+  {
+    std::uintmax_t removed_count = std::filesystem::remove_all(path);
+    if (removed_count > 0)
+      bld::log(bld::Log_type::INFO, "Directory removed: " + path);
+    else
+      bld::log(bld::Log_type::ERROR, "Failed to remove directory: " + path);
+    return removed_count > 0;
+  }
+  catch (const std::filesystem::filesystem_error &e)
+  {
+    bld::log(bld::Log_type::ERROR, "Failed to remove directory: " + std::string(e.what()));
+    return false;
+  }
+}
+
+std::vector<std::string> bld::list_files_in_dir(const std::string &path, bool recursive)
+{
+  std::vector<std::string> files;
+  try
+  {
+    if (recursive)
+    {
+      for (const auto &entry : std::filesystem::recursive_directory_iterator(path))
+        if (entry.is_regular_file())
+          files.push_back(entry.path().string());
+    }
+    else
+    {
+      for (const auto &entry : std::filesystem::directory_iterator(path))
+        if (entry.is_regular_file())
+          files.push_back(entry.path().string());
+    }
+  }
+  catch (const std::filesystem::filesystem_error &e)
+  {
+    bld::log(bld::Log_type::ERROR, "Failed to list files: " + std::string(e.what()));
+  }
+  return files;
+}
+
+std::vector<std::string> bld::list_directories(const std::string &path, bool recursive)
+{
+  std::vector<std::string> directories;
+  try
+  {
+    if (recursive)
+    {
+      for (const auto &entry : std::filesystem::recursive_directory_iterator(path))
+        if (entry.is_directory())
+          directories.push_back(entry.path().string());
+    }
+    else
+    {
+      for (const auto &entry : std::filesystem::directory_iterator(path))
+        if (entry.is_directory())
+          directories.push_back(entry.path().string());
+    }
+  }
+  catch (const std::filesystem::filesystem_error &e)
+  {
+    bld::log(bld::Log_type::ERROR, "Failed to list directories: " + std::string(e.what()));
+  }
+  return directories;
 }
 #endif
