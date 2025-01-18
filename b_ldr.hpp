@@ -97,7 +97,8 @@ namespace bld
     // @return ( std::string ): Get the command as a printable string wrapped in single quotes
     std::string get_print_string() const;
   };
-
+  
+  // Class to save configuration
   class Config
   {
   private:
@@ -106,28 +107,64 @@ namespace bld
     Config &operator=(const Config &) = delete;
 
   public:
+    /* Most of these options are just to save the configuration and wont be used by the library itself.
+     * It is upto the user to use them or not and infact how to use them.
+     * However, some of them are used by the library itself and are important.
+     * 1. override_run: If set to true, it will disable the default run command and will not run the target executable.
+     * 2. target_executable: Target executable to run. If not provided, it will run the target executable from config.
+     * 3. cmd_args: It saves the command line arguments passed to the program.
+     */
+
+    // if hot reload is enabled
     bool hot_reload;
+    // if verbose output is enabled.
     bool verbose;
+    // Override the run command.. It will disable default run command ( runs target executable )
     bool override_run;
+    // If user wants to execute their own commands, won't log error if somehting other than "config" or "run" is passed
     bool extra_args;
+    // Compiler command to use.
     std::string compiler;
+    // Target executable to run
     std::string target_executable;
+    // Target platform E.g win32, linux, darwin
     std::string target_platform;
+    // Build directory
     std::string build_dir;
+    // Compiler flags
     std::string compiler_flags;
+    // Linker flags
     std::string linker_flags;
+    // Command to run before build
     std::string pre_build_command;
+    // Command to run after build
     std::string post_build_command;
-    std::string default_run_args;
+    // Files to hot reload
     std::vector<std::string> hot_reload_files;
+    // Save the command line arguments
     std::vector<std::string> cmd_args;
 
+    /* @brief: Get the singleton instance of the Config class
+     * @description: This class works as a singleton and this function returns the instance of the class, this will be the only instance.
+     */
     static Config &get();
 
+    /* @brief: Initialize the configuration with default values
+     * @description: sets the default values for the configuration
+     *  compiler & target_platform if not provided
+     */
     void init();
 
+    /* @brief: Load the configuration from a file "./build.conf"
+     * @param filename ( std::string ): Name of the file to load the configuration from
+     * @description: Load the configuration from a file. The file should be in the format of key=value pairs.
+     */
     bool load_from_file(const std::string &filename);
 
+    /* @brief: Save the configuration to a file "./build.conf"
+     * @param filename ( std::string ): Name of the file to save the configuration to.
+     * @description: Save the configuration to a file. The file will be in the format of key=value pairs.
+     */
     bool save_to_file(const std::string &filename);
   };
 
@@ -239,8 +276,9 @@ namespace bld
   /* @brief: Handle command-line arguments
    * @param argc ( int ): Number of arguments
    * @param argv ( char*[] ): Array of arguments
-   * @description: Handle command-line arguments and set the configuration.
-   *  Takes main function arguments and sets the configuration based on the arguments.
+   * @description: Handle command-line arguments... Currently only handles 'run' and 'config' commands.
+   *    run: Run the target executable or execute the command provided after run 'run <command>'
+   *    config: Set the configuration for the build system and save it to a file. Saving is not handled by function but Config class.
    */
   void handle_args(int argc, char *argv[]);
 
@@ -767,7 +805,6 @@ bld::Config::Config() : hot_reload_files(), cmd_args()
   linker_flags = "";
   pre_build_command = "";
   post_build_command = "";
-  default_run_args = "";
 
   init();
   // Automatically load configuration if the file exists
@@ -849,8 +886,6 @@ bool bld::Config::load_from_file(const std::string &filename)
       pre_build_command = value;
     else if (key == "post_build_command")
       post_build_command = value;
-    else if (key == "default_run_args")
-      default_run_args = value;
     else if (key == "override_run")
       override_run = (value == "true");
     else if (key == "hot_reload_files")
@@ -895,8 +930,6 @@ bool bld::Config::save_to_file(const std::string &filename)
     file << "pre_build_command=" << pre_build_command << "\n";
   if (!post_build_command.empty())
     file << "post_build_command=" << post_build_command << "\n";
-  if (!default_run_args.empty())
-    file << "default_run_args=" << default_run_args << "\n";
   if (override_run)
     file << "override_run=true\n";
 
@@ -986,8 +1019,6 @@ void bld::handle_config_command(std::vector<std::string> args, std::string name)
       config.pre_build_command = arg.substr(19);
     else if (bld::starts_with(arg, "-post_build_command="))
       config.post_build_command = arg.substr(20);
-    else if (bld::starts_with(arg, "-default_run_args="))
-      config.default_run_args = arg.substr(18);
     else if (bld::starts_with(arg, "-override_run="))
       config.override_run = (arg.substr(14) == "true");
     else if (!config.extra_args)
