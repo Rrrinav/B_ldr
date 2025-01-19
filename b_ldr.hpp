@@ -24,6 +24,8 @@ Copyright Dec 2025, Rinav (github: rrrinav)
 #include <sys/utsname.h>
 #include <sys/wait.h>
 
+#include <unordered_map>
+
 #ifdef _WIN32
 #include <Windows.h>
 #else
@@ -33,8 +35,6 @@ Copyright Dec 2025, Rinav (github: rrrinav)
 #include <cerrno>
 #include <clocale>
 #include <cstring>
-#include <filesystem>
-#include <fstream>
 #include <string>
 #include <vector>
 
@@ -53,17 +53,18 @@ Copyright Dec 2025, Rinav (github: rrrinav)
  *    Right now, it only handles 'run' and 'config' commands.
  *    Read the documentation of function for more information.
  */
-#define HANDLE_ARGS() bld::handle_args(argc, argv)
+#define BLD_HANDLE_ARGS() bld::handle_args(argc, argv)
 
 /* File to save the configuration to.
  * You can change this to any file name you want.
  */
-#define DEFAULT_CONFIG_FILE "build.conf"
+#define BLD_DEFAULT_CONFIG_FILE "build.conf"
 
 /*
- * INFO:The USE_CONFIG macro is used to enable or disable the configuration system in your build tool. When USE_CONFIG is defined, the Config class and its related
+ * INFO:The BLD_USE_CONFIG macro is used to enable or disable the configuration system in your build tool. When BLD_USE_CONFIG is defined, the Config class and its related
  * functionality are included in the program because you can't access singleton using Config::get().
- * When USE_CONFIG is not defined, the configuration system is disabled, and the program operates without it.
+ * When BLD_USE_CONFIG is not defined, the configuration system is disabled, and the program operates without it.
+ * You can define your own configuration system or use the Config class directly.
  *
  * I dont know why I didn't wrap whole class in the macro. Probably because I want to extend it later to not just be a singleton.
 */
@@ -127,12 +128,15 @@ namespace bld
     Config &operator=(const Config &) = delete;
 
   public:
-    /* Most of these options are just to save the configuration and wont be used by the library itself.
+    /* INFO: Most of these options are just to save the configuration and wont be used by the library itself.
      * It is upto the user to use them or not and infact how to use them.
      * However, some of them are used by the library itself and are important.
      * 1. override_run: If set to true, it will disable the default run command and will not run the target executable.
      * 2. target_executable: Target executable to run. If not provided, it will run the target executable from config.
      * 3. cmd_args: It saves the command line arguments passed to the program.
+     *
+     * There are some params that can't be set in commnad line and are to be set in program itself.
+     * 1. extra_args 2. extra_config_keys 3. the keys themself (you can only provide values in command line).
      */
 
     // if hot reload is enabled
@@ -143,6 +147,8 @@ namespace bld
     bool override_run;
     // If user wants to execute their own commands, won't log error if somehting other than "config" or "run" is passed
     bool extra_args;
+    // If user wants to add extra configuration keys.
+    bool use_extra_config_keys;
     // Compiler command to use.
     std::string compiler;
     // Target executable to run
@@ -163,6 +169,10 @@ namespace bld
     std::vector<std::string> hot_reload_files;
     // Save the command line arguments
     std::vector<std::string> cmd_args;
+    // Extra configuration keys-value pairs
+    std::unordered_map<std::string, std::string> extra_config_val;
+    // Extra configuration keys-bool pairs
+    std::unordered_map<std::string, bool> extra_config_bool;
 
     /* @brief: Get the singleton instance of the Config class
      * @description: This class works as a singleton and this function returns the instance of the class, this will be the only instance.
@@ -175,13 +185,13 @@ namespace bld
      */
     void init();
 
-    /* @brief: Load the configuration from a file (DEFAULT_CONFIG_FILE: "./build.conf")
+    /* @brief: Load the configuration from a file BLD_DEFAULT_CONFIG_FILE: "./build.conf")
      * @param filename ( std::string ): Name of the file to load the configuration from
      * @description: Load the configuration from a file. The file should be in the format of key=value pairs.
      */
     bool load_from_file(const std::string &filename);
 
-    /* @brief: Save the configuration to a file (DEFAULT_CONFIG_FILE: "./build.conf")
+    /* @brief: Save the configuration to a file BLD_DEFAULT_CONFIG_FILE: "./build.conf")
      * @param filename ( std::string ): Name of the file to save the configuration to.
      * @description: Save the configuration to a file. The file will be in the format of key=value pairs.
      */
@@ -414,6 +424,7 @@ namespace bld
 
 #ifdef B_LDR_IMPLEMENTATION
 
+#include <algorithm>
 #include <filesystem>
 #include <fstream>
 #include <iostream>
@@ -881,7 +892,7 @@ void bld::rebuild_yourself_onchange(const std::string &filename, const std::stri
     // Execute the compile command
     if (bld::execute(cmd) <= 0)
     {
-      bld::log(Log_type::ERROR, "Failed to rebuild executable.");
+      bld::log(Log_type::WARNING, "Failed to rebuild executable.");
       return;
     }
   }
@@ -902,9 +913,10 @@ bool bld::args_to_vec(int argc, char *argv[], std::vector<std::string> &args)
 bld::Config::Config() : hot_reload_files(), cmd_args()
 {
   hot_reload = false;
-  extra_args = true;
+  extra_args = false;
   verbose = false;
   override_run = false;
+  use_extra_config_keys = false;
   compiler = "";
   target_executable = "";
   target_platform = "";
@@ -916,19 +928,19 @@ bld::Config::Config() : hot_reload_files(), cmd_args()
 
   init();
   // Automatically load configuration if the file exists
-  if (std::filesystem::exists(DEFAULT_CONFIG_FILE))
-    load_from_file(DEFAULT_CONFIG_FILE);
+  if (std::filesystem::exists(BLD_DEFAULT_CONFIG_FILE))
+    load_from_file(BLD_DEFAULT_CONFIG_FILE);
 }
 
 bld::Config &bld::Config::get()
 {
-#ifdef USE_CONFIG
+#ifdef BLD_USE_CONFIG
   static Config instance;
   return instance;
 #else
-  bld::log(bld::Log_type::ERROR, "Config is disabled. Please enable USE_CONFIG macro to use the Config class.");
+  bld::log(bld::Log_type::ERROR, "Config is disabled. Please enable BLD_USE_CONFIG macro to use the Config class.");
   exit(1);
-#endif  // USE_CONFIG
+#endif  // BLD_USE_CONFIG
 }
 
 void bld::Config::init()
@@ -1064,7 +1076,7 @@ bool bld::Config::save_to_file(const std::string &filename)
 
 int bld::handle_run_command(std::vector<std::string> args)
 {
-#ifdef USE_CONFIG
+#ifdef BLD_USE_CONFIG
   if (args.size() == 2)
   {
     bld::log(bld::Log_type::WARNING, "Command 'run' specified with the executable");
@@ -1093,7 +1105,7 @@ int bld::handle_run_command(std::vector<std::string> args)
   if (args.size() < 2)
   {
     bld::log(bld::Log_type::ERROR,
-             "No target executable specified in config. Config is disabled. Please enable USE_CONFIG macro to use the Config class.");
+             "No target executable specified in config. Config is disabled. Please enable BLD_USE_CONFIG macro to use the Config class.");
     exit(EXIT_FAILURE);
   }
   else if (args.size() == 2)
@@ -1152,7 +1164,7 @@ void bld::handle_config_command(std::vector<std::string> args, std::string name)
       config.linker_flags = arg.substr(14);
     else if (bld::starts_with(arg, "-verbose="))
       config.verbose = (arg.substr(9) == "true");
-    else if (bld::starts_with(arg, "-v"))
+    else if (bld::starts_with(arg, "-v") && arg.size() == 2)
       config.verbose = true;
     else if (bld::starts_with(arg, "-pre_build_command="))
       config.pre_build_command = arg.substr(19);
@@ -1160,13 +1172,79 @@ void bld::handle_config_command(std::vector<std::string> args, std::string name)
       config.post_build_command = arg.substr(20);
     else if (bld::starts_with(arg, "-override_run="))
       config.override_run = (arg.substr(14) == "true");
-    else if (!config.extra_args)
-      bld::log(bld::Log_type::ERROR, "Unknown argument: " + arg);
+    else if (bld::starts_with(arg, "-hr_files="))
+    {
+      config.hot_reload_files.clear();
+      std::stringstream fs(arg.substr(7));
+      std::string file;
+      while (std::getline(fs, file, ','))
+        config.hot_reload_files.push_back(file);
+    }
+    else if (bld::starts_with(arg, "-hr_files_app="))
+    {
+      std::stringstream fs(arg.substr(7));
+      std::string file;
+      while (std::getline(fs, file, ','))
+        if (std::find(config.hot_reload_files.begin(), config.hot_reload_files.end(), file) == config.hot_reload_files.end())
+          config.hot_reload_files.push_back(file);
+        else
+          bld::log(bld::Log_type::WARNING, "File already exists in hot reload list: " + file);
+    }
+    else if (bld::starts_with(arg, "-hr_files_rem="))
+    {
+      std::stringstream fs(arg.substr(7));
+      std::string file;
+      while (std::getline(fs, file, ','))
+      {
+        auto it = std::find(config.hot_reload_files.begin(), config.hot_reload_files.end(), file);
+        if (it != config.hot_reload_files.end())
+          config.hot_reload_files.erase(it);
+        else
+          bld::log(bld::Log_type::WARNING, "File not found in hot reload list: " + file);
+      }
+    }
+    else if (bld::starts_with(arg, "-") && config.use_extra_config_keys)
+    {
+      std::string key = arg.substr(1, arg.find('=') - 1);
+      std::string value = arg.substr(arg.find('=') + 1);
+      if (key.empty())
+      {
+        bld::log(bld::Log_type::WARNING, "Key not provided: " + arg + ". No value will be set!");
+        continue;
+      }
+      else if (value.empty())
+      {
+        bld::log(bld::Log_type::WARNING, "Value not provided: " + arg + ". No value will be set!");
+        continue;
+      }
+      else if (value == "true" || value == "false")
+      {
+        if (config.extra_config_bool.find(key) != config.extra_config_bool.end())
+          config.extra_config_bool[key] = (value == "true");
+        else
+          bld::log(bld::Log_type::WARNING, "Unknown key: " + key + ". No value will be set.");
+        continue;
+      }
+      else
+      {
+        if (config.extra_config_val.find(key) != config.extra_config_val.end())
+          config.extra_config_val[key] = (value == "true");
+        else
+          bld::log(bld::Log_type::WARNING, "Unknown key: " + key + ". No value will be set.");
+        continue;
+      }
+    }
+    else
+    {
+      bld::log(bld::Log_type::ERROR, "Unknown argument for config: ' " + arg + " '. Remember to use the format '-key=value'");
+      bld::log(bld::Log_type::INFO,
+               "If ' " + arg + " ' this is a valid key for config, consider configuring Config before 'BLD_HANDLE_ARGS' macro.");
+    }
   }
 
   // Save the updated configuration to file
-  config.save_to_file(DEFAULT_CONFIG_FILE);
-  bld::log(bld::Log_type::INFO, "Configuration saved to: " + std::string(DEFAULT_CONFIG_FILE));
+  config.save_to_file(BLD_DEFAULT_CONFIG_FILE);
+  bld::log(bld::Log_type::INFO, "Configuration saved to: " + std::string(BLD_DEFAULT_CONFIG_FILE));
 }
 
 void bld::handle_args(int argc, char *argv[])
@@ -1182,7 +1260,7 @@ void bld::handle_args(int argc, char *argv[])
       std::string command = args[0];
       if (command == "run")
       {
-#ifdef USE_CONFIG
+#ifdef BLD_USE_CONFIG
         if (!bld::Config::get().override_run)
           bld::handle_run_command(args);
 #else
@@ -1191,11 +1269,11 @@ void bld::handle_args(int argc, char *argv[])
       }
       else if (command == "config")
       {
-#ifdef USE_CONFIG
+#ifdef BLD_USE_CONFIG
         bld::handle_config_command(args, argv[0]);
 #else
-        bld::log(bld::Log_type::ERROR, "Config is disabled. Please enable USE_CONFIG macro to use the Config class.");
-#endif  // USE_CONFIG
+        bld::log(bld::Log_type::ERROR, "Config is disabled. Please enable BLD_USE_CONFIG macro to use the Config class.");
+#endif  // BLD_USE_CONFIG
       }
     }
   }
