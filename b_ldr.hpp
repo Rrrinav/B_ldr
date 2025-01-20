@@ -136,7 +136,8 @@ namespace bld
      * 3. cmd_args: It saves the command line arguments passed to the program.
      *
      * There are some params that can't be set in commnad line and are to be set in program itself.
-     * 1. extra_args 2. extra_config_keys 3. the keys themself (you can only provide values in command line).
+     * 1. extra_args 2. use_extra_config_keys 3. the keys themself (you can only provide values in command line).
+     * Make sure to set use_extra_config_keys before BLD_HANDLE_ARGS so the function knows whether to parse extra keys!
      */
 
     // if hot reload is enabled
@@ -331,100 +332,103 @@ namespace bld
    *  Uses std::string::compare() to compare the prefix with the string
    */
   bool starts_with(const std::string &str, const std::string &prefix);
+  namespace fs
+  {
+    /* @brief: Read entire file content into a string
+     * @param path: Path to the file
+     * @param content: Reference to string where content will be stored
+     * @return: True if successful, false otherwise
+     */
+    bool read_file(const std::string &path, std::string &content);
 
-  /* @brief: Read entire file content into a string
-   * @param path: Path to the file
-   * @param content: Reference to string where content will be stored
-   * @return: True if successful, false otherwise
-   */
-  bool read_file(const std::string &path, std::string &content);
+    /* @brief: Write string content to a file
+     * @param path: Path to the file
+     * @param content: Content to write
+     * @return: true if successful, false otherwise
+     */
+    bool write_entire_file(const std::string &path, const std::string &content);
 
-  /* @brief: Write string content to a file
-   * @param path: Path to the file
-   * @param content: Content to write
-   * @return: true if successful, false otherwise
-   */
-  bool write_entire_file(const std::string &path, const std::string &content);
+    /* @brief: Append string content to a file
+     * @param path: Path to the file
+     * @param content: Content to append
+     * @return: true if successful, false otherwise
+     */
+    bool append_file(const std::string &path, const std::string &content);
 
-  /* @brief: Append string content to a file
-   * @param path: Path to the file
-   * @param content: Content to append
-   * @return: true if successful, false otherwise
-   */
-  bool append_file(const std::string &path, const std::string &content);
+    /* @brief: Read file line by line, calling a function for each line
+     * @param path: Path to the file
+     * @param func: Function to call for each line
+     * @return: true if successful, false otherwise
+     */
+    bool read_lines(const std::string &path, std::vector<std::string> &lines);
 
-  /* @brief: Read file line by line, calling a function for each line
-   * @param path: Path to the file
-   * @param func: Function to call for each line
-   * @return: true if successful, false otherwise
-   */
-  bool read_lines(const std::string &path, std::vector<std::string> &lines);
+    /* @brief: Replace text in file
+     * @param path: Path to the file
+     * @param from: Text to replace
+     * @param to: Text to replace with
+     * @return: true if successful, false otherwise
+     */
+    bool replace_in_file(const std::string &path, const std::string &from, const std::string &to);
 
-  /* @brief: Replace text in file
-   * @param path: Path to the file
-   * @param from: Text to replace
-   * @param to: Text to replace with
-   * @return: true if successful, false otherwise
-   */
-  bool replace_in_file(const std::string &path, const std::string &from, const std::string &to);
+    /* @brief: Copy a file
+     * @param from: Source path
+     * @param to: Destination path
+     * @param overwrite = true: Whether to overwrite if destination exists
+     * @return: true if successful, false otherwise
+     */
+    bool copy_file(const std::string &from, const std::string &to, bool overwrite = false);
 
-  /* @brief: Copy a file
-   * @param from: Source path
-   * @param to: Destination path
-   * @param overwrite = true: Whether to overwrite if destination exists
-   * @return: true if successful, false otherwise
-   */
-  bool copy_file(const std::string &from, const std::string &to, bool overwrite = false);
+    /* @brief: Move/Rename a file
+     * @param from: Source path
+     * @param to: Destination path
+     * @return: true if successful, false otherwise
+     */
+    bool move_file(const std::string &from, const std::string &to);
 
-  /* @brief: Move/Rename a file
-   * @param from: Source path
-   * @param to: Destination path
-   * @return: true if successful, false otherwise
-   */
-  bool move_file(const std::string &from, const std::string &to);
+    /* @brief: Get file extension
+     * @param path: Path to the file
+     * @return: File extension including the dot, or empty string if none
+     */
+    std::string get_extension(const std::string &path);
 
-  /* @brief: Get file extension
-   * @param path: Path to the file
-   * @return: File extension including the dot, or empty string if none
-   */
-  std::string get_extension(const std::string &path);
+    /* @brief: Create directory and all parent directories if they don't exist
+     * @param path: Path to create
+     * @return: true if successful, false otherwise
+     */
+    bool create_directory(const std::string &path);
 
-  /* @brief: Create directory and all parent directories if they don't exist
-   * @param path: Path to create
-   * @return: true if successful, false otherwise
-   */
-  bool create_directory(const std::string &path);
+    /* @brief: Create directory and all parent directories if they don't exist
+     * @param path: Path to create
+     * @return: true if successful, false otherwise
+     */
+    bool create_dir_if_not_exists(const std::string &path);
 
-  /* @brief: Create directory and all parent directories if they don't exist
-   * @param path: Path to create
-   * @return: true if successful, false otherwise
-   */
-  bool create_dir_if_not_exists(const std::string &path);
+    /* @brief: Remove directory and all its contents if it exists
+     * @param path: Path to remove
+     * @return: true if successful, false otherwise
+     */
+    bool remove_dir(const std::string &path);
 
-  /* @brief: Remove directory and all its contents if it exists
-   * @param path: Path to remove
-   * @return: true if successful, false otherwise
-   */
-  bool remove_dir(const std::string &path);
+    /* @brief: Get list of all files in directory
+     * @param path: Directory path
+     * @param recursive = true: Whether to include files in subdirectories
+     * @return: Vector of file paths
+     */
+    std::vector<std::string> list_files_in_dir(const std::string &path, bool recursive = false);
 
-  /* @brief: Get list of all files in directory
-   * @param path: Directory path
-   * @param recursive = true: Whether to include files in subdirectories
-   * @return: Vector of file paths
-   */
-  std::vector<std::string> list_files_in_dir(const std::string &path, bool recursive = false);
-
-  /* @brief: Get list of all directories in directory
-   * @param path: Directory path
-   * @param recursive = true: Whether to include subdirectories of subdirectories
-   * @return: Vector of directory paths
-   */
-  std::vector<std::string> list_directories(const std::string &path, bool recursive = false);
+    /* @brief: Get list of all directories in directory
+     * @param path: Directory path
+     * @param recursive = true: Whether to include subdirectories of subdirectories
+     * @return: Vector of directory paths
+     */
+    std::vector<std::string> list_directories(const std::string &path, bool recursive = false);
+  }  // namespace fs
 }  // namespace bld
 
 #ifdef B_LDR_IMPLEMENTATION
 
 #include <algorithm>
+#include <cstdlib>
 #include <filesystem>
 #include <fstream>
 #include <iostream>
@@ -1279,7 +1283,7 @@ void bld::handle_args(int argc, char *argv[])
   }
 }
 
-bool bld::read_file(const std::string &path, std::string &content)
+bool bld::fs::read_file(const std::string &path, std::string &content)
 {
   if (!std::filesystem::exists(path))
   {
@@ -1300,7 +1304,7 @@ bool bld::read_file(const std::string &path, std::string &content)
   return true;
 }
 
-bool bld::write_entire_file(const std::string &path, const std::string &content)
+bool bld::fs::write_entire_file(const std::string &path, const std::string &content)
 {
   std::ofstream file(path, std::ios::binary);
 
@@ -1316,7 +1320,7 @@ bool bld::write_entire_file(const std::string &path, const std::string &content)
   return success;
 }
 
-bool bld::append_file(const std::string &path, const std::string &content)
+bool bld::fs::append_file(const std::string &path, const std::string &content)
 {
   std::ofstream file(path, std::ios::app | std::ios::binary);
   if (!file)
@@ -1331,7 +1335,7 @@ bool bld::append_file(const std::string &path, const std::string &content)
   return success;
 }
 
-bool bld::read_lines(const std::string &path, std::vector<std::string> &lines)
+bool bld::fs::read_lines(const std::string &path, std::vector<std::string> &lines)
 {
   std::ifstream file(path);
   if (!file)
@@ -1347,10 +1351,10 @@ bool bld::read_lines(const std::string &path, std::vector<std::string> &lines)
   return true;
 }
 
-bool bld::replace_in_file(const std::string &path, const std::string &from, const std::string &to)
+bool bld::fs::replace_in_file(const std::string &path, const std::string &from, const std::string &to)
 {
   std::string content = "";
-  if (!bld::read_file(path, content))
+  if (!bld::fs::read_file(path, content))
   {
     bld::log(bld::Log_type::ERROR, "Failed to read file: " + path);
     return false;
@@ -1367,10 +1371,10 @@ bool bld::replace_in_file(const std::string &path, const std::string &from, cons
     pos += to.length();
   }
 
-  return bld::write_entire_file(path, content);
+  return bld::fs::write_entire_file(path, content);
 }
 
-bool bld::copy_file(const std::string &from, const std::string &to, bool overwrite)
+bool bld::fs::copy_file(const std::string &from, const std::string &to, bool overwrite)
 {
   try
   {
@@ -1390,7 +1394,7 @@ bool bld::copy_file(const std::string &from, const std::string &to, bool overwri
   }
 }
 
-bool bld::move_file(const std::string &from, const std::string &to)
+bool bld::fs::move_file(const std::string &from, const std::string &to)
 {
   try
   {
@@ -1404,7 +1408,7 @@ bool bld::move_file(const std::string &from, const std::string &to)
   }
 }
 
-std::string bld::get_extension(const std::string &path)
+std::string bld::fs::get_extension(const std::string &path)
 {
   if (!std::filesystem::exists(path))
   {
@@ -1415,7 +1419,7 @@ std::string bld::get_extension(const std::string &path)
   return p.extension().string();
 }
 
-bool bld::create_directory(const std::string &path)
+bool bld::fs::create_directory(const std::string &path)
 {
   try
   {
@@ -1428,7 +1432,7 @@ bool bld::create_directory(const std::string &path)
   }
 }
 
-bool bld::create_dir_if_not_exists(const std::string &path)
+bool bld::fs::create_dir_if_not_exists(const std::string &path)
 {
   if (std::filesystem::exists(path))
   {
@@ -1452,7 +1456,7 @@ bool bld::create_dir_if_not_exists(const std::string &path)
   }
 }
 
-bool bld::remove_dir(const std::string &path)
+bool bld::fs::remove_dir(const std::string &path)
 {
   if (!std::filesystem::exists(path))
   {
@@ -1476,7 +1480,7 @@ bool bld::remove_dir(const std::string &path)
   }
 }
 
-std::vector<std::string> bld::list_files_in_dir(const std::string &path, bool recursive)
+std::vector<std::string> bld::fs::list_files_in_dir(const std::string &path, bool recursive)
 {
   std::vector<std::string> files;
   try
@@ -1501,7 +1505,7 @@ std::vector<std::string> bld::list_files_in_dir(const std::string &path, bool re
   return files;
 }
 
-std::vector<std::string> bld::list_directories(const std::string &path, bool recursive)
+std::vector<std::string> bld::fs::list_directories(const std::string &path, bool recursive)
 {
   std::vector<std::string> directories;
   try
