@@ -10,16 +10,8 @@ int main(int argc, char *argv[])
   // Handle command-line arguments
   BLD_HANDLE_ARGS();
 
-  // Initialize configuration
-  auto &config = bld::Config::get();
-  config.use_extra_config_keys = true;
-
-  config.extra_config_bool["is_extra"] = false;
-
-  // Provide compiler using command-line argument
-  // main config -compiler=kk
-  if (config.compiler == "kk")
-    std::cout << "Compiler!\n";
-
-  return 0;
+  std::vector<bld::Command> cmds = {{"echo", "Hello world1"}, {"echo", "Hello world2"}, {"echo", "Hello world3"}, {"echo", "Hello world4"}};
+  auto result = bld::execute_parallel(cmds, 5, true);
+  if (result.completed < cmds.size())
+    bld::log(bld::Log_type::WARNING, "At least one command failed to execute");
 }

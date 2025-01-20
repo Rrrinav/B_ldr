@@ -36,6 +36,7 @@ Copyright Dec 2025, Rinav (github: rrrinav)
 #include <clocale>
 #include <cstring>
 #include <string>
+#include <thread>
 #include <vector>
 
 /* @brief: Rebuild the build executable if the source file is newer than the executable and run it
@@ -219,12 +220,40 @@ namespace bld
   /* @brief: Execute the command
    * @param command ( Command ): Command to execute, must be a valid process command and not shell command
    * @return: returns a code to indicate success or failure
-   *   >0 : Command executed successfully, returns pid of fork.
+   *   >1 : Command executed successfully, returns pid of fork.
    *    0 : Command failed to execute or something wrong on system side
    *   -1 : No command to execute or something wrong on user side
    * @description: Execute the command using fork and log the status alongwith
    */
   int execute(const Command &command);
+
+  /* @brief: Execute the command asynchronously (without waiting)
+   * @param command ( Command ): Command to execute, must be a valid process command and not shell command
+   * @return: returns a code to indicate success or failure
+   *  \>0 : Command executed successfully, returns pid of fork.
+   *    0 : Command failed to execute or something wrong on system side
+   *   -1 : No command to execute or something wrong on user side
+   * @description: Execute the command using fork and log the status alongwith
+   */
+  int execute_without_wait(const Command &command);
+
+  // Return type for parallel execution
+  struct Exec_par_result
+  {
+    size_t completed;                    // Number of successfully completed commands
+    std::vector<size_t> failed_indices;  // Indices of commands that failed
+
+    Exec_par_result() : completed(0) {}
+  };
+
+  /* @brief: Execute multiple commands on multiple threads.
+   * @param cmds: Vector of commands to execute
+   * @param threads: Number of parallel threads (default: hardware concurrency - 1)
+   * @param strict: If true, stop all threads if an error occurs even in one command.
+   * @return: Exec_par_result
+   */
+  bld::Exec_par_result execute_parallel(const std::vector<bld::Command> &cmds, size_t threads = (std::thread::hardware_concurrency() - 1),
+                                        bool strict = true);
 
   /* @description: Print system metadata:
    *  1. Operating System
@@ -428,11 +457,14 @@ namespace bld
 #ifdef B_LDR_IMPLEMENTATION
 
 #include <algorithm>
+#include <atomic>
 #include <cstdlib>
 #include <filesystem>
 #include <fstream>
 #include <iostream>
+#include <mutex>
 #include <ostream>
+#include <queue>
 #include <sstream>
 
 void bld::log(bld::Log_type type, const std::string &msg)
@@ -573,6 +605,132 @@ int bld::execute(const Command &command)
   }
 
   return bld::wait_for_process(pid);  // Use wait_for_process instead of direct waitpid
+}
+
+int bld::execute_without_wait(const Command &command)
+{
+  if (command.is_empty())
+  {
+    bld::log(Log_type::ERROR, "No command to execute.");
+    return -1;
+  }
+
+  auto args = command.to_exec_args();
+  bld::log(Log_type::INFO, "Executing command: " + command.get_print_string());
+
+  pid_t pid = fork();
+  if (pid == -1)
+  {
+    bld::log(Log_type::ERROR, "Failed to create child process.");
+    return 0;
+  }
+  else if (pid == 0)
+  {
+    // Child process
+    if (execvp(args[0], args.data()) == -1)
+    {
+      perror("execvp");
+      bld::log(Log_type::ERROR, "Failed with error: " + std::string(strerror(errno)));
+      exit(EXIT_FAILURE);
+    }
+    // This line should never be reached
+    bld::log(Log_type::ERROR, "Unexpected code execution after execvp. Did we find a bug? in libc or kernel?");
+    abort();
+  }
+
+  return static_cast<int>(pid);  // Use wait_for_process instead of direct waitpid
+}
+
+bld::Exec_par_result bld::execute_parallel(const std::vector<bld::Command> &cmds, size_t threads, bool strict)
+{
+  bld::Exec_par_result result;
+
+  if (cmds.empty())
+    return result;  // Nothing to do
+  if (threads == 0)
+    threads = 1;
+  if (threads > std::thread::hardware_concurrency())
+    threads = std::thread::hardware_concurrency();
+
+  std::mutex queue_mutex, output_mutex;
+  std::atomic<bool> stop_workers{false};  // Used when strict = true
+
+  // Queue of command indices to process
+  std::queue<size_t> cmd_queue;
+  for (size_t i = 0; i < cmds.size(); ++i)
+    cmd_queue.push(i);
+
+  bld::log(bld::Log_type::INFO, "Executing " + std::to_string(cmds.size()) + " commands on " + std::to_string(threads) + " threads...");
+
+  // Worker function
+  auto worker = [&]()
+  {
+    while (true)
+    {
+      if (strict && stop_workers)
+        return;  // Stop all threads if strict and an error occurs
+
+      size_t cmd_idx;
+      {
+        std::lock_guard<std::mutex> lock(queue_mutex);
+        if (cmd_queue.empty())
+          return;
+
+        cmd_idx = cmd_queue.front();
+        cmd_queue.pop();
+      }
+
+      // Log and execute the command
+      {
+        std::lock_guard<std::mutex> lock(output_mutex);
+      }
+
+      int execution_result = execute(cmds[cmd_idx]);
+
+      if (execution_result <= 0)
+      {
+        {
+          std::lock_guard<std::mutex> lock(output_mutex);
+          log(Log_type::ERROR, "Failed to execute: " + cmds[cmd_idx].get_print_string());
+        }
+
+        // Record the failed command index
+        {
+          std::lock_guard<std::mutex> lock(queue_mutex);
+          result.failed_indices.push_back(cmd_idx);
+        }
+
+        if (strict)
+        {
+          stop_workers = true;  // Signal all threads to stop
+          return;
+        }
+      }
+      else
+      {
+        // Increment completed count
+        {
+          std::lock_guard<std::mutex> lock(queue_mutex);
+          bld::log(bld::Log_type::INFO, "Completed: " + cmds[cmd_idx].get_print_string());
+          result.completed++;
+        }
+      }
+    }
+  };
+
+  // Launch worker threads
+  std::vector<std::thread> workers;
+  size_t num_threads = std::min(threads, cmds.size());
+
+  for (size_t i = 0; i < num_threads; ++i)
+    workers.emplace_back(worker);
+
+  // Wait for all threads to complete
+  for (auto &t : workers)
+    if (t.joinable())
+      t.join();
+
+  return result;
 }
 
 void bld::print_metadata()
