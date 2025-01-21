@@ -92,8 +92,6 @@ Print system metadata:
 ```cpp
 bld::print_metadata();
 ```
-
-
 ## Author
 
 Rinav (GitHub: [rrrinav](https://github.com/rrrinav))
