@@ -1,6 +1,7 @@
 #define B_LDR_IMPLEMENTATION
 #define BLD_USE_CONFIG
 #include "./b_ldr.hpp"
+#define BLD_USE_CONFIG
 
 int main(int argc, char *argv[])
 {
@@ -10,8 +11,15 @@ int main(int argc, char *argv[])
   // Handle command-line arguments
   BLD_HANDLE_ARGS();
 
-  std::vector<bld::Command> cmds = {{"echo", "Hello world1"}, {"echo", "Hello world2"}, {"echo", "Hello world3"}, {"echo", "Hello world4"}};
-  auto result = bld::execute_parallel(cmds, 5, true);
+  auto &config = bld::Config::get();
+
+  std::vector<bld::Command> cmds = {{"echo", "Hello world1"},  //c
+                                    {"echo", "Hello world2"},  //c
+                                    {"echo", "Hello world3"},  //c
+                                    {"echo", "Hello world4"}};
+
+  auto result = bld::execute_parallel(cmds, config.threads, true);
+
   if (result.completed < cmds.size())
     bld::log(bld::Log_type::WARNING, "At least one command failed to execute");
 }

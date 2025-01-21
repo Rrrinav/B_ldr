@@ -20,15 +20,15 @@ Copyright Dec 2025, Rinav (github: rrrinav)
 
 #pragma once
 
-#include <sys/types.h>
-#include <sys/utsname.h>
-#include <sys/wait.h>
-
+#include <cstddef>
 #include <unordered_map>
 
 #ifdef _WIN32
 #include <Windows.h>
 #else
+#include <sys/types.h>
+#include <sys/utsname.h>
+#include <sys/wait.h>
 #include <unistd.h>
 #endif
 
@@ -151,6 +151,8 @@ namespace bld
     bool extra_args;
     // If user wants to add extra configuration keys.
     bool use_extra_config_keys;
+    // Number of threads to use for parallel execution
+    size_t threads;
     // Compiler command to use.
     std::string compiler;
     // Target executable to run
@@ -361,6 +363,7 @@ namespace bld
    *  Uses std::string::compare() to compare the prefix with the string
    */
   bool starts_with(const std::string &str, const std::string &prefix);
+
   namespace fs
   {
     /* @brief: Read entire file content into a string
@@ -555,7 +558,7 @@ int bld::wait_for_process(pid_t pid)
     if (exit_code != 0)
     {
       bld::log(bld::Log_type::ERROR, "Process exited with non-zero status: " + std::to_string(exit_code));
-      return exit_code;  // Return exit code for failure
+      return -1;  // Return exit code for failure
     }
     bld::log(bld::Log_type::INFO, "Process exited successfully.");
   }
@@ -980,50 +983,119 @@ bool bld::is_executable_outdated(std::string file_name, std::string executable)
 
 void bld::rebuild_yourself_onchange_and_run(const std::string &filename, const std::string &executable, std::string compiler)
 {
-  if (bld::is_executable_outdated(filename, executable))
+  namespace fs = std::filesystem;
+  // Convert to filesystem paths
+  fs::path source_path(filename);
+  fs::path exec_path(executable);
+  fs::path backup_path = exec_path.string() + ".old";
+
+  if (!bld::is_executable_outdated(filename, executable))
+    return;  // No rebuild needed
+
+  bld::log(Log_type::INFO, "Build executable not up-to-date. Rebuilding...");
+
+  // Create backup of existing executable if it exists
+  if (fs::exists(exec_path))
   {
-    bld::log(Log_type::INFO, "Build executable not up-to-date. Rebuilding...");
-    bld::Command cmd = {};
-
-    // Detect the compiler if not provided
-    if (compiler.empty())
+    try
     {
-#ifdef __clang__
-      compiler = "clang++";
-#elif defined(__GNUC__)
-      compiler = "g++";
-#elif defined(_MSC_VER)
-      compiler = "cl";  // MSVC uses 'cl' as the compiler command
-#else
-      bld::log(Log_type::ERROR, "Unknown compiler. Defaulting to g++.");
-      compiler = "g++";
-#endif
+      if (fs::exists(backup_path))
+        fs::remove(backup_path);  // Remove existing backup
+      fs::rename(exec_path, backup_path);
+      bld::log(Log_type::INFO, "Created backup at: " + backup_path.string());
     }
-
-    // Set up the compile command
-    cmd.parts = {compiler, filename, "-o", executable};
-
-    // Execute the compile command
-    if (bld::execute(cmd) <= 0)
+    catch (const fs::filesystem_error &e)
     {
-      bld::log(Log_type::ERROR, "Failed to rebuild executable.");
+      bld::log(Log_type::ERROR, "Failed to create backup: " + std::string(e.what()));
       return;
     }
-
-    bld::log(Log_type::INFO, "Rebuild successful. Restarting...");
-
-    // Run the new executable using bld::execute
-    bld::Command restart_cmd = {};
-    restart_cmd.parts = {executable};
-    if (bld::execute(restart_cmd) <= 0)
-    {
-      bld::log(Log_type::ERROR, "Failed to restart executable.");
-      return;
-    }
-
-    // Exit the current process after successfully restarting
-    std::exit(EXIT_SUCCESS);
   }
+
+  // Detect the compiler if not provided
+  if (compiler.empty())
+  {
+#ifdef __clang__
+    compiler = "clang++";
+#elif defined(__GNUC__)
+    compiler = "g++";
+#elif defined(_MSC_VER)
+    compiler = "cl";  // MSVC
+#else
+    bld::log(Log_type::ERROR, "Unknown compiler. Defaulting to g++.");
+    compiler = "g++";
+#endif
+  }
+
+  // Set up the compile command
+  bld::Command cmd;
+  cmd.parts = {compiler, source_path.string(), "-o", exec_path.string()};
+
+  // Execute the compile command
+  int compile_result = bld::execute(cmd);
+  if (compile_result <= 0)
+  {
+    bld::log(Log_type::ERROR, "Compilation failed.");
+
+    // Restore backup if compilation failed and backup exists
+    if (fs::exists(backup_path))
+    {
+      try
+      {
+        fs::remove(exec_path);  // Remove failed compilation output if it exists
+        fs::rename(backup_path, exec_path);
+        bld::log(Log_type::INFO, "Restored previous executable from backup.");
+      }
+      catch (const fs::filesystem_error &e)
+      {
+        bld::log(Log_type::ERROR, "Failed to restore backup: " + std::string(e.what()));
+      }
+    }
+    return;
+  }
+
+  bld::log(Log_type::INFO, "Compilation successful. Restarting w/o any args for safety...");
+
+  // Verify the new executable exists and is executable
+  if (!fs::exists(exec_path))
+  {
+    bld::log(Log_type::ERROR, "New executable not found after successful compilation.");
+    return;
+  }
+
+  // Make sure the new executable has proper permissions
+  try
+  {
+    fs::permissions(exec_path, fs::perms::owner_exec | fs::perms::group_exec | fs::perms::others_exec, fs::perm_options::add);
+  }
+  catch (const fs::filesystem_error &e)
+  {
+    bld::log(Log_type::WARNING, "Failed to set executable permissions: " + std::string(e.what()));
+  }
+
+  // Run the new executable
+  bld::Command restart_cmd;
+  restart_cmd.parts = {exec_path.string()};
+
+  int restart_result = bld::execute(restart_cmd);
+  if (restart_result <= 0)
+  {
+    bld::log(Log_type::ERROR, "Failed to start new executable.");
+    return;
+  }
+
+  // Only remove backup after successful restart
+  try
+  {
+    if (fs::exists(backup_path))
+      fs::remove(backup_path);
+  }
+  catch (const fs::filesystem_error &e)
+  {
+    bld::log(Log_type::WARNING, "Failed to remove backup: " + std::string(e.what()));
+  }
+
+  // Exit the current process after successfully restarting
+  std::exit(EXIT_SUCCESS);
 }
 
 void bld::rebuild_yourself_onchange(const std::string &filename, const std::string &executable, std::string compiler)
@@ -1079,6 +1151,7 @@ bld::Config::Config() : hot_reload_files(), cmd_args()
   verbose = false;
   override_run = false;
   use_extra_config_keys = false;
+  threads = 1;
   compiler = "";
   target_executable = "";
   target_platform = "";
@@ -1314,6 +1387,38 @@ void bld::handle_config_command(std::vector<std::string> args, std::string name)
       config.hot_reload = (arg.substr(9) == "true");
     else if (bld::starts_with(arg, "-hreload"))
       config.hot_reload = true;
+    else if (bld::starts_with(arg, "-threads="))
+    {
+      std::string number = arg.substr(9);
+      if (number.empty())
+      {
+        bld::log(bld::Log_type::WARNING, "No value provided for threads. Setting 1.");
+        config.threads = 1;
+        continue;
+      }
+      else if (number.find_first_not_of("0123456789") != std::string::npos)
+      {
+        bld::log(bld::Log_type::ERROR, "Invalid value for threads: " + number);
+        continue;
+      }
+      config.threads = std::stoi(number);
+    }
+    else if (bld::starts_with(arg, "-j="))
+    {
+      std::string number = arg.substr(3);
+      if (number.empty())
+      {
+        bld::log(bld::Log_type::WARNING, "No value provided for threads. Setting 1.");
+        config.threads = 1;
+        continue;
+      }
+      else if (number.find_first_not_of("0123456789") != std::string::npos)
+      {
+        bld::log(bld::Log_type::ERROR, "Invalid value for threads: " + number);
+        continue;
+      }
+      config.threads = std::stoi(number);
+    }
     else if (bld::starts_with(arg, "-compiler="))
       config.compiler = arg.substr(10);
     else if (bld::starts_with(arg, "-target="))
