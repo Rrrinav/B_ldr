@@ -70,6 +70,38 @@ std::string shell_cmd = "echo Hello, World!";
 bool success = bld::read_shell_output(shell_cmd, output);
 ```
 
+### incremental
+
+```cpp
+int main(int argc, char *argv[])
+{
+  BLD_REBUILD_YOURSELF_ONCHANGE();
+
+  bld::Dep_graph dg;
+
+  dg.add_dep({"main",
+             {"main.cpp", "./foo.o", "./bar.o"},
+             {"g++", "main.cpp", "-o", "main", "foo.o", "bar.o"}});
+
+  dg.add_dep({"./foo.o",
+             {"foo.cpp"},
+             {"g++", "-c", "foo.cpp", "-o", "foo.o"}});
+
+  dg.add_dep({"./bar.o",
+             {"bar.cpp"},
+             {"g++", "-c", "bar.cpp", "-o", "bar.o"}});
+
+  dg.build_all();
+
+  return 0;
+}
+```
+```bash
+$ls
+main.cpp foo.cpp foo.hpp bar.cpp bar.hpp
+
+```
+
 ### File System
 
 Check if an executable is up-to-date with it's file:
