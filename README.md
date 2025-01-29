@@ -92,6 +92,11 @@ Print system metadata:
 ```cpp
 bld::print_metadata();
 ```
+
+## TODO
+
+- [ ] Parallel incremental builds
+
 ## Author
 
 Rinav (GitHub: [rrrinav](https://github.com/rrrinav))

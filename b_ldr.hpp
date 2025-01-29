@@ -20,9 +20,6 @@ Copyright Dec 2025, Rinav (github: rrrinav)
 
 #pragma once
 
-#include <cstddef>
-#include <unordered_map>
-
 #ifdef _WIN32
 #include <Windows.h>
 #else
@@ -34,9 +31,12 @@ Copyright Dec 2025, Rinav (github: rrrinav)
 
 #include <cerrno>
 #include <clocale>
+#include <cstddef>
 #include <cstring>
 #include <string>
 #include <thread>
+#include <unordered_map>
+#include <unordered_set>
 #include <vector>
 
 /* @brief: Rebuild the build executable if the source file is newer than the executable and run it
@@ -250,12 +250,14 @@ namespace bld
 
   /* @brief: Execute multiple commands on multiple threads.
    * @param cmds: Vector of commands to execute
-   * @param threads: Number of parallel threads (default: hardware concurrency - 1)
+   * @param threads: Number of parallel threads (default: hardware concurrency - 1). Change if you want.
    * @param strict: If true, stop all threads if an error occurs even in one command.
    * @return: Exec_par_result
    */
   bld::Exec_par_result execute_parallel(const std::vector<bld::Command> &cmds, size_t threads = (std::thread::hardware_concurrency() - 1),
                                         bool strict = true);
+
+  // TODO: Implement asynchronous execution too :)
 
   /* @description: Print system metadata:
    *  1. Operating System
@@ -455,6 +457,118 @@ namespace bld
      */
     std::vector<std::string> list_directories(const std::string &path, bool recursive = false);
   }  // namespace fs
+
+  struct Dep
+  {
+    std::string target;                     // Target/output file
+    std::vector<std::string> dependencies;  // Input files/dependencies
+    bld::Command command;                   // Command to build the target
+    bool is_phony{false};                   // Whether this is a phony target
+
+    // Default constructor
+    Dep() = default;
+
+    // Constructor for non-phony targets
+    Dep(std::string target, std::vector<std::string> dependencies = {}, bld::Command command = {});
+
+    // Constructor for phony targets
+    Dep(std::string target, std::vector<std::string> dependencies, bool is_phony);
+
+    // Implicit conversion from initializer list for better usability
+    Dep(std::string target, std::initializer_list<std::string> deps, bld::Command command = {});
+
+    // Copy constructor
+    Dep(const Dep &other);
+
+    // Move constructor
+    Dep(Dep &&other) noexcept;
+
+    // Copy assignment
+    Dep &operator=(const Dep &other);
+
+    // Move assignment
+    Dep &operator=(Dep &&other) noexcept;
+  };
+
+  class Dep_graph
+  {
+    struct Node
+    {
+      Dep dep;
+      std::vector<std::string> dependencies;  // Names of dependent nodes
+      bool visited{false};
+      bool in_progress{false};  // For cycle detection
+      bool checked{false};
+
+      Node(const Dep &d) : dep(d) {}
+    };
+    std::unordered_map<std::string, std::unique_ptr<Node>> nodes;
+    std::unordered_set<std::string> checked_sources;
+
+  public:
+
+    /* @brief Add a dependency to the graph.
+     * @param dep The dependency to add.
+     */
+    void add_dep(const Dep &dep);
+
+    /* @brief Add a phony target to the graph.
+     * @param target The name of the phony target.
+     * @param deps The dependencies of the phony target.
+     */
+    void add_phony(const std::string &target, const std::vector<std::string> &deps);
+
+    /* @brief Check if a node needs to be rebuilt.
+     * @param node The node to check.
+     * @return true If the node needs to be rebuilt.
+     * @return false If the node does not need to be rebuilt.
+     */
+    bool needs_rebuild(const Node *node);
+
+    /* @brief Build the target.
+     * @param target The name of the target to build.
+     * @return true If the build was successful.
+     * @return false If the build failed.
+     */
+    bool build(const std::string &target);
+
+    /* @brief Build the dependency.
+     * @param dep The dependency to build.
+     * @return true If the build was successful.
+     * @return false If the build failed.
+     */
+    bool build(const Dep &dep);
+
+    /* @brief Build all targets in the graph.
+     * @return true If all builds were successful.
+     * @return false If any build failed.
+     */
+    bool build_all();
+
+    /* @brief Build all targets in the graph (alternative method).
+     * @return true If all builds were successful.
+     * @return false If any build failed.
+     */
+    bool F_build_all();
+
+  private:
+    /* @brief Build a node in the graph.
+     * @param target The name of the target to build.
+     * @return true If the build was successful.
+     * @return false If the build failed.
+     */
+    bool build_node(const std::string &target);
+
+    /* @brief Detect cycles in the graph.
+     * @param target The name of the target to check.
+     * @param visited The set of visited nodes.
+     * @param in_progress The set of nodes currently being processed.
+     * @return true If a cycle was detected.
+     * @return false If no cycle was detected.
+     */
+    bool detect_cycle(const std::string &target, std::unordered_set<std::string> &visited, std::unordered_set<std::string> &in_progress);
+  };
+
 }  // namespace bld
 
 #ifdef B_LDR_IMPLEMENTATION
@@ -513,6 +627,8 @@ std::vector<char *> bld::Command::to_exec_args() const
 
 std::string bld::Command::get_print_string() const
 {
+  if (parts.empty())
+    return "''";
   std::stringstream ss;
   ss << "' " << parts[0];
   if (parts.size() == 1)
@@ -1791,5 +1907,221 @@ std::vector<std::string> bld::fs::list_directories(const std::string &path, bool
     bld::log(bld::Log_type::ERROR, "Failed to list directories: " + std::string(e.what()));
   }
   return directories;
+}
+
+bld::Dep::Dep(std::string target, std::vector<std::string> dependencies, bld::Command command)
+    : target(std::move(target)), dependencies(std::move(dependencies)), command(std::move(command))
+{
+}
+
+// Constructor for phony targets
+bld::Dep::Dep(std::string target, std::vector<std::string> dependencies, bool is_phony)
+    : target(std::move(target)), dependencies(std::move(dependencies)), is_phony(is_phony)
+{
+}
+
+// Implicit conversion from initializer list for better usability
+bld::Dep::Dep(std::string target, std::initializer_list<std::string> deps, bld::Command command)
+    : target(std::move(target)), dependencies(deps), command(std::move(command))
+{
+}
+
+// Copy constructor
+bld::Dep::Dep(const Dep &other) : target(other.target), dependencies(other.dependencies), command(other.command), is_phony(other.is_phony)
+{
+}
+
+// Move constructor
+bld::Dep::Dep(Dep &&other) noexcept
+    : target(std::move(other.target)),
+      dependencies(std::move(other.dependencies)),
+      command(std::move(other.command)),
+      is_phony(other.is_phony)
+{
+}
+
+// Copy assignment
+bld::Dep &bld::Dep::operator=(const Dep &other)
+{
+  if (this != &other)
+  {
+    target = other.target;
+    dependencies = other.dependencies;
+    command = other.command;
+    is_phony = other.is_phony;
+  }
+  return *this;
+}
+
+// Move assignment
+bld::Dep &bld::Dep::operator=(Dep &&other) noexcept
+{
+  if (this != &other)
+  {
+    target = std::move(other.target);
+    dependencies = std::move(other.dependencies);
+    command = std::move(other.command);
+    is_phony = other.is_phony;
+  }
+  return *this;
+}
+
+void bld::Dep_graph::add_dep(const bld::Dep &dep)
+{
+  // We create a node and save it to map with key "File"
+  auto node = std::make_unique<Node>(dep);
+  node->dependencies = dep.dependencies;
+  nodes[dep.target] = std::move(node);
+}
+
+void bld::Dep_graph::add_phony(const std::string &target, const std::vector<std::string> &deps)
+{
+  Dep phony_dep;
+  phony_dep.target = target;
+  phony_dep.dependencies = deps;
+  phony_dep.is_phony = true;
+  add_dep(phony_dep);
+}
+
+bool bld::Dep_graph::needs_rebuild(const Node *node)
+{
+  if (node->dep.is_phony)
+    return true;
+
+  // If target doesn't exist, we need to build IF we have dependencies
+  if (!std::filesystem::exists(node->dep.target))
+    return !node->dep.dependencies.empty();
+
+  auto target_time = std::filesystem::last_write_time(node->dep.target);
+
+  // Check if any dependency is newer than target
+  for (const auto &dep : node->dep.dependencies)
+  {
+    if (!std::filesystem::exists(dep))
+    {
+      bld::log(bld::Log_type::ERROR, "Dependency does not exist: " + dep);
+      return false;  // Don't rebuild if dependency is missing
+    }
+
+    if (std::filesystem::last_write_time(dep) > target_time)
+      return true;
+  }
+
+  return false;  // Target exists and is newer than all dependencies
+}
+
+bool bld::Dep_graph::build(const std::string &target)
+{
+  std::unordered_set<std::string> visited, in_progress;
+  if (detect_cycle(target, visited, in_progress))
+  {
+    bld::log(bld::Log_type::ERROR, "Circular dependency detected for target: " + target);
+    return false;
+  }
+  checked_sources.clear();
+  return build_node(target);
+}
+
+bool bld::Dep_graph::build(const Dep &dep)
+{
+  add_dep(dep);
+  return build(dep.target);
+}
+
+bool bld::Dep_graph::build_all()
+{
+  bool success = true;
+  for (const auto &node : nodes)
+    if (!build(node.first))
+      success = false;
+  return success;
+}
+
+bool bld::Dep_graph::F_build_all()
+{
+  checked_sources.clear();
+  bool success = true;
+  for (const auto &node : nodes)
+    if (!build(node.first))
+      success = false;
+  return success;
+}
+
+bool bld::Dep_graph::build_node(const std::string &target)
+{
+  auto it = nodes.find(target);
+  if (it == nodes.end())
+  {
+    if (std::filesystem::exists(target))
+    {
+      if (checked_sources.find(target) == checked_sources.end())
+      {
+        bld::log(bld::Log_type::INFO, "Using existing source file: " + target);
+        checked_sources.insert(target);
+      }
+      return true;
+    }
+    bld::log(bld::Log_type::ERROR, "Target not found: " + target);
+    return false;
+  }
+
+  Node *node = it->second.get();
+  if (node->checked)  // Skip if we've already checked this node
+    return true;
+
+  // First build all dependencies
+  for (const auto &dep : node->dependencies)
+    if (!build_node(dep))
+      return false;
+
+  // Check if we need to rebuild
+  if (!needs_rebuild(node))
+  {
+    bld::log(bld::Log_type::INFO, "Target up to date: " + target);
+    node->checked = true;
+    return true;
+  }
+
+  // Execute build command if not phony
+  if (!node->dep.is_phony && !node->dep.command.is_empty())
+  {
+    bld::log(bld::Log_type::INFO, "Building target: " + target);
+    if (execute(node->dep.command) <= 0)
+    {
+      bld::log(bld::Log_type::ERROR, "Failed to build target: " + target);
+      return false;
+    }
+  }
+  else if (node->dep.is_phony)
+    bld::log(bld::Log_type::INFO, "Phony target: " + target);
+  else
+    bld::log(bld::Log_type::WARNING, "No command for target: " + target);
+
+  node->checked = true;
+  return true;
+}
+
+bool bld::Dep_graph::detect_cycle(const std::string &target, std::unordered_set<std::string> &visited,
+                                  std::unordered_set<std::string> &in_progress)
+{
+  if (in_progress.find(target) != in_progress.end())
+    return true;  // Cycle detected
+
+  if (visited.find(target) != visited.end())
+    return false;  // Already processed
+
+  auto it = nodes.find(target);
+  if (it == nodes.end())
+    return false;  // Target doesn't exist
+
+  in_progress.insert(target);
+
+  for (const auto &dep : it->second->dependencies)
+    if (detect_cycle(dep, visited, in_progress))
+      return true;
+
+  in_progress.erase(target);
+  visited.insert(target);
+  return false;
 }
 #endif
