@@ -127,7 +127,7 @@ bld::print_metadata();
 
 ## TODO
 
-- [ ] Parallel incremental builds
+- [X] Parallel incremental builds
 
 ## Author
 

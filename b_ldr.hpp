@@ -1,5 +1,5 @@
 /*
-Copyright Dec 2025, Rinav (github: rrrinav)
+  Copyright Dec 2025, Rinav (github: rrrinav)
 
   Permission is hereby granted, free of charge,
   to any person obtaining a copy of this software and associated documentation files(the “Software”),
@@ -38,6 +38,9 @@ Copyright Dec 2025, Rinav (github: rrrinav)
 #include <unordered_map>
 #include <unordered_set>
 #include <vector>
+#include <mutex>
+#include <queue>
+#include <condition_variable>
 
 /* @brief: Rebuild the build executable if the source file is newer than the executable and run it
  * @description: Takes no parameters and calls bld::rebuild_yourself_onchange_and_run() with the current file and executable.
@@ -55,6 +58,8 @@ Copyright Dec 2025, Rinav (github: rrrinav)
  *    Read the documentation of function for more information.
  */
 #define BLD_HANDLE_ARGS() bld::handle_args(argc, argv)
+
+#define BLD_REBUILD_AND_ARGS() BLD_REBUILD_YOURSELF_ONCHANGE(); BLD_HANDLE_ARGS()
 
 /* File to save the configuration to.
  * You can change this to any file name you want.
@@ -499,6 +504,7 @@ namespace bld
       bool visited{false};
       bool in_progress{false};  // For cycle detection
       bool checked{false};
+      std::vector<std::string> waiting_on;  // files that need to be built before this one
 
       Node(const Dep &d) : dep(d) {}
     };
@@ -545,12 +551,14 @@ namespace bld
      */
     bool build_all();
 
-    /* @brief Build all targets in the graph (alternative method).
+    /* @brief Build all targets in the graph but all previous checks are discarded (alternative method).
      * @return true If all builds were successful.
      * @return false If any build failed.
      */
     bool F_build_all();
 
+    bool build_parallel(const std::string &target, size_t thread_count = std::thread::hardware_concurrency());
+    bool build_all_parallel(size_t thread_count = std::thread::hardware_concurrency());
   private:
     /* @brief Build a node in the graph.
      * @param target The name of the target to build.
@@ -567,6 +575,11 @@ namespace bld
      * @return false If no cycle was detected.
      */
     bool detect_cycle(const std::string &target, std::unordered_set<std::string> &visited, std::unordered_set<std::string> &in_progress);
+    bool prepare_build_graph(const std::string &target, std::queue<std::string> &ready_targets);
+    void process_completed_target(const std::string &target,
+                                        std::queue<std::string> &ready_targets,
+                                        std::mutex &queue_mutex,
+                                        std::condition_variable &cv);
   };
 
 }  // namespace bld
@@ -1983,31 +1996,23 @@ void bld::Dep_graph::add_phony(const std::string &target, const std::vector<std:
   add_dep(phony_dep);
 }
 
-bool bld::Dep_graph::needs_rebuild(const Node *node)
+bool bld::Dep_graph::needs_rebuild(const Node* node)
 {
   if (node->dep.is_phony)
     return true;
-
-  // If target doesn't exist, we need to build IF we have dependencies
   if (!std::filesystem::exists(node->dep.target))
     return !node->dep.dependencies.empty();
 
   auto target_time = std::filesystem::last_write_time(node->dep.target);
-
-  // Check if any dependency is newer than target
-  for (const auto &dep : node->dep.dependencies)
-  {
-    if (!std::filesystem::exists(dep))
-    {
+  for (const auto& dep : node->dep.dependencies) {
+    if (!std::filesystem::exists(dep)) {
       bld::log(bld::Log_type::ERROR, "Dependency does not exist: " + dep);
-      return false;  // Don't rebuild if dependency is missing
+      return true; // Missing dependency forces rebuild
     }
-
     if (std::filesystem::last_write_time(dep) > target_time)
       return true;
   }
-
-  return false;  // Target exists and is newer than all dependencies
+  return false; // Explicit return when no rebuild needed
 }
 
 bool bld::Dep_graph::build(const std::string &target)
@@ -2124,4 +2129,189 @@ bool bld::Dep_graph::detect_cycle(const std::string &target, std::unordered_set<
   visited.insert(target);
   return false;
 }
+
+
+bool bld::Dep_graph::build_parallel(const std::string &target, size_t thread_count)
+{
+  if (thread_count > std::thread::hardware_concurrency() - 1)
+    thread_count = std::thread::hardware_concurrency() - 1;
+  if (thread_count == 0)
+    thread_count = 1;
+
+  std::unordered_set<std::string> visited, in_progress;
+  if (detect_cycle(target, visited, in_progress))
+  {
+    bld::log(bld::Log_type::ERROR, "Circular dependency detected for target: " + target);
+    return false;
+  }
+
+  bld::log(bld::Log_type::INFO, "Building all targets in parallel using " + std::to_string(thread_count) + " threads");
+
+  std::queue<std::string> ready_targets;
+  if (!prepare_build_graph(target, ready_targets))
+    return false;
+
+  std::mutex queue_mutex, log_mutex;
+  std::condition_variable cv;
+  std::atomic<bool> build_failed{false};
+  std::atomic<size_t> active_builds{0};
+  std::atomic<size_t> completed_targets{0};
+  const size_t total_targets = nodes.size();
+
+  auto worker = [&]()
+  {
+    while (!build_failed)
+    {
+      std::string current_target;
+      {
+        std::unique_lock<std::mutex> lock(queue_mutex);
+        if (ready_targets.empty() && completed_targets < total_targets) {
+          cv.wait_for(lock, std::chrono::milliseconds(100), [&]() {
+            return !ready_targets.empty() || build_failed || completed_targets == total_targets;
+          });
+        }
+
+        if (ready_targets.empty() || build_failed)
+          return;
+
+        current_target = ready_targets.front();
+        ready_targets.pop();
+        nodes[current_target]->in_progress = true;
+        active_builds++;
+      }
+
+      auto node = nodes[current_target].get();
+      if (needs_rebuild(node)) {
+        if (!node->dep.is_phony && !node->dep.command.is_empty())
+        {
+          {
+            std::lock_guard<std::mutex> log_lock(log_mutex);
+            bld::log(bld::Log_type::INFO, "Building target: " + current_target);
+          }
+
+          if (execute(node->dep.command) <= 0)
+          {
+            {
+              std::lock_guard<std::mutex> log_lock(log_mutex);
+              bld::log(bld::Log_type::ERROR, "Failed to build target: " + current_target);
+            }
+            build_failed = true;
+            cv.notify_all();
+            return;
+          }
+        }
+      }
+      else {
+        process_completed_target(current_target, ready_targets, queue_mutex, cv);
+        completed_targets++;
+        active_builds--;
+        cv.notify_all();
+      }
+    }
+  };
+
+  std::vector<std::thread> workers;
+  for (size_t i = 0; i < thread_count; ++i)
+    workers.emplace_back(worker);
+
+  for (auto &t : workers)
+    if (t.joinable())
+      t.join();
+
+  return !build_failed;
+}
+
+bool bld::Dep_graph::prepare_build_graph(const std::string &target, std::queue<std::string> &ready_targets)
+{
+  auto it = nodes.find(target);
+  if (it == nodes.end())
+  {
+    if (std::filesystem::exists(target))
+    {
+      if (checked_sources.find(target) == checked_sources.end())
+      {
+        bld::log(bld::Log_type::INFO, "Using existing source file: " + target);
+        checked_sources.insert(target);
+      }
+      return true;
+    }
+    bld::log(bld::Log_type::ERROR, "Target not found: " + target);
+    return false;
+  }
+
+  auto node = it->second.get();
+  if (node->visited)
+    return true;
+  node->visited = true;
+
+  // Process dependencies
+  for (const auto& dep : node->dependencies) {
+    if (!prepare_build_graph(dep, ready_targets))
+      return false;
+
+    // Only track node dependencies that actually need rebuilding
+    if (nodes.find(dep) != nodes.end() && needs_rebuild(nodes[dep].get())) {
+      node->waiting_on.push_back(dep);
+    }
+  }
+
+  // Only add to ready queue if NEEDS rebuild and dependencies are met
+  if (node->waiting_on.empty() && needs_rebuild(node)) {
+    ready_targets.push(target);
+  }
+
+  return true;
+}
+
+void bld::Dep_graph::process_completed_target(const std::string &target, std::queue<std::string> &ready_targets, std::mutex &queue_mutex,
+                                              std::condition_variable &cv)
+{
+  std::lock_guard<std::mutex> lock(queue_mutex);
+  nodes[target]->checked = true;
+  nodes[target]->in_progress = false;
+
+  // Find all nodes that were waiting on this target
+  for (const auto &node_pair : nodes)
+  {
+    auto &node = node_pair.second;
+    if (!node->checked && !node->in_progress)
+    {
+      auto &waiting = node->waiting_on;
+      waiting.erase(std::remove(waiting.begin(), waiting.end(), target), waiting.end());
+
+      // If no more dependencies, add to ready queue
+      if (waiting.empty())
+        ready_targets.push(node_pair.first);
+    }
+  }
+}
+
+bool bld::Dep_graph::build_all_parallel(size_t thread_count)
+{
+  std::vector<std::string> root_targets;
+  for (const auto &node : nodes)
+  {
+    bool is_dependency = false;
+    for (const auto &other : nodes)
+    {
+      if (std::find(other.second->dep.dependencies.begin(), other.second->dep.dependencies.end(), node.first) !=
+          other.second->dep.dependencies.end())
+      {
+        is_dependency = true;
+        break;
+      }
+    }
+    if (!is_dependency)
+      root_targets.push_back(node.first);
+  }
+
+  // Create a master phony target that depends on all root targets
+  add_phony("__master_target__", root_targets);
+  bool result = build_parallel("__master_target__", thread_count);
+
+  // Clean up the master target
+  nodes.erase("__master_target__");
+  return result;
+}
+
 #endif
