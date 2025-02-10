@@ -237,7 +237,7 @@ namespace bld
   /* @brief: Execute the command asynchronously (without waiting)
    * @param command ( Command ): Command to execute, must be a valid process command and not shell command
    * @return: returns a code to indicate success or failure
-   *  \>0 : Command executed successfully, returns pid of fork.
+   *   >0 : Command executed successfully, returns pid of fork.
    *    0 : Command failed to execute or something wrong on system side
    *   -1 : No command to execute or something wrong on user side
    * @description: Execute the command using fork and log the status alongwith
@@ -261,8 +261,6 @@ namespace bld
    */
   bld::Exec_par_result execute_parallel(const std::vector<bld::Command> &cmds, size_t threads = (std::thread::hardware_concurrency() - 1),
                                         bool strict = true);
-
-  // TODO: Implement asynchronous execution too :)
 
   /* @description: Print system metadata:
    *  1. Operating System
