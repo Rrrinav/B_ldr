@@ -89,9 +89,9 @@ namespace bld
     };
 
     /* @param type ( Log_type enum ): Type of log
-   * @param msg ( std::string ): Message to log
-   * @description: Function to log messages with type
-   */
+     * @param msg ( std::string ): Message to log
+     * @description: Function to log messages with type
+     */
     void log(Log_type type, const std::string &msg);
 
     // Struct to hold command parts
@@ -111,13 +111,13 @@ namespace bld
         void add_parts(Args... args);
 
         /* @return ( std::string ): Get the full command as a single string
-     * @description: Get the full command as a single string
-     */
+         * @description: Get the full command as a single string
+         */
         std::string get_command_string() const;
 
         /* @return ( std::vector<char *> ): Get the full command but as C-style arguments for `execvp`
-     * @description: Get the full command as a C-style arguments for sys calls
-     */
+         * @description: Get the full command as a C-style arguments for sys calls
+         */
         std::vector<char *> to_exec_args() const;
 
         // @return ( bool ): Check if the command is empty
@@ -137,16 +137,16 @@ namespace bld
 
       public:
         /* INFO: Most of these options are just to save the configuration and wont be used by the library itself.
-     * It is upto the user to use them or not and infact how to use them.
-     * However, some of them are used by the library itself and are important.
-     * 1. override_run: If set to true, it will disable the default run command and will not run the target executable.
-     * 2. target_executable: Target executable to run. If not provided, it will run the target executable from config.
-     * 3. cmd_args: It saves the command line arguments passed to the program.
-     *
-     * There are some params that can't be set in commnad line and are to be set in program itself.
-     * 1. extra_args 2. use_extra_config_keys 3. the keys themself (you can only provide values in command line).
-     * Make sure to set use_extra_config_keys before BLD_HANDLE_ARGS so the function knows whether to parse extra keys!
-     */
+         * It is upto the user to use them or not and infact how to use them.
+         * However, some of them are used by the library itself and are important.
+         * 1. override_run: If set to true, it will disable the default run command and will not run the target executable.
+         * 2. target_executable: Target executable to run. If not provided, it will run the target executable from config.
+         * 3. cmd_args: It saves the command line arguments passed to the program.
+         *
+         * There are some params that can't be set in commnad line and are to be set in program itself.
+         * 1. extra_args 2. use_extra_config_keys 3. the keys themself (you can only provide values in command line).
+         * Make sure to set use_extra_config_keys before BLD_HANDLE_ARGS so the function knows whether to parse extra keys!
+         */
 
         // if hot reload is enabled
         bool hot_reload;
@@ -186,26 +186,26 @@ namespace bld
         std::unordered_map<std::string, bool> extra_config_bool;
 
         /* @brief: Get the singleton instance of the Config class
-     * @description: This class works as a singleton and this function returns the instance of the class, this will be the only instance.
-     */
+         * @description: This class works as a singleton and this function returns the instance of the class, this will be the only instance.
+         */
         static Config &get();
 
         /* @brief: Initialize the configuration with default values
-     * @description: sets the default values for the configuration
-     *  compiler & target_platform if not provided
-     */
+         * @description: sets the default values for the configuration
+         *  compiler & target_platform if not provided
+         */
         void init();
 
         /* @brief: Load the configuration from a file BLD_DEFAULT_CONFIG_FILE: "./build.conf")
-     * @param filename ( std::string ): Name of the file to load the configuration from
-     * @description: Load the configuration from a file. The file should be in the format of key=value pairs.
-     */
+         * @param filename ( std::string ): Name of the file to load the configuration from
+         * @description: Load the configuration from a file. The file should be in the format of key=value pairs.
+         */
         bool load_from_file(const std::string &filename);
 
         /* @brief: Save the configuration to a file BLD_DEFAULT_CONFIG_FILE: "./build.conf")
-     * @param filename ( std::string ): Name of the file to save the configuration to.
-     * @description: Save the configuration to a file. The file will be in the format of key=value pairs.
-     */
+         * @param filename ( std::string ): Name of the file to save the configuration to.
+         * @description: Save the configuration to a file. The file will be in the format of key=value pairs.
+         */
         bool save_to_file(const std::string &filename);
     };
 
@@ -216,34 +216,34 @@ namespace bld
     bool args_to_vec(int argc, char *argv[], std::vector<std::string> &args);
 
     /* @beief: Validate the command before executing
-   * @param command ( Command ): Command to validate
-   */
+     * @param command ( Command ): Command to validate
+     */
     bool validate_command(const Command &command);
 
     /* @brief: Wait for the process to complete
-   * @param pid ( pid_t ): Process ID to wait for
-   * @description: Wait for the process to complete and log the status. Use this function instead of direct waitpid
-   */
+     * @param pid ( pid_t ): Process ID to wait for
+     * @description: Wait for the process to complete and log the status. Use this function instead of direct waitpid
+     */
     int wait_for_process(pid_t pid);
 
     /* @brief: Execute the command
-   * @param command ( Command ): Command to execute, must be a valid process command and not shell command
-   * @return: returns a code to indicate success or failure
-   *   >1 : Command executed successfully, returns pid of fork.
-   *    0 : Command failed to execute or something wrong on system side
-   *   -1 : No command to execute or something wrong on user side
-   * @description: Execute the command using fork and log the status alongwith
-   */
+       * @param command ( Command ): Command to execute, must be a valid process command and not shell command
+       * @return: returns a code to indicate success or failure
+       *   >1 : Command executed successfully, returns pid of fork.
+       *    0 : Command failed to execute or something wrong on system side
+       *   -1 : No command to execute or something wrong on user side
+       * @description: Execute the command using fork and log the status alongwith
+       */
     int execute(const Command &command);
 
     /* @brief: Execute the command asynchronously (without waiting)
-   * @param command ( Command ): Command to execute, must be a valid process command and not shell command
-   * @return: returns a code to indicate success or failure
-   *   >0 : Command executed successfully, returns pid of fork.
-   *    0 : Command failed to execute or something wrong on system side
-   *   -1 : No command to execute or something wrong on user side
-   * @description: Execute the command using fork and log the status alongwith
-   */
+     * @param command ( Command ): Command to execute, must be a valid process command and not shell command
+     * @return: returns a code to indicate success or failure
+     *   >0 : Command executed successfully, returns pid of fork.
+     *    0 : Command failed to execute or something wrong on system side
+     *   -1 : No command to execute or something wrong on user side
+     * @description: Execute the command using fork and log the status alongwith
+     */
     int execute_without_wait(const Command &command);
 
     // Return type for parallel execution
@@ -256,210 +256,210 @@ namespace bld
     };
 
     /* @brief: Execute multiple commands on multiple threads.
-   * @param cmds: Vector of commands to execute
-   * @param threads: Number of parallel threads (default: hardware concurrency - 1). Change if you want.
-   * @param strict: If true, stop all threads if an error occurs even in one command.
-   * @return: Exec_par_result
-   */
+     * @param cmds: Vector of commands to execute
+     * @param threads: Number of parallel threads (default: hardware concurrency - 1). Change if you want.
+     * @param strict: If true, stop all threads if an error occurs even in one command.
+     * @return: Exec_par_result
+     */
     bld::Exec_par_result execute_parallel(const std::vector<bld::Command> &cmds, size_t threads = (std::thread::hardware_concurrency() - 1),
                                           bool strict = true);
 
     /* @description: Print system metadata:
-   *  1. Operating System
-   *  2. Compiler
-   *  3. Architecture
-   */
+     *  1. Operating System
+     *  2. Compiler
+     *  3. Architecture
+     */
     void print_metadata();
 
     /* @brief: Preprocess the command for shell execution
-   * @param cmd ( Command ): Command to preprocess
-   * @return: Preprocessed command for shell execution
-   * @description: Preprocess the command for shell execution by adding shell command and arguments
-   *    Windows:     cmd.exe /c <command>
-   *    Linux/macOS: /bin/sh -c <command>
-   */
+     * @param cmd ( Command ): Command to preprocess
+     * @return: Preprocessed command for shell execution
+     * @description: Preprocess the command for shell execution by adding shell command and arguments
+     *    Windows:     cmd.exe /c <command>
+     *    Linux/macOS: /bin/sh -c <command>
+     */
     Command preprocess_commands_for_shell(const Command &cmd);
 
     /* @brief: Execute the shell command with preprocessed parts
-   * param cmd ( Command ): Command to execute in shell
-   * @description: Execute the shell command with preprocessed parts
-   *    Uses execute function to execute the preprocessed command
-   *  return the return value of the execute function
-   */
+     * param cmd ( Command ): Command to execute in shell
+     * @description: Execute the shell command with preprocessed parts
+     *    Uses execute function to execute the preprocessed command
+     *  return the return value of the execute function
+     */
     int execute_shell(std::string command);
 
     /* @brief: Execute the shell command with preprocessed parts but asks wether to execute or not first
-   * @param cmd ( Command ): Command to execute in shell
-   * @param prompt ( bool ): Ask for confirmation before executing
-   * @description: Execute the shell command with preprocessed parts with prompting
-   *    Uses execute function to execute the preprocessed command
-   *    return the return value of the execute function
-   */
+     * @param cmd ( Command ): Command to execute in shell
+     * @param prompt ( bool ): Ask for confirmation before executing
+     * @description: Execute the shell command with preprocessed parts with prompting
+     *    Uses execute function to execute the preprocessed command
+     *    return the return value of the execute function
+     */
     int execute_shell(std::string command, bool prompt);
 
     /* @brief: Read output from a process command execution
-   * @param cmd ( Command ): Command struct containing the process command and arguments
-   * @param output ( std::string& ): Reference to string where output will be stored
-   * @param buffer_size ( size_t ): Size of buffer for reading output (default: 4096)
-   * @return ( bool ): true if successful, false otherwise
-   */
+     * @param cmd ( Command ): Command struct containing the process command and arguments
+     * @param output ( std::string& ): Reference to string where output will be stored
+     * @param buffer_size ( size_t ): Size of buffer for reading output (default: 4096)
+     * @return ( bool ): true if successful, false otherwise
+     */
     bool read_process_output(const Command &cmd, std::string &output, size_t buffer_size = 4096);
 
     /* @brief: Read output from a shell command execution
-   * @param shell_cmd ( std::string ): Shell command to execute and read output from
-   * @param output ( std::string& ): Reference to string where output will be stored
-   * @param buffer_size ( size_t ): Size of buffer for reading output (default: 4096)
-   * @return ( bool ): true if successful, false otherwise
-   */
+     * @param shell_cmd ( std::string ): Shell command to execute and read output from
+     * @param output ( std::string& ): Reference to string where output will be stored
+     * @param buffer_size ( size_t ): Size of buffer for reading output (default: 4096)
+     * @return ( bool ): true if successful, false otherwise
+     */
     bool read_shell_output(const std::string &shell_cmd, std::string &output, size_t buffer_size = 4096);
 
     /* @brief: Check if the executable is outdated i.e. source file is newer than the executable
-   * @param file_name ( std::string ): Source file name
-   * @param executable ( std::string ): Executable file name
-   * @description: Check if the source file is newer than the executable. Uses last write time to compare.
-   *  Can be used for anything realistically, just enter paths and it will return.
-   *  it basically returns ( modify_time(file) > modify_time(executable) ) irrespective of file type
-   */
+     * @param file_name ( std::string ): Source file name
+     * @param executable ( std::string ): Executable file name
+     * @description: Check if the source file is newer than the executable. Uses last write time to compare.
+     *  Can be used for anything realistically, just enter paths and it will return.
+     *  it basically returns ( modify_time(file) > modify_time(executable) ) irrespective of file type
+     */
     bool is_executable_outdated(std::string file_name, std::string executable);
 
     /* @brief: Rebuild the executable if the source file is newer than the executable and runs it
-   * @param filename ( std::string ): Source file name
-   * @param executable ( std::string ): Executable file name
-   * @param compiler ( std::string ): Compiler command to use (default: "")
-   *  It can detect compiler itself if not provided
-   *  Supported compilers: g++, clang++, cl
-   *  @description: Generally used for actual build script
-   */
+     * @param filename ( std::string ): Source file name
+     * @param executable ( std::string ): Executable file name
+     * @param compiler ( std::string ): Compiler command to use (default: "")
+     *  It can detect compiler itself if not provided
+     *  Supported compilers: g++, clang++, cl
+     *  @description: Generally used for actual build script
+     */
     void rebuild_yourself_onchange_and_run(const std::string &filename, const std::string &executable, std::string compiler = "");
 
     /* @brief: Rebuild the executable if the source file is newer than the executable
-   * @param filename ( std::string ): Source file name (C++ only)
-   * @param executable ( std::string ): Executable file name
-   * @param compiler ( std::string ): Compiler command to use (default: "")
-   *  It can detect compiler itself if not provided
-   *  Supported compilers: g++, clang++, cl
-   *  @description: Actually for general use and can be used to rebuild any *C++* file since it doesn't restart the process
-   */
+     * @param filename ( std::string ): Source file name (C++ only)
+     * @param executable ( std::string ): Executable file name
+     * @param compiler ( std::string ): Compiler command to use (default: "")
+     *  It can detect compiler itself if not provided
+     *  Supported compilers: g++, clang++, cl
+     *  @description: Actually for general use and can be used to rebuild any *C++* file since it doesn't restart the process
+     */
     void rebuild_yourself_onchange(const std::string &filename, const std::string &executable, std::string compiler);
 
     /* @brief: Handle command-line arguments
-   * @param argc ( int ): Number of arguments
-   * @param argv ( char*[] ): Array of arguments
-   * @description: Handle command-line arguments... Currently only handles 'run' and 'config' commands.
-   *    run: Run the target executable or execute the command provided after run 'run <command>'
-   *    config: Set the configuration for the build system and save it to a file. Saving is not handled by function but Config class.
-   */
+     * @param argc ( int ): Number of arguments
+     * @param argv ( char*[] ): Array of arguments
+     * @description: Handle command-line arguments... Currently only handles 'run' and 'config' commands.
+     *    run: Run the target executable or execute the command provided after run 'run <command>'
+     *    config: Set the configuration for the build system and save it to a file. Saving is not handled by function but Config class.
+     */
     void handle_args(int argc, char *argv[]);
 
     /* @brief: Handle the 'run' command
-   * @param args ( std::vector<std::string> ): Arguments for the command
-   * @description: Handle the 'run' command. If no arguments are provided, it runs the target executable from config.
-   */
+     * @param args ( std::vector<std::string> ): Arguments for the command
+     * @description: Handle the 'run' command. If no arguments are provided, it runs the target executable from config.
+     */
     int handle_run_command(std::vector<std::string> args);
 
     /* @brief: Handle the 'config' command
-   * @param args ( std::vector<std::string> ): Arguments for the command
-   * @description: Handle the 'config' command. Sets the configuration based on the arguments.
-   */
+     * @param args ( std::vector<std::string> ): Arguments for the command
+     * @description: Handle the 'config' command. Sets the configuration based on the arguments.
+     */
     void handle_config_command(std::vector<std::string> args, std::string name);
 
     /* @brief: Check if a string starts with a prefix
-   * @param str ( std::string ): String to check
-   * @param prefix ( std::string ): Prefix to check
-   * @description: If size of prefix is greater than size of string, returns false
-   *  Uses std::string::compare() to compare the prefix with the string
-   */
+     * @param str ( std::string ): String to check
+     * @param prefix ( std::string ): Prefix to check
+     * @description: If size of prefix is greater than size of string, returns false
+     *  Uses std::string::compare() to compare the prefix with the string
+     */
     bool starts_with(const std::string &str, const std::string &prefix);
 
     namespace fs
     {
         /* @brief: Read entire file content into a string
-     * @param path: Path to the file
-     * @param content: Reference to string where content will be stored
-     * @return: True if successful, false otherwise
-     */
+         * @param path: Path to the file
+         * @param content: Reference to string where content will be stored
+         * @return: True if successful, false otherwise
+         */
         bool read_file(const std::string &path, std::string &content);
 
         /* @brief: Write string content to a file
-     * @param path: Path to the file
-     * @param content: Content to write
-     * @return: true if successful, false otherwise
-     */
+         * @param path: Path to the file
+         * @param content: Content to write
+         * @return: true if successful, false otherwise
+         */
         bool write_entire_file(const std::string &path, const std::string &content);
 
         /* @brief: Append string content to a file
-     * @param path: Path to the file
-     * @param content: Content to append
-     * @return: true if successful, false otherwise
-     */
+         * @param path: Path to the file
+         * @param content: Content to append
+         * @return: true if successful, false otherwise
+         */
         bool append_file(const std::string &path, const std::string &content);
 
         /* @brief: Read file line by line, calling a function for each line
-     * @param path: Path to the file
-     * @param func: Function to call for each line
-     * @return: true if successful, false otherwise
-     */
+         * @param path: Path to the file
+         * @param func: Function to call for each line
+         * @return: true if successful, false otherwise
+         */
         bool read_lines(const std::string &path, std::vector<std::string> &lines);
 
         /* @brief: Replace text in file
-     * @param path: Path to the file
-     * @param from: Text to replace
-     * @param to: Text to replace with
-     * @return: true if successful, false otherwise
-     */
+         * @param path: Path to the file
+         * @param from: Text to replace
+         * @param to: Text to replace with
+         * @return: true if successful, false otherwise
+         */
         bool replace_in_file(const std::string &path, const std::string &from, const std::string &to);
 
         /* @brief: Copy a file
-     * @param from: Source path
-     * @param to: Destination path
-     * @param overwrite = true: Whether to overwrite if destination exists
-     * @return: true if successful, false otherwise
-     */
+         * @param from: Source path
+         * @param to: Destination path
+         * @param overwrite = true: Whether to overwrite if destination exists
+         * @return: true if successful, false otherwise
+         */
         bool copy_file(const std::string &from, const std::string &to, bool overwrite = false);
 
         /* @brief: Move/Rename a file
-     * @param from: Source path
-     * @param to: Destination path
-     * @return: true if successful, false otherwise
-     */
+         * @param from: Source path
+         * @param to: Destination path
+         * @return: true if successful, false otherwise
+         */
         bool move_file(const std::string &from, const std::string &to);
 
         /* @brief: Get file extension
-     * @param path: Path to the file
-     * @return: File extension including the dot, or empty string if none
-     */
+         * @param path: Path to the file
+         * @return: File extension including the dot, or empty string if none
+         */
         std::string get_extension(const std::string &path);
 
         /* @brief: Create directory and all parent directories if they don't exist
-     * @param path: Path to create
-     * @return: true if successful, false otherwise
-     */
+         * @param path: Path to create
+         * @return: true if successful, false otherwise
+         */
         bool create_directory(const std::string &path);
 
         /* @brief: Create directory and all parent directories if they don't exist
-     * @param path: Path to create
-     * @return: true if successful, false otherwise
-     */
+         * @param path: Path to create
+         * @return: true if successful, false otherwise
+         */
         bool create_dir_if_not_exists(const std::string &path);
 
         /* @brief: Remove directory and all its contents if it exists
-     * @param path: Path to remove
-     * @return: true if successful, false otherwise
-     */
+         * @param path: Path to remove
+         * @return: true if successful, false otherwise
+         */
         bool remove_dir(const std::string &path);
 
         /* @brief: Get list of all files in directory
-     * @param path: Directory path
-     * @param recursive = true: Whether to include files in subdirectories
-     * @return: Vector of file paths
-     */
+         * @param path: Directory path
+         * @param recursive = true: Whether to include files in subdirectories
+         * @return: Vector of file paths
+         */
         std::vector<std::string> list_files_in_dir(const std::string &path, bool recursive = false);
 
         /* @brief: Get list of all directories in directory
-     * @param path: Directory path
-     * @param recursive = true: Whether to include subdirectories of subdirectories
-     * @return: Vector of directory paths
-     */
+         * @param path: Directory path
+         * @param recursive = true: Whether to include subdirectories of subdirectories
+         * @return: Vector of directory paths
+         */
         std::vector<std::string> list_directories(const std::string &path, bool recursive = false);
     }  // namespace fs
 
@@ -513,47 +513,47 @@ namespace bld
 
       public:
         /* @brief Add a dependency to the graph.
-     * @param dep The dependency to add.
-     */
+         * @param dep The dependency to add.
+         */
         void add_dep(const Dep &dep);
 
         /* @brief Add a phony target to the graph.
-     * @param target The name of the phony target.
-     * @param deps The dependencies of the phony target.
-     */
+         * @param target The name of the phony target.
+         * @param deps The dependencies of the phony target.
+         */
         void add_phony(const std::string &target, const std::vector<std::string> &deps);
 
         /* @brief Check if a node needs to be rebuilt.
-     * @param node The node to check.
-     * @return true If the node needs to be rebuilt.
-     * @return false If the node does not need to be rebuilt.
-     */
+         * @param node The node to check.
+         * @return true If the node needs to be rebuilt.
+         * @return false If the node does not need to be rebuilt.
+         */
         bool needs_rebuild(const Node *node);
 
         /* @brief Build the target.
-     * @param target The name of the target to build.
-     * @return true If the build was successful.
-     * @return false If the build failed.
-     */
+         * @param target The name of the target to build.
+         * @return true If the build was successful.
+         * @return false If the build failed.
+         */
         bool build(const std::string &target);
 
         /* @brief Build the dependency.
-     * @param dep The dependency to build.
-     * @return true If the build was successful.
-     * @return false If the build failed.
-     */
+         * @param dep The dependency to build.
+         * @return true If the build was successful.
+         * @return false If the build failed.
+         */
         bool build(const Dep &dep);
 
         /* @brief Build all targets in the graph.
-     * @return true If all builds were successful.
-     * @return false If any build failed.
-     */
+         * @return true If all builds were successful.
+         * @return false If any build failed.
+         */
         bool build_all();
 
         /* @brief Build all targets in the graph but all previous checks are discarded (alternative method).
-     * @return true If all builds were successful.
-     * @return false If any build failed.
-     */
+         * @return true If all builds were successful.
+         * @return false If any build failed.
+         */
         bool F_build_all();
 
         bool build_parallel(const std::string &target, size_t thread_count = std::thread::hardware_concurrency());
@@ -561,22 +561,33 @@ namespace bld
 
       private:
         /* @brief Build a node in the graph.
-     * @param target The name of the target to build.
-     * @return true If the build was successful.
-     * @return false If the build failed.
-     */
+         * @param target The name of the target to build.
+         * @return true If the build was successful.
+         * @return false If the build failed.
+         */
         bool build_node(const std::string &target);
 
         /* @brief Detect cycles in the graph.
-     * @param target The name of the target to check.
-     * @param visited The set of visited nodes.
-     * @param in_progress The set of nodes currently being processed.
-     * @return true If a cycle was detected.
-     * @return false If no cycle was detected.
-     */
+         * @param target The name of the target to check.
+         * @param visited The set of visited nodes.
+         * @param in_progress The set of nodes currently being processed.
+         * @return true If a cycle was detected.
+         * @return false If no cycle was detected.
+         */
         bool detect_cycle(const std::string &target, std::unordered_set<std::string> &visited,
                           std::unordered_set<std::string> &in_progress);
+        /* @brief Prepare graph for parallel build
+         * @param target The target to build
+         * @param ready_targets The queue of targets
+         */
         bool prepare_build_graph(const std::string &target, std::queue<std::string> &ready_targets);
+
+        /* @brief Process completed target
+         * @param target The target that was completed
+         * @param ready_targets The queue of targets
+         * @param queue_mutex The mutex for the queue
+         * @param cv The condition variable
+         */
         void process_completed_target(const std::string &target, std::queue<std::string> &ready_targets, std::mutex &queue_mutex,
                                       std::condition_variable &cv);
     };
