@@ -210,9 +210,9 @@ namespace bld
     };
 
     /* @brief: Convert command-line arguments to vector of strings
-   * @param argc ( int ): Number of arguments
-   * @param argv ( char*[] ): Array of arguments
-   */
+     * @param argc ( int ): Number of arguments
+     * @param argv ( char*[] ): Array of arguments
+     */
     bool args_to_vec(int argc, char *argv[], std::vector<std::string> &args);
 
     /* @beief: Validate the command before executing
@@ -461,6 +461,10 @@ namespace bld
          * @return: Vector of directory paths
          */
         std::vector<std::string> list_directories(const std::string &path, bool recursive = false);
+        
+        std::string get_file_name(std::string full_path);
+        std::string strip_file_name(std::string full_path);
+        
     }  // namespace fs
 
     struct Dep
@@ -1932,6 +1936,19 @@ std::vector<std::string> bld::fs::list_directories(const std::string &path, bool
         bld::log(bld::Log_type::ERROR, "Failed to list directories: " + std::string(e.what()));
     }
     return directories;
+}
+
+
+std::string bld::fs::get_file_name(std::string full_path)
+{
+    auto path = std::filesystem::path(full_path);
+    return path.filename().string();
+}
+
+std::string bld::fs::strip_file_name(std::string full_path)
+{
+    auto path = std::filesystem::path(full_path);
+    return path.parent_path().string();
 }
 
 bld::Dep::Dep(std::string target, std::vector<std::string> dependencies, bld::Command command)
