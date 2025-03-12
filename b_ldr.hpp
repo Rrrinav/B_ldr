@@ -440,6 +440,14 @@ namespace bld
      */
     bool create_dir_if_not_exists(const std::string &path);
 
+    /* @brief: Create multiple directories and all parent directories if they don't exist
+     * @param paths: Paths to create
+     * @return: true if successful, false otherwise
+     */
+    template <typename... Paths,
+              typename = std::enable_if_t<(std::is_convertible_v<Paths, std::string> && ...)>>
+    bool create_dirs_if_not_exists(const Paths&... paths);
+
     /* @brief: Remove directory and all its contents if it exists
      * @param path: Path to remove
      * @return: true if successful, false otherwise
@@ -1939,6 +1947,12 @@ bool bld::fs::create_dir_if_not_exists(const std::string &path)
     bld::log(bld::Log_type::ERROR, "Failed to create directory: " + std::string(e.what()));
     return false;
   }
+}
+
+template <typename... Paths, typename>
+bool bld::fs::create_dirs_if_not_exists(const Paths&... paths)
+{
+    return (... && create_dir_if_not_exists(paths));
 }
 
 bool bld::fs::remove_dir(const std::string &path)
