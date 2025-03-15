@@ -1929,7 +1929,7 @@ bool bld::fs::create_dir_if_not_exists(const std::string &path)
 {
   if (std::filesystem::exists(path))
   {
-    bld::log(bld::Log_type::INFO, "Directory to create already exists: " + path);
+    bld::log(bld::Log_type::WARNING, "Directory ' "  + path + " ' already exists, manage it yourself to not lose data!" );
     return true;
   }
 
