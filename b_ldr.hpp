@@ -18,6 +18,17 @@
   OUT OF OR IN CONNECTION WITH THE SOFTWARE OR THE USE OR OTHER DEALINGS IN THE SOFTWARE.
 */
 
+/*
+  INFO: DEFINES:
+  1. B_LDR_IMPLEMENTATION          : Include all the implementation in the header file.
+  2. BLD_REBUILD_YOURSELF_ONCHANGE : Rebuild the build executable if the source file is newer than the executable and run it.
+  3. BLD_HANDLE_ARGS               : Handle command-line arguments (only run and config commands).
+  4. BLD_REBUILD_AND_ARGS          : Rebuild the executable if the source file is newer than the executable and handle command-line arguments.
+  5. BLD_NO_COLORS                 : Disable colors in log messages.
+  6. BLD_USE_CONFIG                : Enable the configuration system in the build tool.
+  7. BLD_DEFAULT_CONFIG_FILE       : File to save the configuration to.
+*/
+
 #pragma once
 
 #ifdef _WIN32
@@ -750,22 +761,42 @@ namespace bld
 
 void bld::log(bld::Log_type type, const std::string &msg)
 {
+  #ifdef BLD_NO_COLORS
+    static constexpr const char *COLOUR_INFO = "";
+    static constexpr const char *COLOUR_WARN = "";
+    static constexpr const char *COLOUR_ERROR = "";
+    static constexpr const char *COLOUR_DEBUG = "";
+    static constexpr const char *COLOUR_RESET = "";
+  #else
+    static constexpr const char *COLOUR_INFO = "\x1b[32m";
+    static constexpr const char *COLOUR_WARN = "\x1b[1m\x1b[33m";
+    static constexpr const char *COLOUR_ERROR = "\x1b[1m\x1b[31m";
+    static constexpr const char *COLOUR_DEBUG = "\x1b[36m";
+    static constexpr const char *COLOUR_RESET = "\x1b[0m";
+  #endif
+
   switch (type)
   {
     case Log_type::INFO:
-      std::cout << "[INFO]: " << msg << std::endl;
+      std::cerr << COLOUR_INFO << "[INFO]: " << COLOUR_RESET << msg << std::endl;
       break;
+
     case Log_type::WARNING:
-      std::cout << "[WARNING]: " << msg << std::endl;
+      std::cerr << COLOUR_WARN << "[WARNING]: " << COLOUR_RESET << msg << std::endl;
+      std::cerr.flush();
       break;
+
     case Log_type::ERROR:
-      std::cerr << "[ERROR]: " << msg << std::flush << std::endl;
+      std::cerr << COLOUR_ERROR << "[ERROR]: " << COLOUR_RESET << msg << std::endl;
+      std::cerr.flush();
       break;
+
     case Log_type::DEBUG:
-      std::cout << "[DEBUG]: " << msg << std::flush << std::endl;
+      std::cerr << COLOUR_DEBUG << "[DEBUG]: " << COLOUR_RESET << msg << std::endl;
       break;
+
     default:
-      std::cout << "[UNKNOWN]: " << msg << std::endl;
+      std::cerr << "[UNKNOWN]: " << msg << std::endl;
       break;
   }
 }
