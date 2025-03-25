@@ -93,9 +93,92 @@ The **`fs`** namespace provides utilities for file system operations:
 -   **`std::string get_extension(const std::string &path)`**: Get the file extension.
 -   **`bool create_directory(const std::string &path)`**: Create a directory.
 -   **`bool create_dir_if_not_exists(const std::string &path)`**: Create a directory if it doesn't exist.
+-   **`bool create_dirs_if_not_exists(const Paths&... paths)`**: Creates multiple directories if they don't exist.
 -   **`bool remove_dir(const std::string &path)`**: Remove a directory and its contents.
 -   **`std::vector<std::string> list_files_in_dir(const std::string &path, bool recursive = false)`**: List files in a directory.
 -   **`std::vector<std::string> list_directories(const std::string &path, bool recursive = false)`**: List directories in a directory.
+-   **`std::string get_file_name(std::string full_path);`**: Get the file name from the full path.
+
+-   **`std::string strip_file_name(std::string full_path);`**: Strip off the file name from the full path thus leaving behind the directory name.
+
+### environment variables
+
+The `env` namespace provides utilities for environment variable operations:
+
+-   **`std::string get(const std::string &key)`**: Get the value of env variable
+-   **`bool set(const std::string &key, const std::string &value);`**: Set an environment variable
+-   **`bool exists(const std::string &key);`**: Check if an env variable exists
+-   **`bool unset(const std::string &key);`**: Unset an env variable
+-   **`std::unordered_map<std::string, std::string> get_all();`**: Get a map of all the environment variables
+
+### Strings
+
+The namespace `str` under `bld` provides these string functions
+
+- `std::string trim(const std::string &str)`: Removes leading and trailing whitespace from a string, including: `' '`, `\t`, `\n`, `\r`, `\f`, `\v`.
+
+- `std::string trim_left(const std::string &str)`: Removes leading whitespace from a string.
+
+- `std::string trim_right(const std::string &str)`: Removes trailing whitespace from a string.
+
+- `std::string to_lower(const std::string &str)`: Converts a string to lowercase.
+
+- `std::string to_upper(const std::string &str)`: Converts a string to uppercase.
+
+- `std::string replace(std::string str, const std::string &from, const std::string &to)`: Replaces all occurrences of a substring `from` with another substring `to` within `str`.
+
+- `bool starts_with(const std::string &str, const std::string &prefix)`: Checks if `str` starts with `prefix`.
+
+- `bool ends_with(const std::string &str, const std::string &suffix)`: Checks if `str` ends with `suffix`.
+
+- `std::string join(const std::vector<std::string> &strs, const std::string &delimiter)`: Joins a vector of strings into a single string separated by `delimiter`.
+
+- `std::string trim_till(const std::string &str, char delimiter)`: Trims `str` until the first occurrence of `delimiter`.
+
+- `bool equal_ignorecase(const std::string &str1, const std::string &str2)`: Checks if two strings are equal, ignoring case.
+
+- `std::vector<std::string> chop_by_delimiter(const std::string &s, const std::string &delimiter)`: Splits `s` by `delimiter` and returns a vector of the substrings.
+
+- `std::string remove_duplicates(const std::string &str)`: Removes duplicate characters from `str`.
+
+- `std::string remove_duplicates_case_insensitive(const std::string &str)`: Removes duplicate characters from `str` in a case-insensitive manner.
+
+- `bool is_numeric(const std::string &str)`: Checks if `str` is a valid number. Handles integers and floating-point numbers, supports positive and negative numbers, and ensures only one decimal point.
+
+- `std::string replace_all(const std::string &str, const std::string &from, const std::string &to)`: Replaces all occurrences of `from` with `to` in `str`. Handles multiple replacements efficiently, supports edge cases, and returns the original string if `from` is not found.
+
+- `std::string trim(const std::string &str)`: Removes leading and trailing whitespace from a string, including: `' '`, `\t`, `\n`, `\r`, `\f`, `\v`.
+
+- `std::string trim_left(const std::string &str)`: Removes leading whitespace from a string.
+
+- `std::string trim_right(const std::string &str)`: Removes trailing whitespace from a string.
+
+- `std::string to_lower(const std::string &str)`: Converts a string to lowercase.
+
+- `std::string to_upper(const std::string &str)`: Converts a string to uppercase.
+
+- `std::string replace(std::string str, const std::string &from, const std::string &to)`: Replaces all occurrences of a substring `from` with another substring `to` within `str`.
+
+- `bool starts_with(const std::string &str, const std::string &prefix)`: Checks if `str` starts with `prefix`.
+
+- `bool ends_with(const std::string &str, const std::string &suffix)`: Checks if `str` ends with `suffix`.
+
+- `std::string join(const std::vector<std::string> &strs, const std::string &delimiter)`: Joins a vector of strings into a single string separated by `delimiter`.
+
+- `std::string trim_till(const std::string &str, char delimiter)`: Trims `str` until the first occurrence of `delimiter`.
+
+- `bool equal_ignorecase(const std::string &str1, const std::string &str2)`: Checks if two strings are equal, ignoring case.
+
+- `std::vector<std::string> chop_by_delimiter(const std::string &s, const std::string &delimiter)`: Splits `s` by `delimiter` and returns a vector of the substrings.
+
+- `std::string remove_duplicates(const std::string &str)`: Removes duplicate characters from `str`.
+
+- `std::string remove_duplicates_case_insensitive(const std::string &str)`: Removes duplicate characters from `str` in a case-insensitive manner.
+
+- `bool is_numeric(const std::string &str)`: Checks if `str` is a valid number. Handles integers and floating-point numbers, supports positive and negative numbers, and ensures only one decimal point.
+
+- `std::string replace_all(const std::string &str, const std::string &from, const std::string &to)`: Replaces all occurrences of `from` with `to` in `str`. Handles multiple replacements efficiently, supports edge cases, and returns the original string if `from` is not found.
+
 
 ### Command-Line Argument Handling
 
