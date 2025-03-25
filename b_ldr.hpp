@@ -493,6 +493,39 @@ namespace bld
 
   }  // namespace fs
 
+  namespace env
+  {
+    /* @brief: Get the value of an environment variable
+     * @param name: Name of the environment variable
+     * @return: Value of the environment variable
+     *          empty string if not found
+     */
+    std::string get(const std::string &key);
+
+    /* @brief: Set the value of an environment variable
+     * @param name: Name of the environment variable
+     * @return: true if successful, false otherwise
+     */
+    bool set(const std::string &key, const std::string &value);
+
+    /* @brief: Check if an environment variable exists
+     * @param name: Name of the environment variable
+     * @return: true if exists, false otherwise
+     */
+    bool exists(const std::string &key);
+
+    /* @brief: Unset the value of an environment variable
+     * @param name: Name of the environment variable
+     * @return: true if successful, false otherwise
+     */
+    bool unset(const std::string &key);
+
+    /* @brief: Get all environment variables
+     * @return: map of all environment variables
+     */
+    std::unordered_map<std::string, std::string> get_all();
+  }
+
   namespace str
   {
     /* @brief remove leading and trailing whitespace from a string
@@ -746,11 +779,13 @@ namespace bld
   };
 }  // namespace bld
 
+#define B_LDR_IMPLEMENTATION
 #ifdef B_LDR_IMPLEMENTATION
 
 #include <algorithm>
 #include <atomic>
 #include <cstdlib>
+#include <unordered_map>
 #include <filesystem>
 #include <fstream>
 #include <iostream>
@@ -2066,6 +2101,74 @@ std::string bld::fs::strip_file_name(std::string full_path)
 {
   auto path = std::filesystem::path(full_path);
   return path.parent_path().string();
+}
+
+std::string bld::env::get(const std::string &key)
+{
+  const char *val = std::getenv(key.c_str());
+  return val ? std::string(val) : "";
+}
+
+bool bld::env::set(const std::string &key, const std::string &value)
+{
+  return setenv(key.c_str(), value.c_str(), 1) == 0;
+}
+
+bool bld::env::exists(const std::string &key)
+{
+  return std::getenv(key.c_str()) != nullptr;
+}
+
+bool bld::env::unset(const std::string &key)
+{
+  return unsetenv(key.c_str()) == 0;
+}
+
+#if defined(__APPLE__) || defined(__FreeBSD__)
+    #include <crt_externs.h>  // For `_NSGetEnviron()`
+    #define ENVIRON (*_NSGetEnviron())
+#elif defined(_WIN32)
+    #include <windows.h>
+    #define ENVIRON nullptr  // Not used in Windows implementation
+#else
+    extern char **environ;  // Standard for Linux
+    #define ENVIRON environ
+#endif
+
+std::unordered_map<std::string, std::string> bld::env::get_all()
+{
+  std::unordered_map<std::string, std::string> env_vars;
+
+#if defined(_WIN32)
+  // Windows uses `GetEnvironmentStrings()` to retrieve environment variables
+  LPWCH env_block = GetEnvironmentStringsW();
+  if (!env_block) return env_vars;
+
+  LPWCH env = env_block;
+  while (*env)
+  {
+    std::wstring entry(env);
+    size_t pos = entry.find(L'=');
+    if (pos != std::wstring::npos)
+    {
+      std::string key(entry.begin(), entry.begin() + pos);
+      std::string value(entry.begin() + pos + 1, entry.end());
+      env_vars[key] = value;
+    }
+    env += entry.size() + 1;  // Move to next environment variable
+  }
+  FreeEnvironmentStringsW(env_block);
+
+#else
+  // Linux, macOS, FreeBSD: Use `environ`
+  for (char **env = ENVIRON; *env; ++env)
+  {
+    std::string entry(*env);
+    size_t pos = entry.find('=');
+    if (pos != std::string::npos) env_vars[entry.substr(0, pos)] = entry.substr(pos + 1);
+  }
+#endif
+  return env_vars;
 }
 
 bld::Dep::Dep(std::string target, std::vector<std::string> dependencies, bld::Command command)
