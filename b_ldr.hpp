@@ -32,12 +32,13 @@
 #pragma once
 
 #ifdef _WIN32
-#include <Windows.h>
+  #include <Windows.h>
+  #include <sysinfoapi.h>
 #else
-#include <sys/types.h>
-#include <sys/utsname.h>
-#include <sys/wait.h>
-#include <unistd.h>
+  #include <sys/types.h>
+  #include <sys/utsname.h>
+  #include <sys/wait.h>
+  #include <unistd.h>
 #endif
 
 #include <condition_variable>
@@ -84,18 +85,12 @@
  * You can define your own configuration system or use the Config class directly.
  *
  * I dont know why I didn't wrap whole class in the macro. Probably because I want to extend it later to not just be a singleton.
-*/
+ */
 
 namespace bld
 {
   // Log type is enumeration for bld::function to show type of loc>
-  enum class Log_type
-  {
-    INFO,
-    WARNING,
-    ERR,
-    DEBUG
-  };
+  enum class Log_type { INFO, WARNING, ERR, DEBUG };
 
   /* @param type ( Log_type enum ): Type of log
    * @param msg ( std::string ): Message to log
@@ -779,6 +774,7 @@ namespace bld
   };
 }  // namespace bld
 
+#define B_LDR_IMPLEMENTATION
 #ifdef B_LDR_IMPLEMENTATION
 
 #include <algorithm>
@@ -1067,44 +1063,72 @@ bld::Exec_par_result bld::execute_parallel(const std::vector<bld::Command> &cmds
 
 void bld::print_metadata()
 {
-  std::cout << '\n';
-  log(Log_type::INFO, "Printing system metadata...........................................");
+  std::cerr << '\n';
+  bld::log(Log_type::INFO, "Printing system metadata...........................................");
+
   // 1. Get OS information
+  std::string os_name = "Unknown";
+  std::string os_version = "Unknown";
+  std::string arch = "Unknown";
+
+#ifdef _WIN32
+  OSVERSIONINFOEX os_info;
+  ZeroMemory(&os_info, sizeof(OSVERSIONINFOEX));
+  os_info.dwOSVersionInfoSize = sizeof(OSVERSIONINFOEX);
+
+  if (GetVersionEx(reinterpret_cast<OSVERSIONINFO *>(&os_info)))
+  {
+    os_name = "Windows";
+    os_version = std::to_string(os_info.dwMajorVersion) + "." + std::to_string(os_info.dwMinorVersion) + " (Build " +
+                 std::to_string(os_info.dwBuildNumber) + ")";
+  }
+
+  // Detect architecture
+  SYSTEM_INFO sys_info;
+  GetNativeSystemInfo(&sys_info);
+  switch (sys_info.wProcessorArchitecture)
+  {
+    case PROCESSOR_ARCHITECTURE_AMD64:
+      arch = "64-bit";
+      break;
+    case PROCESSOR_ARCHITECTURE_INTEL:
+      arch = "32-bit";
+      break;
+    case PROCESSOR_ARCHITECTURE_ARM64:
+      arch = "ARM 64-bit";
+      break;
+    case PROCESSOR_ARCHITECTURE_ARM:
+      arch = "ARM 32-bit";
+      break;
+    default:
+      arch = "Unknown";
+      break;
+  }
+#else
   struct utsname sys_info;
   if (uname(&sys_info) == 0)
   {
-    std::cout << "    Operating System: " << sys_info.sysname << " " << sys_info.release << " (" << sys_info.machine << ")" << std::endl;
+    os_name = sys_info.sysname;
+    os_version = sys_info.release;
+    arch = sys_info.machine;
   }
-  else
-  {
-#ifdef _WIN32
-    std::cout << "    Operating System: Windows" << std::endl;
-#else
-    std::cerr << "Failed to get OS information." << std::endl;
 #endif
-  }
+
+  std::cerr << "    Operating System: " << os_name << " " << os_version << " (" << arch << ")" << std::endl;
 
   // 2. Compiler information
-  std::cout << "    Compiler:         ";
+  std::cerr << "    Compiler:         ";
 #ifdef __clang__
-  std::cout << "Clang " << __clang_major__ << "." << __clang_minor__ << "." << __clang_patchlevel__;
+  std::cerr << "Clang " << __clang_major__ << "." << __clang_minor__ << "." << __clang_patchlevel__;
 #elif defined(__GNUC__)
-  std::cout << "GCC " << __GNUC__ << "." << __GNUC_MINOR__ << "." << __GNUC_PATCHLEVEL__;
+  std::cerr << "GCC " << __GNUC__ << "." << __GNUC_MINOR__ << "." << __GNUC_PATCHLEVEL__;
 #elif defined(_MSC_VER)
-  std::cout << "MSVC " << _MSC_VER;
+  std::cerr << "MSVC " << _MSC_VER;
 #else
-  std::cout << "Unknown Compiler";
+  std::cerr << "Unknown Compiler";
 #endif
-  std::cout << std::endl;
+  std::cerr << std::endl;
 
-  // 3. Architecture
-#if defined(__x86_64__) || defined(_M_X64)
-  std::cout << "    Architecture:     64-bit" << std::endl;
-#elif defined(__i386) || defined(_M_IX86)
-  std::cout << "    Architecture:     32-bit" << std::endl;
-#else
-  std::cout << "    Architecture:     Unknown" << std::endl;
-#endif
   log(Log_type::INFO, "...................................................................\n");
 }
 
@@ -1620,13 +1644,13 @@ int bld::handle_run_command(std::vector<std::string> args)
   }
   else if (args.size() > 2)
   {
-    bld::log(bld::Log_type::ERROR, "Too many arguments for 'run' command. Only executables are supported.");
+    bld::log(bld::Log_type::ERR, "Too many arguments for 'run' command. Only executables are supported.");
     bld::log(bld::Log_type::INFO, "Usage: run <executable>");
     exit(EXIT_FAILURE);
   }
   if (bld::Config::get().target_executable.empty())
   {
-    bld::log(bld::Log_type::ERROR, "No target executable specified in config");
+    bld::log(bld::Log_type::ERR, "No target executable specified in config");
     exit(1);
   }
 
