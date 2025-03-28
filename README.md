@@ -113,7 +113,6 @@ int main(int argc, char *argv[])
 {
   // Check if the executable needs to be rebuilt and restart if necessary
   BLD_REBUILD_YOURSELF_ONCHANGE();
-
 }
 ```
 
@@ -128,6 +127,7 @@ bld::print_metadata();
 ## TODO
 
 - [X] Parallel incremental builds
+- [ ] Fully cross-platform functions
 
 ## Author
 

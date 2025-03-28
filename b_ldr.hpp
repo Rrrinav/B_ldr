@@ -93,7 +93,7 @@ namespace bld
   {
     INFO,
     WARNING,
-    ERROR,
+    ERR,
     DEBUG
   };
 
@@ -779,7 +779,6 @@ namespace bld
   };
 }  // namespace bld
 
-#define B_LDR_IMPLEMENTATION
 #ifdef B_LDR_IMPLEMENTATION
 
 #include <algorithm>
@@ -821,7 +820,7 @@ void bld::log(bld::Log_type type, const std::string &msg)
       std::cerr.flush();
       break;
 
-    case Log_type::ERROR:
+    case Log_type::ERR:
       std::cerr << COLOUR_ERROR << "[ERROR]: " << COLOUR_RESET << msg << std::endl;
       std::cerr.flush();
       break;
@@ -898,7 +897,7 @@ int bld::wait_for_process(pid_t pid)
     int exit_code = WEXITSTATUS(status);
     if (exit_code != 0)
     {
-      bld::log(bld::Log_type::ERROR, "Process exited with non-zero status: " + std::to_string(exit_code));
+      bld::log(bld::Log_type::ERR, "Process exited with non-zero status: " + std::to_string(exit_code));
       return -1;  // Return exit code for failure
     }
     bld::log(bld::Log_type::INFO, "Process exited successfully.");
@@ -906,7 +905,7 @@ int bld::wait_for_process(pid_t pid)
   else if (WIFSIGNALED(status))
   {
     int signal = WTERMSIG(status);
-    bld::log(bld::Log_type::ERROR, "Process terminated by signal: " + std::to_string(signal));
+    bld::log(bld::Log_type::ERR, "Process terminated by signal: " + std::to_string(signal));
     return -1;  // Indicate signal termination
   }
   else { bld::log(bld::Log_type::WARNING, "Unexpected process termination status."); }
@@ -918,7 +917,7 @@ int bld::execute(const Command &command)
 {
   if (command.is_empty())
   {
-    bld::log(Log_type::ERROR, "No command to execute.");
+    bld::log(Log_type::ERR, "No command to execute.");
     return -1;
   }
 
@@ -928,7 +927,7 @@ int bld::execute(const Command &command)
   pid_t pid = fork();
   if (pid == -1)
   {
-    bld::log(Log_type::ERROR, "Failed to create child process.");
+    bld::log(Log_type::ERR, "Failed to create child process.");
     return 0;
   }
   else if (pid == 0)
@@ -937,11 +936,11 @@ int bld::execute(const Command &command)
     if (execvp(args[0], args.data()) == -1)
     {
       perror("execvp");
-      bld::log(Log_type::ERROR, "Failed with error: " + std::string(strerror(errno)));
+      bld::log(Log_type::ERR, "Failed with error: " + std::string(strerror(errno)));
       exit(EXIT_FAILURE);
     }
     // This line should never be reached
-    bld::log(Log_type::ERROR, "Unexpected code execution after execvp. Did we find a bug? in libc or kernel?");
+    bld::log(Log_type::ERR, "Unexpected code execution after execvp. Did we find a bug? in libc or kernel?");
     abort();
   }
 
@@ -952,7 +951,7 @@ int bld::execute_without_wait(const Command &command)
 {
   if (command.is_empty())
   {
-    bld::log(Log_type::ERROR, "No command to execute.");
+    bld::log(Log_type::ERR, "No command to execute.");
     return -1;
   }
 
@@ -962,7 +961,7 @@ int bld::execute_without_wait(const Command &command)
   pid_t pid = fork();
   if (pid == -1)
   {
-    bld::log(Log_type::ERROR, "Failed to create child process.");
+    bld::log(Log_type::ERR, "Failed to create child process.");
     return 0;
   }
   else if (pid == 0)
@@ -971,11 +970,11 @@ int bld::execute_without_wait(const Command &command)
     if (execvp(args[0], args.data()) == -1)
     {
       perror("execvp");
-      bld::log(Log_type::ERROR, "Failed with error: " + std::string(strerror(errno)));
+      bld::log(Log_type::ERR, "Failed with error: " + std::string(strerror(errno)));
       exit(EXIT_FAILURE);
     }
     // This line should never be reached
-    bld::log(Log_type::ERROR, "Unexpected code execution after execvp. Did we find a bug? in libc or kernel?");
+    bld::log(Log_type::ERR, "Unexpected code execution after execvp. Did we find a bug? in libc or kernel?");
     abort();
   }
 
@@ -1026,7 +1025,7 @@ bld::Exec_par_result bld::execute_parallel(const std::vector<bld::Command> &cmds
       {
         {
           std::lock_guard<std::mutex> lock(output_mutex);
-          log(Log_type::ERROR, "Failed to execute: " + cmds[cmd_idx].get_print_string());
+          log(Log_type::ERR, "Failed to execute: " + cmds[cmd_idx].get_print_string());
         }
 
         // Record the failed command index
@@ -1159,20 +1158,20 @@ bool bld::read_process_output(const Command &cmd, std::string &output, size_t bu
 {
   if (cmd.is_empty())
   {
-    bld::log(Log_type::ERROR, "No command to execute.");
+    bld::log(Log_type::ERR, "No command to execute.");
     return false;
   }
 
   if (buffer_size == 0)
   {
-    bld::log(Log_type::ERROR, "Buffer size cannot be zero.");
+    bld::log(Log_type::ERR, "Buffer size cannot be zero.");
     return false;
   }
 
   int pipefd[2];
   if (pipe(pipefd) == -1)
   {
-    bld::log(Log_type::ERROR, "Failed to create pipe: " + std::string(strerror(errno)));
+    bld::log(Log_type::ERR, "Failed to create pipe: " + std::string(strerror(errno)));
     return false;
   }
 
@@ -1182,7 +1181,7 @@ bool bld::read_process_output(const Command &cmd, std::string &output, size_t bu
   pid_t pid = fork();
   if (pid == -1)
   {
-    bld::log(Log_type::ERROR, "Failed to create child process: " + std::string(strerror(errno)));
+    bld::log(Log_type::ERR, "Failed to create child process: " + std::string(strerror(errno)));
     close(pipefd[0]);
     close(pipefd[1]);
     return false;
@@ -1198,7 +1197,7 @@ bool bld::read_process_output(const Command &cmd, std::string &output, size_t bu
     if (execvp(args[0], args.data()) == -1)
     {
       perror("execvp");
-      bld::log(Log_type::ERROR, "Failed with error: " + std::string(strerror(errno)));
+      bld::log(Log_type::ERR, "Failed with error: " + std::string(strerror(errno)));
       exit(EXIT_FAILURE);
     }
     abort();  // Should never reach here
@@ -1223,21 +1222,21 @@ bool bld::read_shell_output(const std::string &cmd, std::string &output, size_t 
 {
   if (buffer_size == 0)
   {
-    bld::log(Log_type::ERROR, "Buffer size cannot be zero.");
+    bld::log(Log_type::ERR, "Buffer size cannot be zero.");
     return false;
   }
 
   int pipefd[2];
   if (pipe(pipefd) == -1)
   {
-    bld::log(Log_type::ERROR, "Failed to create pipe: " + std::string(strerror(errno)));
+    bld::log(Log_type::ERR, "Failed to create pipe: " + std::string(strerror(errno)));
     return false;
   }
 
   pid_t pid = fork();
   if (pid == -1)
   {
-    bld::log(Log_type::ERROR, "Failed to create child process: " + std::string(strerror(errno)));
+    bld::log(Log_type::ERR, "Failed to create child process: " + std::string(strerror(errno)));
     return false;
   }
   else if (pid == 0)
@@ -1279,7 +1278,7 @@ bool bld::is_executable_outdated(std::string file_name, std::string executable)
     // Check if the source file exists
     if (!std::filesystem::exists(file_name))
     {
-      bld::log(Log_type::ERROR, "Source file does not exist: " + file_name);
+      bld::log(Log_type::ERR, "Source file does not exist: " + file_name);
       return false;  // Or handle this case differently
     }
 
@@ -1295,12 +1294,12 @@ bool bld::is_executable_outdated(std::string file_name, std::string executable)
   }
   catch (const std::filesystem::filesystem_error &e)
   {
-    bld::log(Log_type::ERROR, "Filesystem error: " + std::string(e.what()));
+    bld::log(Log_type::ERR, "Filesystem error: " + std::string(e.what()));
     return false;  // Or handle the error differently
   }
   catch (const std::exception &e)
   {
-    bld::log(Log_type::ERROR, std::string(e.what()));
+    bld::log(Log_type::ERR, std::string(e.what()));
     return false;  // Or handle the error differently
   }
 }
@@ -1328,7 +1327,7 @@ void bld::rebuild_yourself_onchange_and_run(const std::string &filename, const s
     }
     catch (const fs::filesystem_error &e)
     {
-      bld::log(Log_type::ERROR, "Failed to create backup: " + std::string(e.what()));
+      bld::log(Log_type::ERR, "Failed to create backup: " + std::string(e.what()));
       return;
     }
   }
@@ -1356,7 +1355,7 @@ void bld::rebuild_yourself_onchange_and_run(const std::string &filename, const s
   int compile_result = bld::execute(cmd);
   if (compile_result <= 0)
   {
-    bld::log(Log_type::ERROR, "Compilation failed.");
+    bld::log(Log_type::ERR, "Compilation failed.");
 
     // Restore backup if compilation failed and backup exists
     if (fs::exists(backup_path))
@@ -1369,7 +1368,7 @@ void bld::rebuild_yourself_onchange_and_run(const std::string &filename, const s
       }
       catch (const fs::filesystem_error &e)
       {
-        bld::log(Log_type::ERROR, "Failed to restore backup: " + std::string(e.what()));
+        bld::log(Log_type::ERR, "Failed to restore backup: " + std::string(e.what()));
       }
     }
     return;
@@ -1380,7 +1379,7 @@ void bld::rebuild_yourself_onchange_and_run(const std::string &filename, const s
   // Verify the new executable exists and is executable
   if (!fs::exists(exec_path))
   {
-    bld::log(Log_type::ERROR, "New executable not found after successful compilation.");
+    bld::log(Log_type::ERR, "New executable not found after successful compilation.");
     return;
   }
 
@@ -1401,7 +1400,7 @@ void bld::rebuild_yourself_onchange_and_run(const std::string &filename, const s
   int restart_result = bld::execute(restart_cmd);
   if (restart_result <= 0)
   {
-    bld::log(Log_type::ERROR, "Failed to start new executable.");
+    bld::log(Log_type::ERR, "Failed to start new executable.");
     return;
   }
 
@@ -1491,7 +1490,7 @@ bld::Config &bld::Config::get()
   static Config instance;
   return instance;
 #else
-  bld::log(bld::Log_type::ERROR, "Config is disabled. Please enable BLD_USE_CONFIG macro to use the Config class.");
+  bld::log(bld::Log_type::ERR, "Config is disabled. Please enable BLD_USE_CONFIG macro to use the Config class.");
   exit(1);
 #endif  // BLD_USE_CONFIG
 }
@@ -1530,7 +1529,7 @@ bool bld::Config::load_from_file(const std::string &filename)
   std::ifstream file(filename);
   if (!file.is_open())
   {
-    bld::log(bld::Log_type::ERROR, "Failed to open config file: " + filename);
+    bld::log(bld::Log_type::ERR, "Failed to open config file: " + filename);
     return false;
   }
 
@@ -1639,7 +1638,7 @@ int bld::handle_run_command(std::vector<std::string> args)
 #else
   if (args.size() < 2)
   {
-    bld::log(bld::Log_type::ERROR,
+    bld::log(bld::Log_type::ERR,
              "No target executable specified in config. Config is disabled. Please enable BLD_USE_CONFIG macro to use the Config class.");
     exit(EXIT_FAILURE);
   }
@@ -1652,12 +1651,12 @@ int bld::handle_run_command(std::vector<std::string> args)
   }
   else if (args.size() > 2)
   {
-    bld::log(bld::Log_type::ERROR, "Too many arguments for 'run' command. Only executables are supported.");
+    bld::log(bld::Log_type::ERR, "Too many arguments for 'run' command. Only executables are supported.");
     bld::log(bld::Log_type::INFO, "Usage: run <executable>");
     exit(EXIT_FAILURE);
   }
 #endif
-  bld::log(bld::Log_type::ERROR, "Should never be reached: " + std::to_string(__LINE__));
+  bld::log(bld::Log_type::ERR, "Should never be reached: " + std::to_string(__LINE__));
   exit(EXIT_FAILURE);
 }
 
@@ -1671,7 +1670,7 @@ void bld::handle_config_command(std::vector<std::string> args, std::string name)
 {
   if (args.size() < 2)
   {
-    log(bld::Log_type::ERROR, "Config command requires arguments");
+    log(bld::Log_type::ERR, "Config command requires arguments");
     std::string usage = name + " config -[key]=value \n" + "        E.g: ' " + name + " config -verbose=true '";
     log(bld::Log_type::INFO, "Usage: " + usage);
     return;
@@ -1697,7 +1696,7 @@ void bld::handle_config_command(std::vector<std::string> args, std::string name)
       }
       else if (number.find_first_not_of("0123456789") != std::string::npos)
       {
-        bld::log(bld::Log_type::ERROR, "Invalid value for threads: " + number);
+        bld::log(bld::Log_type::ERR, "Invalid value for threads: " + number);
         continue;
       }
       config.threads = std::stoi(number);
@@ -1713,7 +1712,7 @@ void bld::handle_config_command(std::vector<std::string> args, std::string name)
       }
       else if (number.find_first_not_of("0123456789") != std::string::npos)
       {
-        bld::log(bld::Log_type::ERROR, "Invalid value for threads: " + number);
+        bld::log(bld::Log_type::ERR, "Invalid value for threads: " + number);
         continue;
       }
       config.threads = std::stoi(number);
@@ -1801,7 +1800,7 @@ void bld::handle_config_command(std::vector<std::string> args, std::string name)
     }
     else
     {
-      bld::log(bld::Log_type::ERROR, "Unknown argument for config: ' " + arg + " '. Remember to use the format '-key=value'");
+      bld::log(bld::Log_type::ERR, "Unknown argument for config: ' " + arg + " '. Remember to use the format '-key=value'");
       bld::log(bld::Log_type::INFO,
                "If ' " + arg + " ' this is a valid key for config, consider configuring Config before 'BLD_HANDLE_ARGS' macro.");
     }
@@ -1836,7 +1835,7 @@ void bld::handle_args(int argc, char *argv[])
 #ifdef BLD_USE_CONFIG
         bld::handle_config_command(args, argv[0]);
 #else
-        bld::log(bld::Log_type::ERROR, "Config is disabled. Please enable BLD_USE_CONFIG macro to use the Config class.");
+        bld::log(bld::Log_type::ERR, "Config is disabled. Please enable BLD_USE_CONFIG macro to use the Config class.");
 #endif  // BLD_USE_CONFIG
       }
     }
@@ -1847,7 +1846,7 @@ bool bld::fs::read_file(const std::string &path, std::string &content)
 {
   if (!std::filesystem::exists(path))
   {
-    bld::log(bld::Log_type::ERROR, "File does not exist: " + path);
+    bld::log(bld::Log_type::ERR, "File does not exist: " + path);
     return false;
   }
 
@@ -1855,7 +1854,7 @@ bool bld::fs::read_file(const std::string &path, std::string &content)
 
   if (!file)
   {
-    bld::log(bld::Log_type::ERROR, "Failed to open file: " + path);
+    bld::log(bld::Log_type::ERR, "Failed to open file: " + path);
     return false;
   }
 
@@ -1870,7 +1869,7 @@ bool bld::fs::write_entire_file(const std::string &path, const std::string &cont
 
   if (!file)
   {
-    bld::log(bld::Log_type::ERROR, "Failed to open file for writing: " + path);
+    bld::log(bld::Log_type::ERR, "Failed to open file for writing: " + path);
     return false;
   }
 
@@ -1885,7 +1884,7 @@ bool bld::fs::append_file(const std::string &path, const std::string &content)
   std::ofstream file(path, std::ios::app | std::ios::binary);
   if (!file)
   {
-    bld::log(bld::Log_type::ERROR, "Failed to open file for appending: " + path);
+    bld::log(bld::Log_type::ERR, "Failed to open file for appending: " + path);
     return false;
   }
 
@@ -1900,7 +1899,7 @@ bool bld::fs::read_lines(const std::string &path, std::vector<std::string> &line
   std::ifstream file(path);
   if (!file)
   {
-    bld::log(bld::Log_type::ERROR, "Failed to open file: " + path);
+    bld::log(bld::Log_type::ERR, "Failed to open file: " + path);
     return false;
   }
 
@@ -1915,12 +1914,12 @@ bool bld::fs::replace_in_file(const std::string &path, const std::string &from, 
   std::string content = "";
   if (!bld::fs::read_file(path, content))
   {
-    bld::log(bld::Log_type::ERROR, "Failed to read file: " + path);
+    bld::log(bld::Log_type::ERR, "Failed to read file: " + path);
     return false;
   }
   if (content.empty())
   {
-    bld::log(bld::Log_type::ERROR, "Failed to read file or it is empty: " + path);
+    bld::log(bld::Log_type::ERR, "Failed to read file or it is empty: " + path);
     return false;
   }
   size_t pos = 0;
@@ -1939,7 +1938,7 @@ bool bld::fs::copy_file(const std::string &from, const std::string &to, bool ove
   {
     if (!overwrite && std::filesystem::exists(to))
     {
-      bld::log(bld::Log_type::ERROR, "Destination file already exists: " + to);
+      bld::log(bld::Log_type::ERR, "Destination file already exists: " + to);
       return false;
     }
     std::filesystem::copy_file(from, to,
@@ -1948,7 +1947,7 @@ bool bld::fs::copy_file(const std::string &from, const std::string &to, bool ove
   }
   catch (const std::filesystem::filesystem_error &e)
   {
-    bld::log(bld::Log_type::ERROR, "Failed to copy file: " + std::string(e.what()));
+    bld::log(bld::Log_type::ERR, "Failed to copy file: " + std::string(e.what()));
     return false;
   }
 }
@@ -1962,7 +1961,7 @@ bool bld::fs::move_file(const std::string &from, const std::string &to)
   }
   catch (const std::filesystem::filesystem_error &e)
   {
-    bld::log(bld::Log_type::ERROR, "Failed to move file: " + std::string(e.what()));
+    bld::log(bld::Log_type::ERR, "Failed to move file: " + std::string(e.what()));
     return false;
   }
 }
@@ -1971,7 +1970,7 @@ std::string bld::fs::get_extension(const std::string &path)
 {
   if (!std::filesystem::exists(path))
   {
-    bld::log(bld::Log_type::ERROR, "File for extension request does not exist: " + path);
+    bld::log(bld::Log_type::ERR, "File for extension request does not exist: " + path);
     return "";
   }
   std::filesystem::path p(path);
@@ -1986,7 +1985,7 @@ bool bld::fs::create_directory(const std::string &path)
   }
   catch (const std::filesystem::filesystem_error &e)
   {
-    bld::log(bld::Log_type::ERROR, "Failed to create directory: " + std::string(e.what()));
+    bld::log(bld::Log_type::ERR, "Failed to create directory: " + std::string(e.what()));
     return false;
   }
 }
@@ -2005,12 +2004,12 @@ bool bld::fs::create_dir_if_not_exists(const std::string &path)
     if (created)
       bld::log(bld::Log_type::INFO, "Directory created: " + path);
     else
-      bld::log(bld::Log_type::ERROR, "Failed to create directory: " + path);
+      bld::log(bld::Log_type::ERR, "Failed to create directory: " + path);
     return created;
   }
   catch (const std::filesystem::filesystem_error &e)
   {
-    bld::log(bld::Log_type::ERROR, "Failed to create directory: " + std::string(e.what()));
+    bld::log(bld::Log_type::ERR, "Failed to create directory: " + std::string(e.what()));
     return false;
   }
 }
@@ -2035,12 +2034,12 @@ bool bld::fs::remove_dir(const std::string &path)
     if (removed_count > 0)
       bld::log(bld::Log_type::INFO, "Directory removed: " + path);
     else
-      bld::log(bld::Log_type::ERROR, "Failed to remove directory: " + path);
+      bld::log(bld::Log_type::ERR, "Failed to remove directory: " + path);
     return removed_count > 0;
   }
   catch (const std::filesystem::filesystem_error &e)
   {
-    bld::log(bld::Log_type::ERROR, "Failed to remove directory: " + std::string(e.what()));
+    bld::log(bld::Log_type::ERR, "Failed to remove directory: " + std::string(e.what()));
     return false;
   }
 }
@@ -2063,7 +2062,7 @@ std::vector<std::string> bld::fs::list_files_in_dir(const std::string &path, boo
   }
   catch (const std::filesystem::filesystem_error &e)
   {
-    bld::log(bld::Log_type::ERROR, "Failed to list files: " + std::string(e.what()));
+    bld::log(bld::Log_type::ERR, "Failed to list files: " + std::string(e.what()));
   }
   return files;
 }
@@ -2086,7 +2085,7 @@ std::vector<std::string> bld::fs::list_directories(const std::string &path, bool
   }
   catch (const std::filesystem::filesystem_error &e)
   {
-    bld::log(bld::Log_type::ERROR, "Failed to list directories: " + std::string(e.what()));
+    bld::log(bld::Log_type::ERR, "Failed to list directories: " + std::string(e.what()));
   }
   return directories;
 }
@@ -2255,7 +2254,7 @@ bool bld::Dep_graph::needs_rebuild(const Node *node)
   {
     if (!std::filesystem::exists(dep))
     {
-      bld::log(bld::Log_type::ERROR, "Dependency does not exist: " + dep);
+      bld::log(bld::Log_type::ERR, "Dependency does not exist: " + dep);
       return true;  // Missing dependency forces rebuild
     }
     if (std::filesystem::last_write_time(dep) > target_time) return true;
@@ -2268,7 +2267,7 @@ bool bld::Dep_graph::build(const std::string &target)
   std::unordered_set<std::string> visited, in_progress;
   if (detect_cycle(target, visited, in_progress))
   {
-    bld::log(bld::Log_type::ERROR, "Circular dependency detected for target: " + target);
+    bld::log(bld::Log_type::ERR, "Circular dependency detected for target: " + target);
     return false;
   }
   checked_sources.clear();
@@ -2312,7 +2311,7 @@ bool bld::Dep_graph::build_node(const std::string &target)
       }
       return true;
     }
-    bld::log(bld::Log_type::ERROR, "Target not found: " + target);
+    bld::log(bld::Log_type::ERR, "Target not found: " + target);
     return false;
   }
 
@@ -2338,7 +2337,7 @@ bool bld::Dep_graph::build_node(const std::string &target)
     bld::log(bld::Log_type::INFO, "Building target: " + target);
     if (execute(node->dep.command) <= 0)
     {
-      bld::log(bld::Log_type::ERROR, "Failed to build target: " + target);
+      bld::log(bld::Log_type::ERR, "Failed to build target: " + target);
       return false;
     }
   }
@@ -2379,7 +2378,7 @@ bool bld::Dep_graph::build_parallel(const std::string &target, size_t thread_cou
   std::unordered_set<std::string> visited, in_progress;
   if (detect_cycle(target, visited, in_progress))
   {
-    bld::log(bld::Log_type::ERROR, "Circular dependency detected for target: " + target);
+    bld::log(bld::Log_type::ERR, "Circular dependency detected for target: " + target);
     return false;
   }
 
@@ -2430,7 +2429,7 @@ bool bld::Dep_graph::build_parallel(const std::string &target, size_t thread_cou
           {
             {
               std::lock_guard<std::mutex> log_lock(log_mutex);
-              bld::log(bld::Log_type::ERROR, "Failed to build target: " + current_target);
+              bld::log(bld::Log_type::ERR, "Failed to build target: " + current_target);
             }
             build_failed = true;
             cv.notify_all();
@@ -2471,7 +2470,7 @@ bool bld::Dep_graph::prepare_build_graph(const std::string &target, std::queue<s
       }
       return true;
     }
-    bld::log(bld::Log_type::ERROR, "Target not found: " + target);
+    bld::log(bld::Log_type::ERR, "Target not found: " + target);
     return false;
   }
 
