@@ -226,6 +226,10 @@ namespace bld
 
   /* @brief: Wait for the process to complete
    * @param pid ( pid_t ): Process ID to wait for
+   * @return: returns a code to indicate success or failure
+   *   >1 : Command executed successfully, returns pid of fork.
+   *    0 : Command failed to execute or something wrong on system side
+   *   -1 : No command to execute or something wrong on user side
    * @description: Wait for the process to complete and log the status. Use this function instead of direct waitpid
    */
   int wait_for_process(pid_t pid);
@@ -885,6 +889,33 @@ bool bld::validate_command(const bld::Command &command)
 
 int bld::wait_for_process(pid_t pid)
 {
+#ifdef _WIN32
+  HANDLE process = OpenProcess(SYNCHRONIZE | PROCESS_QUERY_INFORMATION, FALSE, pid);
+  if (!process)
+  {
+    bld::log(bld::Log_type::ERR, "Failed to open process (PID: " + std::to_string(pid) + ")");
+    bld::log(bld::Log_type::ERR, "Error code: " + std::to_string(GetLastError()));
+    return 0; // System failure (can't open process)
+  }
+  DWORD wait_status = WaitForSingleObject(process, INFINITE);
+  if (wait_status != WAIT_OBJECT_0)
+  {
+    bld::log(bld::Log_type::ERR, "WaitForSingleObject failed. Error: " + std::to_string(GetLastError()));
+    CloseHandle(process);
+    return 0; // System failure
+  }
+  DWORD exit_code = 0;
+  if (!GetExitCodeProcess(process, &exit_code))
+  {
+    bld::log(bld::Log_type::ERR, "Failed to get exit code. Error: " + std::to_string(GetLastError()));
+    CloseHandle(process);
+    return 0; // System failure
+  }
+  CloseHandle(process);
+  // Return >0 for success (actual PID), 0 for system failure
+  return (exit_code == 0) ? static_cast<int>(pid) : 0;
+
+#else
   int status;
   waitpid(pid, &status, 0);  // Wait for the process to complete
 
@@ -894,7 +925,7 @@ int bld::wait_for_process(pid_t pid)
     if (exit_code != 0)
     {
       bld::log(bld::Log_type::ERR, "Process exited with non-zero status: " + std::to_string(exit_code));
-      return -1;  // Return exit code for failure
+      return 0;  // Return exit code for failure
     }
     bld::log(bld::Log_type::INFO, "Process exited successfully.");
   }
@@ -902,11 +933,14 @@ int bld::wait_for_process(pid_t pid)
   {
     int signal = WTERMSIG(status);
     bld::log(bld::Log_type::ERR, "Process terminated by signal: " + std::to_string(signal));
-    return -1;  // Indicate signal termination
+    return 0;  // Indicate signal termination
   }
-  else { bld::log(bld::Log_type::WARNING, "Unexpected process termination status."); }
-
+  else 
+  { 
+    bld::log(bld::Log_type::WARNING, "Unexpected process termination status."); 
+  }
   return static_cast<int>(pid);  // Indicate success
+#endif
 }
 
 int bld::execute(const Command &command)
@@ -918,8 +952,38 @@ int bld::execute(const Command &command)
   }
 
   auto args = command.to_exec_args();
-  bld::log(Log_type::INFO, "Executing command: " + command.get_print_string());
 
+#ifdef _WIN32
+  STARTUPINFOA si = {sizeof(STARTUPINFOA)};
+  PROCESS_INFORMATION pi;
+  std::string command_str;
+  for (const auto &part : command.parts)
+  {
+    // Add proper quoting for Windows command line arguments
+    if (part.find(' ') != std::string::npos)
+    {
+      command_str += "\"" + part + "\" ";
+    }
+    else
+    {
+      command_str += part + " ";
+    }
+  }
+
+  bld::log(bld::Log_type::INFO, "Executing command: ' " + command_str + " '");
+
+  if (!CreateProcessA(nullptr, command_str.data(), nullptr, nullptr, FALSE, 0, nullptr, nullptr, &si, &pi))
+  {
+    bld::log(bld::Log_type::ERR, "Failed to create process. Error: " + std::to_string(GetLastError()));
+    return 0; // System failure: process creation failed
+  }
+
+  int result = wait_for_process(pi.dwProcessId);
+  CloseHandle(pi.hProcess);
+  CloseHandle(pi.hThread);
+  return result; // Return the consistent value from wait_for_process
+#else
+  bld::log(Log_type::INFO, "Executing command: " + command.get_print_string());
   pid_t pid = fork();
   if (pid == -1)
   {
@@ -941,6 +1005,7 @@ int bld::execute(const Command &command)
   }
 
   return bld::wait_for_process(pid);  // Use wait_for_process instead of direct waitpid
+  #endif
 }
 
 int bld::execute_without_wait(const Command &command)
@@ -954,6 +1019,38 @@ int bld::execute_without_wait(const Command &command)
   auto args = command.to_exec_args();
   bld::log(Log_type::INFO, "Executing command: " + command.get_print_string());
 
+#ifdef _WIN32
+  STARTUPINFOA si = {sizeof(STARTUPINFOA)};
+  PROCESS_INFORMATION pi;
+  std::string command_str;
+  for (const auto &part : command.parts)
+  {
+    // Add proper quoting for Windows command line arguments
+    if (part.find(' ') != std::string::npos)
+    {
+      command_str += "\"" + part + "\" ";
+    }
+    else
+    {
+      command_str += part + " ";
+    }
+  }
+
+  if (!CreateProcessA(nullptr, command_str.data(), nullptr, nullptr, FALSE, 0, nullptr, nullptr, &si, &pi))
+  {
+    bld::log(bld::Log_type::ERR, "Failed to create process. Error: " + std::to_string(GetLastError()));
+    return 0; // System failure: process creation failed
+  }
+
+  // Store the process ID
+  pid_t process_id = pi.dwProcessId;
+
+  // Close handles since we're not waiting
+  CloseHandle(pi.hProcess);
+  CloseHandle(pi.hThread);
+
+  return static_cast<int>(process_id); // Return the process ID (success)
+#else
   pid_t pid = fork();
   if (pid == -1)
   {
@@ -975,6 +1072,7 @@ int bld::execute_without_wait(const Command &command)
   }
 
   return static_cast<int>(pid);  // Use wait_for_process instead of direct waitpid
+#endif
 }
 
 bld::Exec_par_result bld::execute_parallel(const std::vector<bld::Command> &cmds, size_t threads, bool strict)
@@ -1021,7 +1119,7 @@ bld::Exec_par_result bld::execute_parallel(const std::vector<bld::Command> &cmds
       {
         {
           std::lock_guard<std::mutex> lock(output_mutex);
-          log(Log_type::ERR, "Failed to execute: " + cmds[cmd_idx].get_print_string());
+          bld::log(bld::Log_type::ERR, "Failed to execute: " + cmds[cmd_idx].get_print_string());
         }
 
         // Record the failed command index
@@ -1136,15 +1234,22 @@ bld::Command bld::preprocess_commands_for_shell(const bld::Command &cmd)
 {
   bld::Command cmd_s;
 
-// Detect OS and adjust the shell command
 #ifdef _WIN32
-  // Windows uses cmd.exe
-  cmd_s.add_parts("cmd", "/c", cmd.get_command_string());
+  char *comspec = getenv("COMSPEC");
+  std::string shell_path{};
+  if (comspec)
+  {
+    shell_path = comspec;
+  }
+  else
+  {
+    shell_path = "cmd.exe";
+  }
+
+  cmd_s.add_parts(shell_path, " /c ", cmd.get_command_string());
 #else
-  // Unix-based systems (Linux/macOS)
   cmd_s.add_parts("/bin/sh", "-c", cmd.get_command_string());
 #endif
-
   return cmd_s;
 }
 
@@ -1180,119 +1285,276 @@ int bld::execute_shell(std::string cmd, bool prompt)
 
 bool bld::read_process_output(const Command &cmd, std::string &output, size_t buffer_size)
 {
-  if (cmd.is_empty())
+if (cmd.is_empty())
+{
+  bld::log(Log_type::ERR, "No command to execute.");
+  return false;
+}
+
+if (buffer_size == 0)
+{
+  bld::log(bld::Log_type::ERR, "Buffer size cannot be zero.");
+  return false;
+}
+
+bld::log(bld::Log_type::INFO, "Extracting output from: " + cmd.get_print_string());
+output.clear();
+
+#ifdef _WIN32
+  SECURITY_ATTRIBUTES sa;
+  sa.nLength = sizeof(SECURITY_ATTRIBUTES);
+  sa.bInheritHandle = TRUE;
+  sa.lpSecurityDescriptor = NULL;
+
+  HANDLE read_handle, write_handle;
+  if (!CreatePipe(&read_handle, &write_handle, &sa, 0))
   {
-    bld::log(Log_type::ERR, "No command to execute.");
+    bld::log(bld::Log_type::ERR, "Failed to create pipe. Error: " + std::to_string(GetLastError()));
     return false;
   }
 
-  if (buffer_size == 0)
-  {
-    bld::log(Log_type::ERR, "Buffer size cannot be zero.");
-    return false;
-  }
+  // Set the stdout and stderr for the child process
+  STARTUPINFOA si = {sizeof(STARTUPINFOA)};
+  si.dwFlags = STARTF_USESTDHANDLES;
+  si.hStdOutput = write_handle;
+  si.hStdError = write_handle;
+  si.hStdInput = GetStdHandle(STD_INPUT_HANDLE);
 
-  int pipefd[2];
-  if (pipe(pipefd) == -1)
+  PROCESS_INFORMATION pi;
+  std::string command_str;
+  for (const auto &part : cmd.parts)
   {
-    bld::log(Log_type::ERR, "Failed to create pipe: " + std::string(strerror(errno)));
-    return false;
-  }
-
-  auto args = cmd.to_exec_args();
-  bld::log(Log_type::INFO, "Extracting output from: " + cmd.get_print_string());
-
-  pid_t pid = fork();
-  if (pid == -1)
-  {
-    bld::log(Log_type::ERR, "Failed to create child process: " + std::string(strerror(errno)));
-    close(pipefd[0]);
-    close(pipefd[1]);
-    return false;
-  }
-  else if (pid == 0)
-  {
-    // Child process
-    close(pipefd[0]);                // Close the read end
-    dup2(pipefd[1], STDOUT_FILENO);  // Redirect stdout to the pipe
-    dup2(pipefd[1], STDERR_FILENO);  // Redirect stderr to the pipe
-    close(pipefd[1]);                // Close the write end
-
-    if (execvp(args[0], args.data()) == -1)
+    // Add proper quoting for Windows command line arguments
+    if (part.find(' ') != std::string::npos)
     {
-      perror("execvp");
-      bld::log(Log_type::ERR, "Failed with error: " + std::string(strerror(errno)));
-      exit(EXIT_FAILURE);
+      command_str += "\"" + part + "\" ";
     }
-    abort();  // Should never reach here
+    else
+    {
+      command_str += part + " ";
+    }
   }
-  else
+
+  if (!CreateProcessA(NULL, command_str.data(), NULL, NULL, TRUE, 0, NULL, NULL, &si, &pi))
   {
-    // Parent process
-    close(pipefd[1]);  // Close the write end
-
-    std::vector<char> buffer(buffer_size);
-    ssize_t bytes_read;
-    output.clear();
-
-    while ((bytes_read = read(pipefd[0], buffer.data(), buffer.size())) > 0) output.append(buffer.data(), bytes_read);
-    close(pipefd[0]);  // Close the read end
-
-    return bld::wait_for_process(pid) > 0;  // Use wait_for_process to handle the exit status
+    bld::log(bld::Log_type::ERR, "Failed to create process. Error: " + std::to_string(GetLastError()));
+    CloseHandle(read_handle);
+    CloseHandle(write_handle);
+    return false;
   }
+
+  // Close the write end of the pipe as the child will write to it
+  CloseHandle(write_handle);
+
+  // Read the child's output
+  std::vector<char> buffer(buffer_size);
+  DWORD bytes_read;
+  while (ReadFile(read_handle, buffer.data(), static_cast<DWORD>(buffer.size()), &bytes_read, NULL) && bytes_read > 0)
+  {
+    output.append(buffer.data(), bytes_read);
+  }
+
+  // Close the read end of the pipe
+  CloseHandle(read_handle);
+
+  // Wait for the process to complete and get exit status
+  int result = wait_for_process(pi.dwProcessId);
+
+  // Clean up process handles
+  CloseHandle(pi.hProcess);
+  CloseHandle(pi.hThread);
+
+  return result > 0;
+
+#else
+
+if (buffer_size == 0)
+{
+  bld::log(Log_type::ERR, "Buffer size cannot be zero.");
+  return false;
+}
+
+int pipefd[2];
+if (pipe(pipefd) == -1)
+{
+  bld::log(Log_type::ERR, "Failed to create pipe: " + std::string(strerror(errno)));
+  return false;
+}
+
+auto args = cmd.to_exec_args();
+bld::log(Log_type::INFO, "Extracting output from: " + cmd.get_print_string());
+
+pid_t pid = fork();
+if (pid == -1)
+{
+  bld::log(Log_type::ERR, "Failed to create child process: " + std::string(strerror(errno)));
+  close(pipefd[0]);
+  close(pipefd[1]);
+  return false;
+}
+else if (pid == 0)
+{
+  // Child process
+  close(pipefd[0]);                // Close the read end
+  dup2(pipefd[1], STDOUT_FILENO);  // Redirect stdout to the pipe
+  dup2(pipefd[1], STDERR_FILENO);  // Redirect stderr to the pipe
+  close(pipefd[1]);                // Close the write end
+
+  if (execvp(args[0], args.data()) == -1)
+  {
+    perror("execvp");
+    bld::log(Log_type::ERR, "Failed with error: " + std::string(strerror(errno)));
+    exit(EXIT_FAILURE);
+  }
+  abort();  // Should never reach here
+}
+else
+{
+  // Parent process
+  close(pipefd[1]);  // Close the write end
+
+  std::vector<char> buffer(buffer_size);
+  ssize_t bytes_read;
+  output.clear();
+
+  while ((bytes_read = read(pipefd[0], buffer.data(), buffer.size())) > 0) output.append(buffer.data(), bytes_read);
+  close(pipefd[0]);  // Close the read end
+
+  return bld::wait_for_process(pid) > 0;  // Use wait_for_process to handle the exit status
+}
+#endif
 }
 
 bool bld::read_shell_output(const std::string &cmd, std::string &output, size_t buffer_size)
 {
+  if (cmd.empty())
+  {
+    bld::log(bld::Log_type::ERR, "No command to execute.");
+    return false;
+  }
+
   if (buffer_size == 0)
   {
-    bld::log(Log_type::ERR, "Buffer size cannot be zero.");
+    bld::log(bld::Log_type::ERR, "Buffer size cannot be zero.");
     return false;
   }
 
-  int pipefd[2];
-  if (pipe(pipefd) == -1)
+  bld::log(bld::Log_type::INFO, "Extracting shell output from: " + cmd);
+  output.clear();
+
+#ifdef _WIN32
+  SECURITY_ATTRIBUTES sa;
+  sa.nLength = sizeof(SECURITY_ATTRIBUTES);
+  sa.bInheritHandle = TRUE;
+  sa.lpSecurityDescriptor = NULL;
+
+  HANDLE read_handle, write_handle;
+  if (!CreatePipe(&read_handle, &write_handle, &sa, 0))
   {
-    bld::log(Log_type::ERR, "Failed to create pipe: " + std::string(strerror(errno)));
+    bld::log(bld::Log_type::ERR, "Failed to create pipe. Error: " + std::to_string(GetLastError()));
     return false;
   }
 
-  pid_t pid = fork();
-  if (pid == -1)
-  {
-    bld::log(Log_type::ERR, "Failed to create child process: " + std::string(strerror(errno)));
-    return false;
-  }
-  else if (pid == 0)
-  {
-    close(pipefd[0]);                // Close the read end
-    dup2(pipefd[1], STDOUT_FILENO);  // Redirect stdout to the pipe
-    dup2(pipefd[1], STDERR_FILENO);  // Redirect stderr to the pipe
-    close(pipefd[1]);                // Close the write end
+  // Set the stdout and stderr for the child process
+  STARTUPINFOA si = {sizeof(STARTUPINFOA)};
+  si.dwFlags = STARTF_USESTDHANDLES;
+  si.hStdOutput = write_handle;
+  si.hStdError = write_handle;
+  si.hStdInput = GetStdHandle(STD_INPUT_HANDLE);
 
-    std::vector<char *> args;
-    args.push_back(const_cast<char *>("/bin/sh"));
-    args.push_back(const_cast<char *>("-c"));
-    args.push_back(const_cast<char *>(cmd.c_str()));
-    args.push_back(nullptr);
+  PROCESS_INFORMATION pi;
 
-    execvp(args[0], args.data());
-    perror("execvp");
-    exit(EXIT_FAILURE);
+  // Use default shell from environment variables
+  std::string shell_path;
+  char *comspec = getenv("COMSPEC");
+  if (comspec)
+  {
+    shell_path = comspec;
   }
   else
   {
-    close(pipefd[1]);  // Close the write end
-
-    std::vector<char> buffer(buffer_size);
-    ssize_t bytes_read;
-    output.clear();
-
-    while ((bytes_read = read(pipefd[0], buffer.data(), buffer.size())) > 0) output.append(buffer.data(), bytes_read);
-    close(pipefd[0]);  // Close the read end
-
-    return wait_for_process(pid) > 0;  // Use wait_for_process instead of direct waitpid
+    // Fallback to cmd.exe if COMSPEC is not defined
+    shell_path = "cmd.exe";
   }
+
+  std::string command_str = shell_path + " /c " + cmd;
+
+  if (!CreateProcessA(NULL, const_cast<char *>(command_str.c_str()), NULL, NULL, TRUE,
+                      CREATE_NO_WINDOW, NULL, NULL, &si, &pi))
+  {
+    bld::log(bld::Log_type::ERR, "Failed to create process. Error: " + std::to_string(GetLastError()));
+    CloseHandle(read_handle);
+    CloseHandle(write_handle);
+    return false;
+  }
+
+  // Close the write end of the pipe as the child will write to it
+  CloseHandle(write_handle);
+
+  // Read the child's output
+  std::vector<char> buffer(buffer_size);
+  DWORD bytes_read;
+  while (ReadFile(read_handle, buffer.data(), static_cast<DWORD>(buffer.size()), &bytes_read, NULL) && bytes_read > 0)
+  {
+    output.append(buffer.data(), bytes_read);
+  }
+
+  // Close the read end of the pipe
+  CloseHandle(read_handle);
+
+  // Wait for the process to complete and get exit status
+  int result = wait_for_process(pi.dwProcessId);
+
+  // Clean up process handles
+  CloseHandle(pi.hProcess);
+  CloseHandle(pi.hThread);
+
+  return result > 0;
+#else
+int pipefd[2];
+if (pipe(pipefd) == -1)
+{
+  bld::log(Log_type::ERR, "Failed to create pipe: " + std::string(strerror(errno)));
+  return false;
+}
+
+pid_t pid = fork();
+if (pid == -1)
+{
+  bld::log(Log_type::ERR, "Failed to create child process: " + std::string(strerror(errno)));
+  return false;
+}
+else if (pid == 0)
+{
+  close(pipefd[0]);                // Close the read end
+  dup2(pipefd[1], STDOUT_FILENO);  // Redirect stdout to the pipe
+  dup2(pipefd[1], STDERR_FILENO);  // Redirect stderr to the pipe
+  close(pipefd[1]);                // Close the write end
+
+  std::vector<char *> args;
+  args.push_back(const_cast<char *>("/bin/sh"));
+  args.push_back(const_cast<char *>("-c"));
+  args.push_back(const_cast<char *>(cmd.c_str()));
+  args.push_back(nullptr);
+
+  execvp(args[0], args.data());
+  perror("execvp");
+  exit(EXIT_FAILURE);
+}
+else
+{
+  close(pipefd[1]);  // Close the write end
+
+  std::vector<char> buffer(buffer_size);
+  ssize_t bytes_read;
+  output.clear();
+
+  while ((bytes_read = read(pipefd[0], buffer.data(), buffer.size())) > 0) output.append(buffer.data(), bytes_read);
+  close(pipefd[0]);  // Close the read end
+
+  return wait_for_process(pid) > 0;  // Use wait_for_process instead of direct waitpid
+}
+#endif
 }
 
 bool bld::is_executable_outdated(std::string file_name, std::string executable)
@@ -2128,34 +2390,52 @@ std::string bld::fs::strip_file_name(std::string full_path)
 
 std::string bld::env::get(const std::string &key)
 {
-  const char *val = std::getenv(key.c_str());
-  return val ? std::string(val) : "";
+#ifdef _WIN32
+    char buffer[32767]; // Maximum size for environment variables on Windows
+    DWORD size = GetEnvironmentVariableA(key.c_str(), buffer, sizeof(buffer));
+    return size > 0 ? std::string(buffer, size) : "";
+#else
+    const char* value = std::getenv(key.c_str());
+    return value ? std::string(value) : "";
+#endif
 }
 
 bool bld::env::set(const std::string &key, const std::string &value)
 {
-  return setenv(key.c_str(), value.c_str(), 1) == 0;
+#ifdef _WIN32
+    return SetEnvironmentVariableA(key.c_str(), value.c_str()) != 0;
+#else
+    return setenv(key.c_str(), value.c_str(), 1) == 0;
+#endif
 }
 
 bool bld::env::exists(const std::string &key)
 {
-  return std::getenv(key.c_str()) != nullptr;
+#ifdef _WIN32
+    return GetEnvironmentVariableA(key.c_str(), nullptr, 0) > 0;
+#else
+    return std::getenv(key.c_str()) != nullptr;
+#endif
 }
 
 bool bld::env::unset(const std::string &key)
 {
-  return unsetenv(key.c_str()) == 0;
+#ifdef _WIN32
+    return SetEnvironmentVariableA(key.c_str(), nullptr) != 0;
+#else
+    return unsetenv(key.c_str()) == 0;
+#endif
 }
 
 #if defined(__APPLE__) || defined(__FreeBSD__)
-    #include <crt_externs.h>  // For `_NSGetEnviron()`
-    #define ENVIRON (*_NSGetEnviron())
+  #include <crt_externs.h>  // For `_NSGetEnviron()`
+  #define ENVIRON (*_NSGetEnviron())
 #elif defined(_WIN32)
-    #include <windows.h>
-    #define ENVIRON nullptr  // Not used in Windows implementation
+  #include <windows.h>
+  #define ENVIRON nullptr  // Not used in Windows implementation
 #else
-    extern char **environ;  // Standard for Linux
-    #define ENVIRON environ
+  extern char **environ;  // Standard for Linux
+  #define ENVIRON environ
 #endif
 
 std::unordered_map<std::string, std::string> bld::env::get_all()

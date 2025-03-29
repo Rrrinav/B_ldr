@@ -18,7 +18,7 @@ int main(int argc, char *argv[])
 
   if (!graph.build_parallel("./main2", 3))
   {
-    bld::log(bld::Log_type::ERROR, "Build failed!");
+    bld::log(bld::Log_type::ERR, "Build failed!");
     return 1;
   }
 
