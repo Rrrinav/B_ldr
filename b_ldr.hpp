@@ -288,6 +288,8 @@ namespace bld
    */
   Command preprocess_commands_for_shell(const Command &cmd);
 
+  // TODO: Make it workable in windows hopefully
+
   /* @brief: Execute the shell command with preprocessed parts
    * param cmd ( Command ): Command to execute in shell
    * @description: Execute the shell command with preprocessed parts
@@ -329,6 +331,8 @@ namespace bld
    *  it basically returns ( modify_time(file) > modify_time(executable) ) irrespective of file type
    */
   bool is_executable_outdated(std::string file_name, std::string executable);
+
+  //TODO: Make rebuilg and run work on windows
 
   /* @brief: Rebuild the executable if the source file is newer than the executable and runs it
    * @param filename ( std::string ): Source file name
@@ -778,7 +782,6 @@ namespace bld
   };
 }  // namespace bld
 
-#define B_LDR_IMPLEMENTATION
 #ifdef B_LDR_IMPLEMENTATION
 
 #include <algorithm>
