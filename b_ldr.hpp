@@ -20,13 +20,17 @@
 
 /*
   INFO: DEFINES:
-  1. B_LDR_IMPLEMENTATION          : Include all the implementation in the header file.
-  2. BLD_REBUILD_YOURSELF_ONCHANGE : Rebuild the build executable if the source file is newer than the executable and run it.
-  3. BLD_HANDLE_ARGS               : Handle command-line arguments (only run and config commands).
-  4. BLD_REBUILD_AND_ARGS          : Rebuild the executable if the source file is newer than the executable and handle command-line arguments.
-  5. BLD_NO_COLORS                 : Disable colors in log messages.
-  6. BLD_USE_CONFIG                : Enable the configuration system in the build tool.
-  7. BLD_DEFAULT_CONFIG_FILE       : File to save the configuration to.
+  01. B_LDR_IMPLEMENTATION          : Include all the implementation in the header file.
+  02. BLD_REBUILD_YOURSELF_ONCHANGE : Rebuild the build executable if the source file is newer than the executable and run it.
+  03. BLD_HANDLE_ARGS               : Handle command-line arguments (only run and config commands).
+  04. BLD_REBUILD_AND_ARGS          : Rebuild the executable if the source file is newer than the executable and handle command-line arguments.
+  05. BLD_NO_COLORS                 : Disable colors in log messages.
+  06. BLD_USE_CONFIG                : Enable the configuration system in the build tool.
+  07. BLD_DEFAULT_CONFIG_FILE       : File to save the configuration to.
+  08. BLD_NO_LOGGING                : No logging in the build tool.
+  09. BLD_VERBOSE_1                 : No verbose output in the build tool. Only prints errors. No INFO or WARNING messages.
+  10. BLD_VERBOSE_2                 : Only prints errors and warning. No INFO messages.
+    Verbosity is full by default.
 */
 
 #pragma once
@@ -815,12 +819,20 @@ void bld::log(bld::Log_type type, const std::string &msg)
   switch (type)
   {
     case Log_type::INFO:
-      std::cerr << COLOUR_INFO << "[INFO]: " << COLOUR_RESET << msg << std::endl;
+      #ifndef BLD_VERBOSE_1
+        #ifndef BLD_VERBOSE_2
+          std::cerr << COLOUR_INFO << "[INFO]: " << COLOUR_RESET << msg << std::endl;
+          break;
+        #endif
+      #endif
       break;
 
     case Log_type::WARNING:
-      std::cerr << COLOUR_WARN << "[WARNING]: " << COLOUR_RESET << msg << std::endl;
-      std::cerr.flush();
+      #ifndef BLD_VERBOSE_1
+          std::cerr << COLOUR_WARN << "[WARNING]: " << COLOUR_RESET << msg << std::endl;
+          std::cerr.flush();
+          break;
+      #endif
       break;
 
     case Log_type::ERR:
