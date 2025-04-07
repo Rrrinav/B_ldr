@@ -446,6 +446,13 @@ namespace bld
      */
     std::string get_extension(const std::string &path);
 
+    /* @brief: Get file name without extension
+     * @param path: Path to the file
+     * @param with_full_path: true to include full path, false to get only the file name
+     * @return: Get file name without extension, full string if no extension
+     */
+    std::string get_stem(const std::string &path, bool with_full_path = false);
+
     /* @brief: Create directory and all parent directories if they don't exist
      * @param path: Path to create
      * @return: true if successful, false otherwise
@@ -809,10 +816,10 @@ void bld::log(bld::Log_type type, const std::string &msg)
     static constexpr const char *COLOUR_DEBUG = "";
     static constexpr const char *COLOUR_RESET = "";
   #else
-    static constexpr const char *COLOUR_INFO = "\x1b[32m";
-    static constexpr const char *COLOUR_WARN = "\x1b[1m\x1b[33m";
-    static constexpr const char *COLOUR_ERROR = "\x1b[1m\x1b[31m";
-    static constexpr const char *COLOUR_DEBUG = "\x1b[36m";
+    static constexpr const char *COLOUR_INFO  = "\x1b[38;2;80;250;123m";  // mint green
+    static constexpr const char *COLOUR_WARN  = "\x1b[38;2;255;200;87m";  // amber
+    static constexpr const char *COLOUR_ERROR = "\x1b[38;2;255;85;85m";   // red
+    static constexpr const char *COLOUR_DEBUG = "\x1b[38;2;130;170;255m"; // light blue
     static constexpr const char *COLOUR_RESET = "\x1b[0m";
   #endif
 
@@ -2276,6 +2283,14 @@ std::string bld::fs::get_extension(const std::string &path)
   }
   std::filesystem::path p(path);
   return p.extension().string();
+}
+
+std::string bld::fs::get_stem(const std::string &path, bool with_full_path)
+{
+  std::string filename = path;
+  if (!with_full_path) filename = bld::fs::get_file_name(path);
+  auto pos = filename.find_last_of('.');
+  return pos == std::string::npos ? filename : filename.substr(0, pos);
 }
 
 bool bld::fs::create_directory(const std::string &path)
