@@ -1,0 +1,31 @@
+# Use Google style as the base
+BasedOnStyle: Google
+# Set the width for indentation
+IndentWidth: 2
+# Set the maximum column width for lines
+ColumnLimit: 140
+# Make pointer align to the variable name rather than the type
+PointerBindsToType: false
+# Prevent if statements from being on a single line
+AllowShortIfStatementsOnASingleLine: false
+# Allow loops with single statements to omit braces
+AllowShortBlocksOnASingleLine: true
+AllowShortLoopsOnASingleLine: true
+# Do not derive pointer alignment automatically
+DerivePointerAlignment: false
+# Place braces on a new line for all constructs
+BreakBeforeBraces: Allman
+# Indent namespaces
+NamespaceIndentation: All
+# Offset for access modifiers (public, private, protected) in classes
+AccessModifierOffset: -4
+# Prevent reflowing of comments
+ReflowComments: false
+# Do not align consecutive assignments
+AlignConsecutiveAssignments: false
+# Remove braces if the body of control statements is empty
+RemoveBracesLLVM: true
+# Ensure that public and private members are aligned with the class indentation
+IndentAccessModifiers: false
+# Prevents Clang from reordering #include directives
+SortIncludes: Never

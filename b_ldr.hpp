@@ -28,24 +28,34 @@
   06. BLD_USE_CONFIG                : Enable the configuration system in the build tool.
   07. BLD_DEFAULT_CONFIG_FILE       : File to save the configuration to.
   08. BLD_NO_LOGGING                : No logging in the build tool.
-  09. BLD_VERBOSE_1                 : No verbose output in the build tool. Only prints errors. No INFO or WARNING messages.
-  10. BLD_VERBOSE_2                 : Only prints errors and warning. No INFO messages.
+  09. BLD_VERBOSE_0                 : No output in the tool.
+  10. BLD_VERBOSE_1                 : No verbose output in the tool. Only prints errors. No INFO or WARNING messages.
+  11. BLD_VERBOSE_2                 : Only prints errors and warning. No INFO messages.
     Verbosity is full by default.
 */
 
 #pragma once
 
+#include <utility>
 #ifdef _WIN32
-  #include <Windows.h>
-  #include <sysinfoapi.h>
+  #define WIN32_LEAN_AND_MEAN
+  #define _WINUSER_
+  #define _WINGDI_
+  #define _IMM_
+  #define _WINCON_
+  #include <windows.h>
+  #include <direct.h>
+  #include <shellapi.h>
 #else
   #include <sys/types.h>
   #include <sys/utsname.h>
   #include <sys/wait.h>
   #include <unistd.h>
+  #include <fcntl.h>
 #endif
 
 #include <condition_variable>
+#include <chrono>
 #include <cstddef>
 #include <cstring>
 #include <mutex>
@@ -96,18 +106,142 @@ namespace bld
   // Log type is enumeration for bld::function to show type of loc>
   enum class Log_type { INFO, WARNING, ERR, DEBUG };
 
-  /* @param type ( Log_type enum ): Type of log
-   * @param msg ( std::string ): Message to log
-   * @description: Function to log messages with type
-   */
-  void log(Log_type type, const std::string &msg);
+  // Process execution result
+  #ifdef _WIN32
+    using pid = DWORD;
+  #else
+    using pid = pid_t;
+  #endif
+  // Abstraction for process for cross platform API.
+    enum class State {
+      INIT_ERROR,  // Failed to start
+      RUNNING,     // Currently executing
+      EXITED,      // Exited normally
+      SIGNALLED,   // Terminated by signal (Unix only)
+      WAIT_ERROR   // Error during wait operation
+    };
+
+    // Single process handle
+    struct Proc
+    {
+      bool ok = false;
+      pid p_id = 0;
+      State state = State::INIT_ERROR;
+      int exit_code = 0;
+
+    #ifndef _WIN32
+      int signal = 0;
+    #else
+      HANDLE process_handle = nullptr;
+      HANDLE thread_handle = nullptr;
+    #endif
+
+      // Constructors
+      Proc() = default;
+
+      explicit Proc(pid_t p) : p_id(p)
+      {
+        if (p > 0)
+        {
+          ok = true;
+          state = State::RUNNING;
+        }
+      }
+
+    #ifdef _WIN32
+      Proc(HANDLE proc_handle, HANDLE thread_handle, pid_t pid) : pid(pid), process_handle(proc_handle), thread_handle(thread_handle)
+      {
+        if (proc_handle != nullptr)
+        {
+          ok = true;
+          state = State::RUNNING;
+        }
+        else
+        {
+          ok = false;
+          state = State::INIT_ERROR;
+        }
+      }
+    #endif
+      // Convenience operators
+      explicit operator bool() const { return ok; }
+      bool operator!() const { return !ok; }
+
+      // State queries
+      bool is_running() const { return ok && state == State::RUNNING; }
+      bool has_exited() const { return state == State::EXITED || state == State::SIGNALLED; }
+      bool succeeded() const { return state == State::EXITED && exit_code == 0; }
+      bool is_valid() const { return ok; }
+    };
+
+    // Process info after exit
+    struct Exit_status
+    {
+      bool normal;
+      int exit_code;
+    #ifndef _WIN32
+      int signal;
+    #endif
+
+      operator bool() const { return normal && exit_code == 0; }
+      bool operator!() const { return !normal || exit_code != 0; }
+    };
+
+    // Process info after non blocking wait.
+    struct Wait_status
+    {
+      bool normal = false;
+      int exit_code = 0;
+      bool exited = false;
+      bool invalid_proc = false;
+      bool waitpid_failed = false;
+    #ifndef _WIN32
+      int signal;
+    #endif
+
+      operator bool() const { return normal && exit_code == 0; }
+      bool operator!() const { return !normal || exit_code != 0; }
+    };
+
+    // Return type for parallel execution
+    struct Par_exec_res
+    {
+      size_t completed;                        // Number of successfully completed commands/procs
+      std::vector<size_t> failed_indices;      // Indices of commands/procs that failed
+      std::vector<Exit_status> exit_statuses;  // Exit statuses of procs/commands in order.
+
+      Par_exec_res() : completed(0) {}
+    };
+  // File descriptor/handle type
+  #ifdef _WIN32
+    using Fd = HANDLE;
+    const Fd INVALID_FD = INVALID_HANDLE_VALUE;
+  #else
+    using Fd = int;
+    const Fd INVALID_FD = -1;
+  #endif
+
+  // Redirection configuration
+  struct Redirect
+  {
+    Fd stdin_fd  = INVALID_FD;   // Redirect stdin from this fd
+    Fd stdout_fd = INVALID_FD;  // Redirect stdout to this fd
+    Fd stderr_fd = INVALID_FD;  // Redirect stderr to this fd
+
+    Redirect() = default;
+    Redirect(Fd in, Fd out, Fd err) : stdin_fd(in), stdout_fd(out), stderr_fd(err) {}
+  };
+
+  // Logging function used by library
+  void internal_log(Log_type type, const std::string &msg);
+
+  // Logging function for users
+  void log(bld::Log_type type, const std::string &msg);
 
   // Struct to hold command parts
   struct Command
   {
     std::vector<std::string> parts;  // > parts of the command
-
-    // Default constructor
     Command() : parts{} {}
 
     // @tparam args ( variadic template ): Command parts
@@ -133,6 +267,8 @@ namespace bld
 
     // @return ( std::string ): Get the command as a printable string wrapped in single quotes
     std::string get_print_string() const;
+
+    void clear() { parts.clear(); }
   };
 
   // Class to save configuration
@@ -236,7 +372,28 @@ namespace bld
    *   -1 : No command to execute or something wrong on user side
    * @description: Wait for the process to complete and log the status. Use this function instead of direct waitpid
    */
-  int wait_for_process(pid_t pid);
+  Exit_status wait_proc(Proc proc);
+
+  /* @breif: Clean up a process after completed
+   * @param proc: Takes a Proc to cleanup.
+   * @description: Closes handle and sets other values in windows and sets pid = -1 in linux.
+   *               Additionaly sets res = USER_ERROR
+   */
+  void cleanup_process(Proc &proc);
+
+  /* @breif: Checks if provided process is running or not
+   * @param proc: Process to check
+   * @return bool: return value
+   */
+  Wait_status try_wait_nb(const Proc &proc);
+
+  /*
+   * @brief: Waits on multiple async processes
+   * @params pids (vector<pid_t>): process ids to wait on
+   * @param sleep_ms (int): Time to sleep to avoid busy looping.
+   * @return Exec_par_result: process ids that failed
+   */
+  Par_exec_res wait_procs(std::vector<Proc> procs, int sleep_ms = 50);
 
   /* @brief: Execute the command
    * @param command ( Command ): Command to execute, must be a valid process command and not shell command
@@ -246,7 +403,13 @@ namespace bld
    *   -1 : No command to execute or something wrong on user side
    * @description: Execute the command using fork and log the status alongwith
    */
-  int execute(const Command &command);
+  Exit_status execute(const Command &command);
+
+  /* @brief: Redirect output of a child process to a file descriptor
+   * @param Command: command which will be executed with redirected output
+   * @redirect: File descriptors to redirect outputs to.
+   */
+  Exit_status execute_redirect(const Command& command, const Redirect& redirect);
 
   /* @brief: Execute the command asynchronously (without waiting)
    * @param command ( Command ): Command to execute, must be a valid process command and not shell command
@@ -256,16 +419,34 @@ namespace bld
    *   -1 : No command to execute or something wrong on user side
    * @description: Execute the command using fork and log the status alongwith
    */
-  int execute_without_wait(const Command &command);
+  Proc execute_async(const Command &command);
 
-  // Return type for parallel execution
-  struct Exec_par_result
-  {
-    size_t completed;                    // Number of successfully completed commands
-    std::vector<size_t> failed_indices;  // Indices of commands that failed
+  /* @brief: like execute_redirect but without wait.
+   * @param Command: command which will be executed with redirected output
+   * @redirect: File descriptors to redirect outputs to.
+   */
+  Proc execute_async_redirect(const Command& command, const Redirect& redirect);
 
-    Exec_par_result() : completed(0) {}
-  };
+  /* @brief: Open a file descriptor to write to
+   * @param: Path to the file
+   * @return: File descriptor opened
+   * @description: These can be used in Redirect struct to be used in redirecting functions
+   */
+  Fd open_for_read(const std::string &path);
+
+  /* @brief: Open a file descriptor to read from
+   * @param: Path to the file
+   * @return: File descriptor opened
+   * @description: These can be used in Redirect struct to be used in redirecting functions
+   */
+  Fd open_for_write(const std::string &path, bool append = false);
+
+  /* @brief: Close file descriptors
+   * @param Fd: File descriptors
+   */
+  template <typename... Fds, typename = std::enable_if_t<(std::is_integral_v<Fds> && ...)>>
+  void close_fd(Fds ...fds);
+
 
   /* @brief: Execute multiple commands on multiple threads.
    * @param cmds: Vector of commands to execute
@@ -273,8 +454,8 @@ namespace bld
    * @param strict: If true, stop all threads if an error occurs even in one command.
    * @return: Exec_par_result
    */
-  bld::Exec_par_result execute_parallel(const std::vector<bld::Command> &cmds, size_t threads = (std::thread::hardware_concurrency() - 1),
-                                        bool strict = true);
+  Par_exec_res execute_threads(const std::vector<bld::Command> &cmds, size_t threads = (std::thread::hardware_concurrency() - 1),
+                                       bool strict = true);
 
   /* @description: Print system metadata:
    *  1. Operating System
@@ -283,22 +464,13 @@ namespace bld
    */
   void print_metadata();
 
-  /* @brief: Preprocess the command for shell execution
-   * @param cmd ( Command ): Command to preprocess
-   * @return: Preprocessed command for shell execution
-   * @description: Preprocess the command for shell execution by adding shell command and arguments
-   *    Windows:     cmd.exe /c <command>
-   *    Linux/macOS: /bin/sh -c <command>
-   */
-  Command preprocess_commands_for_shell(const Command &cmd);
-
-  // TODO: Make it workable in windows hopefully
+  // Get no of cores, logical or physical
+  int get_n_procs(bool physical_cores_only = false);
 
   /* @brief: Execute the shell command with preprocessed parts
-   * param cmd ( Command ): Command to execute in shell
-   * @description: Execute the shell command with preprocessed parts
-   *    Uses execute function to execute the preprocessed command
-   *  return the return value of the execute function
+   * @param cmd ( string ): Command to execute in shell
+   * @description: runs std::system
+   * @return: the return value of the std::system
    */
   int execute_shell(std::string command);
 
@@ -325,7 +497,7 @@ namespace bld
    * @param buffer_size ( size_t ): Size of buffer for reading output (default: 4096)
    * @return ( bool ): true if successful, false otherwise
    */
-  bool read_shell_output(const std::string &shell_cmd, std::string &output, size_t buffer_size = 4096);
+  bool read_shell_output(const std::string &shell_cmd, std::string &output);
 
   /* @brief: Check if the executable is outdated i.e. source file is newer than the executable
    * @param file_name ( std::string ): Source file name
@@ -336,7 +508,7 @@ namespace bld
    */
   bool is_executable_outdated(std::string file_name, std::string executable);
 
-  //TODO: Make rebuilg and run work on windows
+  //TODO: Make rebuild and run work on windows
 
   /* @brief: Rebuild the executable if the source file is newer than the executable and runs it
    * @param filename ( std::string ): Source file name
@@ -386,6 +558,38 @@ namespace bld
    *  Uses std::string::compare() to compare the prefix with the string
    */
   bool starts_with(const std::string &str, const std::string &prefix);
+
+  namespace time
+  {
+    struct stamp
+    {
+      using clock = std::chrono::steady_clock;
+      clock::time_point tp;
+
+      stamp() : tp(clock::now()) {}
+      explicit stamp(clock::time_point t) : tp(t) {}
+
+      static stamp now() { return stamp(clock::now()); }
+
+      void reset() { this->tp = clock::now(); }
+
+      template <class Rep = double, class Unit = std::chrono::milliseconds, typename =
+        std::enable_if_t<std::is_arithmetic_v<Rep> &&
+        std::is_base_of_v<std::chrono::duration<typename Unit::rep, typename Unit::period>, Unit>>>
+      Rep time_spent(const stamp &later = stamp::now())
+      {
+        return std::chrono::duration_cast<Unit>(later.tp - this->tp).count();
+      }
+    };
+
+    template <class Rep = double, class Unit = std::chrono::milliseconds, typename =
+      std::enable_if_t<std::is_arithmetic_v<Rep> &&
+      std::is_base_of_v<std::chrono::duration<typename Unit::rep, typename Unit::period>, Unit>>>
+    Rep since(const stamp &earlier, const stamp &later = stamp::now())
+    {
+      return std::chrono::duration_cast<Unit>(later.tp - earlier.tp).count();
+    }
+  };  // namespace time
 
   namespace fs
   {
@@ -469,15 +673,18 @@ namespace bld
      * @param paths: Paths to create
      * @return: true if successful, false otherwise
      */
-    template <typename... Paths,
-              typename = std::enable_if_t<(std::is_convertible_v<Paths, std::string> && ...)>>
-    bool create_dirs_if_not_exists(const Paths&... paths);
+    template <typename... Paths, typename = std::enable_if_t<(std::is_convertible_v<Paths, std::string> && ...)>>
+    bool create_dirs_if_not_exists(const Paths &...paths);
 
     /* @brief: Remove directory and all its contents if it exists
      * @param path: Path to remove
      * @return: true if successful, false otherwise
      */
     bool remove_dir(const std::string &path);
+
+    // Remove files variadic
+    template <typename... Paths, typename = std::enable_if_t<(std::is_convertible_v<Paths, std::string> && ...)>>
+    bool remove(const Paths &...paths);
 
     /* @brief: Get list of all files in directory
      * @param path: Directory path
@@ -504,6 +711,15 @@ namespace bld
      * @return: Directory path
      */
     std::string strip_file_name(std::string full_path);
+
+    /* @breif: get all files with specific extensions in a directory
+     * @param string: path to the directory
+     * @param vector<string>: vector of extrensions to look for.
+     * @param bool (false): whether to look into a directory recursively
+     * @param bool (false): whether the matching must be case insensitive or not
+     */
+    std::vector<std::string> get_all_files_with_extensions(const std::string &path, std::vector<std::string> extensions,
+                                                           bool recursive = false, bool case_insensitive = false);
 
   }  // namespace fs
 
@@ -538,128 +754,30 @@ namespace bld
      * @return: map of all environment variables
      */
     std::unordered_map<std::string, std::string> get_all();
-  }
+  }  // namespace env
 
   namespace str
   {
-    /* @brief remove leading and trailing whitespace from a string
-     * @param str: the string to trim
-     * @return the trimmed string
-     * @details This function will remove leading and trailing whitespace from a string including: ' ', '\t', '\n', '\r', '\f', '\v'
-     */
-    inline std::string trim(const std::string &str);
-
-    /*
-     * @brief Trim leading whitespace from a string
-     * @param str: the string to trim
-     * @return the trimmed string
-     */
+    inline std::string trim(const std::string &str); // remove leading and trailing whitespace from a string including: ' ', '\t', '\n', '\r', '\f', '\v'
     std::string trim_left(const std::string &str);
-
-    /*
-     * @brief Trim trailing whitespace from a string
-     * @param str: the string to trim
-     * @return the trimmed string
-     */
     std::string trim_right(const std::string &str);
 
-    /* @brief Convert string to lowercase
-     * @param str: the string to convert
-     * @return the string in lowercase
-     */
     inline std::string to_lower(const std::string &str);
-
-    /* @brief Convert string to uppercase
-     * @param str: the string to convert
-     * @return the string in uppercase
-     */
     inline std::string to_upper(const std::string &str);
-
-    /* @brief Replace all occurrences of a substring with another substring
-     * @param str: the string to search
-     * @param from: the substring to search for
-     * @param to: the substring to replace with
-     * @return the string with all occurrences of 'from' replaced with 'to'
-     * @details This function will replace all occurrences of 'from' with 'to' in the string 'str'
-     */
-    inline std::string replace(std::string str, const std::string &from, const std::string &to);
-
-    /* @brief Check if a string starts with a prefix
-     * @param str: the string to check
-     * @param prefix: the prefix to check for
-     * @return true if the string starts with the prefix, false otherwise
-     */
     bool starts_with(const std::string &str, const std::string &prefix);
-
-    /*
-     * @brief Check if a string ends with a suffix
-     * @param str: the string to check
-     * @param suffix: the suffix to check for
-     * @return true if the string ends with the suffix, false otherwise
-     */
     bool ends_with(const std::string &str, const std::string &suffix);
 
-    /*
-     * @brief Join a vector of strings into a single string with a delimiter
-     * @param strs: the vector of strings to join
-     * @param delimiter: the delimiter to separate the strings
-     * @return a single string with all the elements of the vector joined by the delimiter
-     * @details This function will join all the elements of the vector 'strs' into a single string separated by the 'delimiter'
-     */
     std::string join(const std::vector<std::string> &strs, const std::string &delimiter);
-
-    /*
-     * @brief Trim a string till a delimiter
-     * @param str: the string to trim
-     * @param delimiter: the delimiter to trim till
-     * @return the trimmed string
-     * @details This function will trim the string 'str' till the first occurrence of the 'delimiter'
-     */
     std::string trim_till(const std::string &str, char delimiter);
-
-    /* @brief Check if two strings are equal ignoring case
-     * @param str1: the first string to compare
-     * @param str2: the second string to compare
-     * @return true if the strings are equal ignoring case, false otherwise
-     * @details This function will compare the two strings 'str1' and 'str2' ignoring the case of the characters
-     */
-    bool equal_ignorecase(const std::string &str1, const std::string &str2);
-
-    /*
-     * @breif Split a string by a delimiter
-     * @param s: the string to split
-     * @param delimiter: the delimiter to split by
-     * @return a vector of strings split by the delimiter
-     * @details This function will split the string 's' by the delimiter 'delimiter' and return a vector of the split
-     */
     std::vector<std::string> chop_by_delimiter(const std::string &s, const std::string &delimiter);
 
-    /* @brief Remove duplicate characters from a string
-     * @param str: the string to remove duplicates from
-     * @return a string with all duplicates removed
-     */
     std::string remove_duplicates(const std::string &str);
-
-    /* @brief Remove duplicate characters (case insensitively) from a string
-     * @param str: the string to remove duplicates from
-     * @return a string with all duplicates removed
-     * @details  Uses std::tolower() for comparison. Preserves the case of the first occurrence of each character. Removes subsequent duplicates regardless of case
-     */
     std::string remove_duplicates_case_insensitive(const std::string &str);
 
-    /* @breif check if a string is a number or not
-     * @param string to check
-     * @return true if number, false if not
-     * @details Handles integers and floating-point numbers. Supports positive and negative numbers. Allows only one decimal point. Rejects strings with non-numeric characters
-     */
+    bool equal_ignorecase(const std::string &str1, const std::string &str2);
     bool is_numeric(const std::string &str);
 
-    /* @breif replace all occurences of a substring with something
-     * @param str: main string to perform replace function on
-     * @param from: sub-string to replace in main string 'str'
-     * @param to: sub-string to replace 'from' with in 'str'
-     * @details Replaces all occurrences of a substring. Handles multiple replacements in a single string. Works with empty strings and edge cases. Returns original string if substring not found. 
-     */
+    inline std::string replace(std::string str, const std::string &from, const std::string &to);
     std::string replace_all(const std::string &str, const std::string &from, const std::string &to);
   }  // namespace str
 
@@ -711,7 +829,7 @@ namespace bld
     std::unordered_map<std::string, std::unique_ptr<Node>> nodes;
     std::unordered_set<std::string> checked_sources;
 
-  public:
+public:
     /* @brief Add a dependency to the graph.
      * @param dep The dependency to add.
      */
@@ -759,7 +877,7 @@ namespace bld
     bool build_parallel(const std::string &target, size_t thread_count = std::thread::hardware_concurrency());
     bool build_all_parallel(size_t thread_count = std::thread::hardware_concurrency());
 
-  private:
+private:
     /* @brief Build a node in the graph.
      * @param target The name of the target to build.
      * @return true If the build was successful.
@@ -806,40 +924,87 @@ namespace bld
 #include <ostream>
 #include <queue>
 #include <sstream>
+#include <utility>
 
-void bld::log(bld::Log_type type, const std::string &msg)
+void bld::internal_log(bld::Log_type type, const std::string &msg)
 {
-  #ifdef BLD_NO_COLORS
-    static constexpr const char *COLOUR_INFO = "";
-    static constexpr const char *COLOUR_WARN = "";
-    static constexpr const char *COLOUR_ERROR = "";
-    static constexpr const char *COLOUR_DEBUG = "";
-    static constexpr const char *COLOUR_RESET = "";
-  #else
-    static constexpr const char *COLOUR_INFO  = "\x1b[38;2;80;250;123m";  // mint green
-    static constexpr const char *COLOUR_WARN  = "\x1b[38;2;255;200;87m";  // amber
-    static constexpr const char *COLOUR_ERROR = "\x1b[38;2;255;85;85m";   // red
-    static constexpr const char *COLOUR_DEBUG = "\x1b[38;2;130;170;255m"; // light blue
-    static constexpr const char *COLOUR_RESET = "\x1b[0m";
-  #endif
+#ifdef BLD_NO_LOGGING
+  return;
+#endif
+
+#ifdef BLD_NO_COLORS
+  static constexpr const char *COLOUR_INFO = "";
+  static constexpr const char *COLOUR_WARN = "";
+  static constexpr const char *COLOUR_ERROR = "";
+  static constexpr const char *COLOUR_DEBUG = "";
+  static constexpr const char *COLOUR_RESET = "";
+#else
+  static constexpr const char *COLOUR_INFO = "\x1b[38;2;80;250;123m";    // mint green
+  static constexpr const char *COLOUR_WARN = "\x1b[38;2;255;200;87m";    // amber
+  static constexpr const char *COLOUR_ERROR = "\x1b[38;2;255;85;85m";    // red
+  static constexpr const char *COLOUR_DEBUG = "\x1b[38;2;130;170;255m";  // light blue
+  static constexpr const char *COLOUR_RESET = "\x1b[0m";
+#endif
 
   switch (type)
   {
     case Log_type::INFO:
-      #ifndef BLD_VERBOSE_1
-        #ifndef BLD_VERBOSE_2
-          std::cerr << COLOUR_INFO << "[INFO]: " << COLOUR_RESET << msg << std::endl;
-          break;
-        #endif
-      #endif
+#ifndef BLD_VERBOSE_1
+#ifndef BLD_VERBOSE_2
+      std::cerr << COLOUR_INFO << "[INFO]: " << COLOUR_RESET << msg << std::endl;
+      break;
+#endif
+#endif
       break;
 
     case Log_type::WARNING:
-      #ifndef BLD_VERBOSE_1
-          std::cerr << COLOUR_WARN << "[WARNING]: " << COLOUR_RESET << msg << std::endl;
-          std::cerr.flush();
-          break;
-      #endif
+#ifndef BLD_VERBOSE_1
+      std::cerr << COLOUR_WARN << "[WARNING]: " << COLOUR_RESET << msg << std::endl;
+      std::cerr.flush();
+      break;
+#endif
+      break;
+
+    case Log_type::ERR:
+      std::cerr << COLOUR_ERROR << "[ERROR]: " << COLOUR_RESET << msg << std::endl;
+      std::cerr.flush();
+      break;
+
+    case Log_type::DEBUG:
+      std::cerr << COLOUR_DEBUG << "[DEBUG]: " << COLOUR_RESET << msg << std::endl;
+      break;
+
+    default:
+      std::cerr << "[UNKNOWN]: " << msg << std::endl;
+      break;
+  }
+}
+
+void bld::log(bld::Log_type type, const std::string &msg)
+{
+#ifdef BLD_NO_COLORS
+  static constexpr const char *COLOUR_INFO = "";
+  static constexpr const char *COLOUR_WARN = "";
+  static constexpr const char *COLOUR_ERROR = "";
+  static constexpr const char *COLOUR_DEBUG = "";
+  static constexpr const char *COLOUR_RESET = "";
+#else
+  static constexpr const char *COLOUR_INFO = "\x1b[38;2;80;250;123m";    // mint green
+  static constexpr const char *COLOUR_WARN = "\x1b[38;2;255;200;87m";    // amber
+  static constexpr const char *COLOUR_ERROR = "\x1b[38;2;255;85;85m";    // red
+  static constexpr const char *COLOUR_DEBUG = "\x1b[38;2;130;170;255m";  // light blue
+  static constexpr const char *COLOUR_RESET = "\x1b[0m";
+#endif
+
+  switch (type)
+  {
+    case Log_type::INFO:
+      std::cerr << COLOUR_INFO << "[INFO]: " << COLOUR_RESET << msg << std::endl;
+      break;
+
+    case Log_type::WARNING:
+      std::cerr << COLOUR_WARN << "[WARNING]: " << COLOUR_RESET << msg << std::endl;
+      std::cerr.flush();
       break;
 
     case Log_type::ERR:
@@ -876,10 +1041,12 @@ std::vector<char *> bld::Command::to_exec_args() const
 
 std::string bld::Command::get_print_string() const
 {
-  if (parts.empty()) return "''";
+  if (parts.empty())
+    return "''";
   std::stringstream ss;
   ss << "' " << parts[0];
-  if (parts.size() == 1) return ss.str() + "'";
+  if (parts.size() == 1)
+    return ss.str() + "'";
 
   for (int i = 1; i < parts.size(); i++) ss << " " << parts[i];
 
@@ -902,208 +1069,421 @@ void bld::Command::add_parts(Args... args)
 
 bool bld::validate_command(const bld::Command &command)
 {
-  bld::log(bld::Log_type::WARNING, "Do you want to execute " + command.get_print_string() + "in shell");
+  bld::internal_log(bld::Log_type::WARNING, "Do you want to execute " + command.get_print_string() + "in shell");
   std::cerr << "  [WARNING]: Answer[y/n]: ";
   std::string response;
   std::getline(std::cin, response);
   return (response == "y" || response == "Y");
 }
 
-int bld::wait_for_process(pid_t pid)
+bld::Exit_status bld::wait_proc(bld::Proc proc)
 {
+  bld::Exit_status status{};
+
+  if (!proc.is_valid())
+  {
+    bld::internal_log(Log_type::ERR, "Invalid process");
+    return status;  // normal=false by default
+  }
+
 #ifdef _WIN32
-  HANDLE process = OpenProcess(SYNCHRONIZE | PROCESS_QUERY_INFORMATION, FALSE, pid);
-  if (!process)
+  DWORD wait_result = WaitForSingleObject(proc.process_handle, INFINITE);
+  if (wait_result != WAIT_OBJECT_0)
   {
-    bld::log(bld::Log_type::ERR, "Failed to open process (PID: " + std::to_string(pid) + ")");
-    bld::log(bld::Log_type::ERR, "Error code: " + std::to_string(GetLastError()));
-    return 0; // System failure (can't open process)
+    bld::log(Log_type::ERR, "WaitForSingleObject failed. Error: " + std::to_string(GetLastError()));
+    return status;
   }
-  DWORD wait_status = WaitForSingleObject(process, INFINITE);
-  if (wait_status != WAIT_OBJECT_0)
-  {
-    bld::log(bld::Log_type::ERR, "WaitForSingleObject failed. Error: " + std::to_string(GetLastError()));
-    CloseHandle(process);
-    return 0; // System failure
-  }
+
   DWORD exit_code = 0;
-  if (!GetExitCodeProcess(process, &exit_code))
+  if (!GetExitCodeProcess(proc.process_handle, &exit_code))
   {
-    bld::log(bld::Log_type::ERR, "Failed to get exit code. Error: " + std::to_string(GetLastError()));
-    CloseHandle(process);
-    return 0; // System failure
+    bld::log(Log_type::ERR, "Failed to get exit code. Error: " + std::to_string(GetLastError()));
+    return status;
   }
-  CloseHandle(process);
-  // Return >0 for success (actual PID), 0 for system failure
-  return (exit_code == 0) ? static_cast<int>(pid) : 0;
+
+  status.normal = true;
+  status.exit_code = static_cast<int>(exit_code);
+
+  if (exit_code != 0)
+    bld::log(Log_type::ERR, "Process exited with code: " + std::to_string(exit_code));
 
 #else
-  int status;
-  waitpid(pid, &status, 0);  // Wait for the process to complete
+  int wait_status;
+  if (waitpid(proc.p_id, &wait_status, 0) == -1)
+  {
+    bld::internal_log(Log_type::ERR, "waitpid failed: " + std::string(strerror(errno)));
+    return status;
+  }
 
-  if (WIFEXITED(status))
+  if (WIFEXITED(wait_status))
   {
-    int exit_code = WEXITSTATUS(status);
-    if (exit_code != 0)
-    {
-      bld::log(bld::Log_type::ERR, "Process exited with non-zero status: " + std::to_string(exit_code));
-      return 0;  // Return exit code for failure
-    }
-    bld::log(bld::Log_type::INFO, "Process exited successfully.");
+    status.normal = true;
+    status.exit_code = WEXITSTATUS(wait_status);
+
+    if (status.exit_code != 0)
+      bld::internal_log(Log_type::ERR, "Process exited with code: " + std::to_string(status.exit_code));
   }
-  else if (WIFSIGNALED(status))
+  else if (WIFSIGNALED(wait_status))
   {
-    int signal = WTERMSIG(status);
-    bld::log(bld::Log_type::ERR, "Process terminated by signal: " + std::to_string(signal));
-    return 0;  // Indicate signal termination
+    status.signal = WTERMSIG(wait_status);
+    bld::internal_log(Log_type::ERR, "Process terminated by signal: " + std::to_string(status.signal));
   }
-  else 
-  { 
-    bld::log(bld::Log_type::WARNING, "Unexpected process termination status."); 
-  }
-  return static_cast<int>(pid);  // Indicate success
 #endif
+
+  return status;
 }
 
-int bld::execute(const Command &command)
+bld::Par_exec_res bld::wait_procs(std::vector<bld::Proc> procs, int sleep_ms)
+{
+  bld::Par_exec_res result;
+  result.exit_statuses.resize(procs.size());
+  std::vector<bool> completed(procs.size(), false);
+  size_t remaining = procs.size();
+
+  while (remaining > 0)
+  {
+    for (size_t i = 0; i < procs.size(); ++i)
+    {
+      if (completed[i])
+        continue;
+
+      bld::Wait_status status = bld::try_wait_nb(procs[i]);
+
+      if (status.exited && !status.waitpid_failed && !status.invalid_proc)  // Process has terminated
+      {
+        completed[i] = true;
+        remaining--;
+
+        // Convert Wait_status to Exit_status for storage
+        Exit_status exit_status{};
+        exit_status.normal = status.normal;
+        exit_status.exit_code = status.exit_code;
+      #ifndef _WIN32
+        exit_status.signal = status.signal;
+      #endif
+        result.exit_statuses[i] = exit_status;
+
+        if (status)  // success (normal && exit_code == 0)
+          result.completed++;
+        else
+          result.failed_indices.push_back(i);
+
+        bld::cleanup_process(procs[i]);
+      }
+      // If !status.exited, process is still running, continue polling
+    }
+
+    if (remaining > 0)
+      std::this_thread::sleep_for(std::chrono::milliseconds(sleep_ms));
+  }
+
+  return result;
+}
+
+void bld::cleanup_process(bld::Proc &proc)
+{
+#ifdef _WIN32
+  if (proc.thread_handle)
+  {
+    CloseHandle(proc.thread_handle);
+    proc.thread_handle = nullptr;
+  }
+  if (proc.process_handle)
+  {
+    CloseHandle(proc.process_handle);
+    proc.process_handle = nullptr;
+  }
+  proc.process_id = 0;
+#else
+  proc.p_id = -1;
+#endif
+  proc.state = State::INIT_ERROR;  // Mark as invalid
+  proc.ok = false;
+}
+
+bld::Exit_status bld::execute(const Command &command)
+{
+  bld::internal_log(Log_type::INFO, "Executing: " + command.get_print_string());
+
+  Proc proc = execute_async(command);
+  if (!proc)
+  {
+    Exit_status status{};
+    return status;
+  }
+
+  Exit_status status = wait_proc(proc);
+  cleanup_process(proc);
+  return status;
+}
+
+bld::Proc bld::execute_async(const Command &command)
 {
   if (command.is_empty())
   {
-    bld::log(Log_type::ERR, "No command to execute.");
-    return -1;
+    bld::internal_log(Log_type::ERR, "No command to execute.");
+    return Proc{};  // Default constructor gives USER_ERROR
   }
-
-  auto args = command.to_exec_args();
 
 #ifdef _WIN32
   STARTUPINFOA si = {sizeof(STARTUPINFOA)};
   PROCESS_INFORMATION pi;
+
+  // Build command string
   std::string command_str;
-  for (const auto &part : command.parts)
+  for (size_t i = 0; i < command.parts.size(); ++i)
   {
-    // Add proper quoting for Windows command line arguments
+    if (i > 0)
+      command_str += " ";
+
+    const auto &part = command.parts[i];
     if (part.find(' ') != std::string::npos)
-    {
-      command_str += "\"" + part + "\" ";
-    }
+      command_str += "\"" + part + "\"";
     else
-    {
-      command_str += part + " ";
-    }
+      command_str += part;
   }
 
-  bld::log(bld::Log_type::INFO, "Executing command: ' " + command_str + " '");
-
-  if (!CreateProcessA(nullptr, command_str.data(), nullptr, nullptr, FALSE, 0, nullptr, nullptr, &si, &pi))
+  std::vector<char> cmd_buffer(command_str.begin(), command_str.end());
+  cmd_buffer.push_back('\0');
+  if (!CreateProcessA(nullptr, cmd_buffer.data(), nullptr, nullptr, FALSE, 0, nullptr, nullptr, &si, &pi))
   {
-    bld::log(bld::Log_type::ERR, "Failed to create process. Error: " + std::to_string(GetLastError()));
-    return 0; // System failure: process creation failed
+    bld::log(Log_type::ERR, "Failed to create process. Error: " + std::to_string(GetLastError()));
+    Proc proc;
+    proc.res = Proc_result::SYSTEM_ERROR;
+    return proc;
   }
 
-  int result = wait_for_process(pi.dwProcessId);
-  CloseHandle(pi.hProcess);
-  CloseHandle(pi.hThread);
-  return result; // Return the consistent value from wait_for_process
+  return Proc(pi.hProcess, pi.hThread, pi.dwProcessId);
+
 #else
-  bld::log(Log_type::INFO, "Executing command: " + command.get_print_string());
+  auto args = command.to_exec_args();
   pid_t pid = fork();
+
   if (pid == -1)
   {
-    bld::log(Log_type::ERR, "Failed to create child process.");
-    return 0;
+    bld::internal_log(Log_type::ERR, "Failed to fork: " + std::string(strerror(errno)));
+    Proc proc;
+    proc.state = State::INIT_ERROR;
+    return proc;
   }
   else if (pid == 0)
   {
     // Child process
     if (execvp(args[0], args.data()) == -1)
     {
-      perror("execvp");
-      bld::log(Log_type::ERR, "Failed with error: " + std::string(strerror(errno)));
+      bld::internal_log(Log_type::ERR, "Failed to exec: " + std::string(strerror(errno)));
       exit(EXIT_FAILURE);
     }
-    // This line should never be reached
-    bld::log(Log_type::ERR, "Unexpected code execution after execvp. Did we find a bug? in libc or kernel?");
-    abort();
+    bld::internal_log(bld::Log_type::ERR, "Unreachable code after execvp!");
+    std::exit(EXIT_FAILURE);
   }
 
-  return bld::wait_for_process(pid);  // Use wait_for_process instead of direct waitpid
-  #endif
+  return Proc(pid);
+#endif
 }
 
-int bld::execute_without_wait(const Command &command)
+bld::Proc bld::execute_async_redirect(const Command &command, const Redirect &redirect)
 {
   if (command.is_empty())
   {
-    bld::log(Log_type::ERR, "No command to execute.");
-    return -1;
+    bld::internal_log(Log_type::ERR, "No command to execute.");
+    return Proc{};
   }
-
-  auto args = command.to_exec_args();
-  bld::log(Log_type::INFO, "Executing command: " + command.get_print_string());
 
 #ifdef _WIN32
   STARTUPINFOA si = {sizeof(STARTUPINFOA)};
   PROCESS_INFORMATION pi;
+
+  // Set up redirection
+  si.dwFlags |= STARTF_USESTDHANDLES;
+  si.hStdInput = redirect.stdin_fd != INVALID_FD ? redirect.stdin_fd : GetStdHandle(STD_INPUT_HANDLE);
+  si.hStdOutput = redirect.stdout_fd != INVALID_FD ? redirect.stdout_fd : GetStdHandle(STD_OUTPUT_HANDLE);
+  si.hStdError = redirect.stderr_fd != INVALID_FD ? redirect.stderr_fd : GetStdHandle(STD_ERROR_HANDLE);
+
+  // Build command string
   std::string command_str;
-  for (const auto &part : command.parts)
+  for (size_t i = 0; i < command.parts.size(); ++i)
   {
-    // Add proper quoting for Windows command line arguments
+    if (i > 0)
+      command_str += " ";
+
+    const auto &part = command.parts[i];
     if (part.find(' ') != std::string::npos)
-    {
-      command_str += "\"" + part + "\" ";
-    }
+      command_str += "\"" + part + "\"";
     else
-    {
-      command_str += part + " ";
-    }
+      command_str += part;
   }
 
-  if (!CreateProcessA(nullptr, command_str.data(), nullptr, nullptr, FALSE, 0, nullptr, nullptr, &si, &pi))
+  std::vector<char> cmd_buffer(command_str.begin(), command_str.end());
+  cmd_buffer.push_back('\0');
+
+  if (!CreateProcessA(nullptr, cmd_buffer.data(), nullptr, nullptr, TRUE, 0, nullptr, nullptr, &si, &pi))
   {
-    bld::log(bld::Log_type::ERR, "Failed to create process. Error: " + std::to_string(GetLastError()));
-    return 0; // System failure: process creation failed
+    bld::log(Log_type::ERR, "Failed to create process. Error: " + std::to_string(GetLastError()));
+    Proc proc;
+    proc.res = Proc_result::SYSTEM_ERROR;
+    return proc;
   }
 
-  // Store the process ID
-  pid_t process_id = pi.dwProcessId;
+  CloseHandle(pi.hThread);  // We don't need the thread handle
+  return Proc(pi.hProcess, nullptr, pi.dwProcessId);
 
-  // Close handles since we're not waiting
-  CloseHandle(pi.hProcess);
-  CloseHandle(pi.hThread);
-
-  return static_cast<int>(process_id); // Return the process ID (success)
 #else
+  auto args = command.to_exec_args();
   pid_t pid = fork();
+
   if (pid == -1)
   {
-    bld::log(Log_type::ERR, "Failed to create child process.");
-    return 0;
+    bld::internal_log(Log_type::ERR, "Failed to fork: " + std::string(strerror(errno)));
+    Proc proc;
+    proc.state = State::INIT_ERROR;
+    return proc;
   }
   else if (pid == 0)
   {
-    // Child process
+    // Child process - set up redirection
+    if (redirect.stdin_fd != INVALID_FD)
+    {
+      if (dup2(redirect.stdin_fd, STDIN_FILENO) == -1)
+      {
+        bld::internal_log(Log_type::ERR, "Failed to redirect stdin: " + std::string(strerror(errno)));
+        exit(EXIT_FAILURE);
+      }
+    }
+
+    if (redirect.stdout_fd != INVALID_FD)
+    {
+      if (dup2(redirect.stdout_fd, STDOUT_FILENO) == -1)
+      {
+        bld::internal_log(Log_type::ERR, "Failed to redirect stdout: " + std::string(strerror(errno)));
+        exit(EXIT_FAILURE);
+      }
+    }
+
+    if (redirect.stderr_fd != INVALID_FD)
+    {
+      if (dup2(redirect.stderr_fd, STDERR_FILENO) == -1)
+      {
+        bld::internal_log(Log_type::ERR, "Failed to redirect stderr: " + std::string(strerror(errno)));
+        exit(EXIT_FAILURE);
+      }
+    }
+
+    // Close redirected FDs in child
+    if (redirect.stdin_fd != INVALID_FD)
+      close(redirect.stdin_fd);
+    if (redirect.stdout_fd != INVALID_FD)
+      close(redirect.stdout_fd);
+    if (redirect.stderr_fd != INVALID_FD)
+      close(redirect.stderr_fd);
+
+    // Execute command
     if (execvp(args[0], args.data()) == -1)
     {
-      perror("execvp");
-      bld::log(Log_type::ERR, "Failed with error: " + std::string(strerror(errno)));
+      bld::internal_log(Log_type::ERR, "Failed to exec: " + std::string(strerror(errno)));
       exit(EXIT_FAILURE);
     }
-    // This line should never be reached
-    bld::log(Log_type::ERR, "Unexpected code execution after execvp. Did we find a bug? in libc or kernel?");
-    abort();
   }
 
-  return static_cast<int>(pid);  // Use wait_for_process instead of direct waitpid
+  // Parent process - close redirected FDs
+  if (redirect.stdin_fd != INVALID_FD)
+    close(redirect.stdin_fd);
+  if (redirect.stdout_fd != INVALID_FD)
+    close(redirect.stdout_fd);
+  if (redirect.stderr_fd != INVALID_FD)
+    close(redirect.stderr_fd);
+
+  return Proc(pid);
 #endif
 }
 
-bld::Exec_par_result bld::execute_parallel(const std::vector<bld::Command> &cmds, size_t threads, bool strict)
+bld::Exit_status bld::execute_redirect(const Command &command, const Redirect &redirect)
 {
-  bld::Exec_par_result result;
+  bld::internal_log(Log_type::INFO, "Executing with redirection: " + command.get_print_string());
 
-  if (cmds.empty()) return result;  // Nothing to do
-  if (threads == 0) threads = 1;
-  if (threads > std::thread::hardware_concurrency()) threads = std::thread::hardware_concurrency();
+  Proc proc = execute_async_redirect(command, redirect);
+  if (!proc)
+    return Exit_status{};
+
+  Exit_status status = wait_proc(proc);
+  cleanup_process(proc);
+  return status;
+}
+
+// Open a file for reading
+bld::Fd bld::open_for_read(const std::string &path)
+{
+#ifdef _WIN32
+  SECURITY_ATTRIBUTES sa = {sizeof(SECURITY_ATTRIBUTES)};
+  sa.bInheritHandle = TRUE;
+
+  HAND handle = CreateFileA(path.c_str(), GENERIC_READ, 0, &sa, OPEN_EXISTING, FILE_ATTRIBUTE_NORMAL, NULL);
+  if (handle == INVALID_HANDLE_VALUE)
+    bld::log(Log_type::ERR, "Failed to open file for reading: " + path);
+  return handle;
+#else
+  int fd = open(path.c_str(), O_RDONLY);
+  if (fd == -1)
+    bld::internal_log(Log_type::ERR, "Failed to open file for reading: " + path + " - " + std::string(strerror(errno)));
+  return fd;
+#endif
+}
+
+// Open a file for writing
+bld::Fd bld::open_for_write(const std::string &path, bool append)
+{
+#ifdef _WIN32
+  SECURITY_ATTRIBUTES sa = {sizeof(SECURITY_ATTRIBUTES)};
+  sa.bInheritHandle = TRUE;
+
+  DWORD disposition = append ? OPEN_ALWAYS : CREATE_ALWAYS;
+  HANDLE handle = CreateFileA(path.c_str(), GENERIC_WRITE, 0, &sa, disposition, FILE_ATTRIBUTE_NORMAL, NULL);
+  if (handle == INVALID_HANDLE_VALUE)
+  {
+    bld::log(Log_type::ERR, "Failed to open file for writing: " + path);
+    return INVALID_FD;
+  }
+
+  if (append)
+    SetFilePointer(handle, 0, NULL, FILE_END);
+
+  return handle;
+#else
+  int flags = O_WRONLY | O_CREAT | (append ? O_APPEND : O_TRUNC);
+  int fd = open(path.c_str(), flags, 0644);
+  if (fd == -1)
+    bld::internal_log(Log_type::ERR, "Failed to open file for writing: " + path + " - " + std::string(strerror(errno)));
+  return fd;
+#endif
+}
+
+template <typename... Fds, typename>
+void bld::close_fd(Fds ...fds)
+{
+  (..., (
+  [&]
+  {
+    if (fds == INVALID_FD)
+      return;
+    #ifdef _WIN32
+      CloseHandle((HANDLE)fds);
+    #else
+      close(fds);
+    #endif
+  }()));
+}
+
+bld::Par_exec_res bld::execute_threads(const std::vector<bld::Command> &cmds, size_t threads, bool strict)
+{
+  bld::Par_exec_res result;
+  result.exit_statuses.resize(cmds.size());
+
+  if (cmds.empty())
+    return result;
+  if (threads == 0)
+    threads = 1;
+  if (threads > std::thread::hardware_concurrency())
+    threads = std::thread::hardware_concurrency();
 
   std::mutex queue_mutex, output_mutex;
   std::atomic<bool> stop_workers{false};  // Used when strict = true
@@ -1112,39 +1492,33 @@ bld::Exec_par_result bld::execute_parallel(const std::vector<bld::Command> &cmds
   std::queue<size_t> cmd_queue;
   for (size_t i = 0; i < cmds.size(); ++i) cmd_queue.push(i);
 
-  bld::log(bld::Log_type::INFO, "Executing " + std::to_string(cmds.size()) + " commands on " + std::to_string(threads) + " threads...");
+  bld::internal_log(bld::Log_type::INFO, "Executing " + std::to_string(cmds.size()) + " commands on " + std::to_string(threads) + " threads...");
 
   // Worker function
   auto worker = [&]()
   {
     while (true)
     {
-      if (strict && stop_workers) return;  // Stop all threads if strict and an error occurs
+      if (strict && stop_workers)
+        return;  // Stop all threads if strict and an error occurs
 
       size_t cmd_idx;
       {
         std::lock_guard<std::mutex> lock(queue_mutex);
-        if (cmd_queue.empty()) return;
-
+        if (cmd_queue.empty())
+          return;
         cmd_idx = cmd_queue.front();
         cmd_queue.pop();
       }
 
-      // Log and execute the command
+      // Run command
+      bld::Exit_status execution_result = execute(cmds[cmd_idx]);
+
+      // Record result
+      result.exit_statuses[cmd_idx] = execution_result;
+
+      if (!execution_result.normal)
       {
-        std::lock_guard<std::mutex> lock(output_mutex);
-      }
-
-      int execution_result = execute(cmds[cmd_idx]);
-
-      if (execution_result <= 0)
-      {
-        {
-          std::lock_guard<std::mutex> lock(output_mutex);
-          bld::log(bld::Log_type::ERR, "Failed to execute: " + cmds[cmd_idx].get_print_string());
-        }
-
-        // Record the failed command index
         {
           std::lock_guard<std::mutex> lock(queue_mutex);
           result.failed_indices.push_back(cmd_idx);
@@ -1152,17 +1526,20 @@ bld::Exec_par_result bld::execute_parallel(const std::vector<bld::Command> &cmds
 
         if (strict)
         {
-          stop_workers = true;  // Signal all threads to stop
+          stop_workers = true;
           return;
         }
       }
       else
       {
-        // Increment completed count
         {
           std::lock_guard<std::mutex> lock(queue_mutex);
-          bld::log(bld::Log_type::INFO, "Completed: " + cmds[cmd_idx].get_print_string());
           result.completed++;
+        }
+
+        {
+          std::lock_guard<std::mutex> lock(output_mutex);
+          bld::internal_log(bld::Log_type::INFO, "Completed: " + cmds[cmd_idx].get_print_string());
         }
       }
     }
@@ -1171,12 +1548,12 @@ bld::Exec_par_result bld::execute_parallel(const std::vector<bld::Command> &cmds
   // Launch worker threads
   std::vector<std::thread> workers;
   size_t num_threads = std::min(threads, cmds.size());
-
   for (size_t i = 0; i < num_threads; ++i) workers.emplace_back(worker);
 
   // Wait for all threads to complete
   for (auto &t : workers)
-    if (t.joinable()) t.join();
+    if (t.joinable())
+      t.join();
 
   return result;
 }
@@ -1184,7 +1561,7 @@ bld::Exec_par_result bld::execute_parallel(const std::vector<bld::Command> &cmds
 void bld::print_metadata()
 {
   std::cerr << '\n';
-  bld::log(Log_type::INFO, "Printing system metadata...........................................");
+  bld::internal_log(Log_type::INFO, "Printing system metadata...........................................");
 
   // 1. Get OS information
   std::string os_name = "Unknown";
@@ -1249,40 +1626,68 @@ void bld::print_metadata()
 #endif
   std::cerr << std::endl;
 
-  log(Log_type::INFO, "...................................................................\n");
+  internal_log(Log_type::INFO, "...................................................................\n");
 }
 
-bld::Command bld::preprocess_commands_for_shell(const bld::Command &cmd)
+int bld::get_n_procs(bool physical_cores_only)
 {
-  bld::Command cmd_s;
-
 #ifdef _WIN32
-  char *comspec = getenv("COMSPEC");
-  std::string shell_path{};
-  if (comspec)
+  if (physical_cores_only)
   {
-    shell_path = comspec;
+    // Proper Windows physical core count
+    DWORD length = 0;
+    GetLogicalProcessorInformation(nullptr, &length);
+    if (GetLastError() != ERROR_INSUFFICIENT_BUFFER)
+      return 0;
+
+    auto *buffer = (SYSTEM_LOGICAL_PROCESSOR_INFORMATION *)malloc(length);
+    if (!buffer)
+      return 0;
+
+    if (!GetLogicalProcessorInformation(buffer, &length))
+    {
+      free(buffer);
+      return 0;
+    }
+
+    unsigned core_count = 0;
+    DWORD byteOffset = 0;
+    while (byteOffset < length)
+    {
+      auto *current = (SYSTEM_LOGICAL_PROCESSOR_INFORMATION *)((BYTE *)buffer + byteOffset);
+      if (current->Relationship == RelationProcessorCore)
+        core_count++;
+      byteOffset += sizeof(SYSTEM_LOGICAL_PROCESSOR_INFORMATION);
+    }
+
+    free(buffer);
+    return core_count;
   }
   else
   {
-    shell_path = "cmd.exe";
+    // Logical processors
+    SYSTEM_INFO sysinfo;
+    GetSystemInfo(&sysinfo);
+    return sysinfo.dwNumberOfProcessors;
   }
-
-  cmd_s.add_parts(shell_path, " /c ", cmd.get_command_string());
 #else
-  cmd_s.add_parts("/bin/sh", "-c", cmd.get_command_string());
+  if (physical_cores_only)
+  {
+    // Physical cores on Unix-like systems
+    return sysconf(_SC_NPROCESSORS_CONF);  // _SC_NPROCESSORS_CONF for physical cores
+  }
+  else
+  {
+    // Logical processors on Unix-like systems
+    return sysconf(_SC_NPROCESSORS_ONLN);  // _SC_NPROCESSORS_ONLN for logical processors
+  }
 #endif
-  return cmd_s;
 }
-
 // Execute the shell command with preprocessed parts
 int bld::execute_shell(std::string cmd)
 {
-  // Preprocess the command for shell execution
-  auto cmd_s = preprocess_commands_for_shell(cmd);
-
-  // Execute the shell command using the original execute function
-  return execute(cmd_s);
+  std::cout.flush();
+  return std::system(cmd.c_str());
 }
 
 int bld::execute_shell(std::string cmd, bool prompt)
@@ -1290,293 +1695,228 @@ int bld::execute_shell(std::string cmd, bool prompt)
   if (prompt)
   {
     if (validate_command(cmd))
-    {
-      // Preprocess the command for shell execution
-      auto cmd_s = preprocess_commands_for_shell(cmd);
-
-      // Execute the shell command using the original execute function
-      return execute(cmd_s);
-    }
-    else { return -1; }
+      return execute_shell(cmd);
+    else
+      return -1;
   }
-  auto cmd_s = preprocess_commands_for_shell(cmd);
-
   // Execute the shell command using the original execute function
-  return execute(cmd_s);
+  return execute_shell(cmd);
 }
 
 bool bld::read_process_output(const Command &cmd, std::string &output, size_t buffer_size)
 {
-if (cmd.is_empty())
-{
-  bld::log(Log_type::ERR, "No command to execute.");
-  return false;
-}
+  if (cmd.is_empty())
+  {
+    bld::internal_log(Log_type::ERR, "No command to execute.");
+    return false;
+  }
 
-if (buffer_size == 0)
-{
-  bld::log(bld::Log_type::ERR, "Buffer size cannot be zero.");
-  return false;
-}
-
-bld::log(bld::Log_type::INFO, "Extracting output from: " + cmd.get_print_string());
-output.clear();
+  bld::internal_log(Log_type::INFO, "Executing with output: " + cmd.get_print_string());
+  output.clear();
 
 #ifdef _WIN32
+  // Create an anonymous pipe for output
   SECURITY_ATTRIBUTES sa;
   sa.nLength = sizeof(SECURITY_ATTRIBUTES);
   sa.bInheritHandle = TRUE;
   sa.lpSecurityDescriptor = NULL;
 
-  HANDLE read_handle, write_handle;
-  if (!CreatePipe(&read_handle, &write_handle, &sa, 0))
+  HANDLE read_pipe, write_pipe;
+  if (!CreatePipe(&read_pipe, &write_pipe, &sa, 0))
   {
-    bld::log(bld::Log_type::ERR, "Failed to create pipe. Error: " + std::to_string(GetLastError()));
+    bld::log(Log_type::ERR, "Failed to create pipe: " + std::to_string(GetLastError()));
     return false;
   }
 
-  // Set the stdout and stderr for the child process
-  STARTUPINFOA si = {sizeof(STARTUPINFOA)};
-  si.dwFlags = STARTF_USESTDHANDLES;
-  si.hStdOutput = write_handle;
-  si.hStdError = write_handle;
-  si.hStdInput = GetStdHandle(STD_INPUT_HANDLE);
+  // Set up redirection to capture both stdout and stderr
+  Redirect redirect(INVALID_FD, write_pipe, write_pipe);
+  Proc proc = execute_async_redirect(cmd, redirect);
 
-  PROCESS_INFORMATION pi;
-  std::string command_str;
-  for (const auto &part : cmd.parts)
+  if (!proc)
   {
-    // Add proper quoting for Windows command line arguments
-    if (part.find(' ') != std::string::npos)
+    CloseHandle(read_pipe);
+    CloseHandle(write_pipe);
+    return false;
+  }
+
+  // Close write end in parent (child process has its own copy)
+  CloseHandle(write_pipe);
+
+  // Read output from the pipe
+  std::vector<char> buffer(buffer_size);
+  DWORD bytes_read;
+  while (ReadFile(read_pipe, buffer.data(), static_cast<DWORD>(buffer.size()), &bytes_read, NULL) && bytes_read > 0)
+    output.append(buffer.data(), bytes_read);
+
+  CloseHandle(read_pipe);
+
+  Exit_status result = wait_proc(proc);
+  cleanup_process(proc);
+
+  return result;  // Uses bool conversion operator
+
+#else
+  // Create a pipe for output
+  int pipefd[2];
+  if (pipe(pipefd) == -1)
+  {
+    bld::internal_log(Log_type::ERR, "Failed to create pipe: " + std::string(strerror(errno)));
+    return false;
+  }
+
+  // Set up redirection to capture both stdout and stderr
+  Redirect redirect(INVALID_FD, pipefd[1], pipefd[1]);
+  Proc proc = execute_async_redirect(cmd, redirect);
+
+  if (!proc)
+  {
+    close(pipefd[0]);
+    close(pipefd[1]);
+    return false;
+  }
+
+  // Close write end in parent (child process has its own copy)
+  close(pipefd[1]);
+
+  // Read output from the pipe
+  std::vector<char> buffer(buffer_size);
+  ssize_t bytes_read;
+  while ((bytes_read = read(pipefd[0], buffer.data(), buffer.size())) > 0) output.append(buffer.data(), bytes_read);
+
+  close(pipefd[0]);
+
+  Exit_status result = wait_proc(proc);
+  return result;
+#endif
+}
+
+bld::Wait_status bld::try_wait_nb(const bld::Proc &proc)
+{
+  bld::Wait_status status{};
+  // Default values: normal=false, exit_code=0, exited=false
+
+  if (!proc.is_valid())
+  {
+    bld::internal_log(Log_type::ERR, "Invalid process for non-blocking wait");
+    status.exited = true;
+    status.invalid_proc = true;
+    return status;  // exited=false, so caller knows to skip this process
+  }
+
+#ifdef _WIN32
+  DWORD wait_result = WaitForSingleObject(proc.process_handle, 0);  // 0 = no wait
+
+  if (wait_result == WAIT_OBJECT_0)
+  {
+    // Process has terminated
+    status.exited = true;
+
+    DWORD exit_code = 0;
+    if (GetExitCodeProcess(proc.process_handle, &exit_code))
     {
-      command_str += "\"" + part + "\" ";
+      status.normal = true;
+      status.exit_code = static_cast<int>(exit_code);
+      if (exit_code != 0)
+        bld::log(Log_type::ERR, "Process exited with code: " + std::to_string(exit_code));
     }
     else
     {
-      command_str += part + " ";
+      bld::log(Log_type::ERR, "Failed to get exit code. Error: " + std::to_string(GetLastError()));
+      // status.normal remains false, but exited=true so we know it terminated
     }
   }
-
-  if (!CreateProcessA(NULL, command_str.data(), NULL, NULL, TRUE, 0, NULL, NULL, &si, &pi))
+  else if (wait_result == WAIT_TIMEOUT)
   {
-    bld::log(bld::Log_type::ERR, "Failed to create process. Error: " + std::to_string(GetLastError()));
-    CloseHandle(read_handle);
-    CloseHandle(write_handle);
-    return false;
-  }
-
-  // Close the write end of the pipe as the child will write to it
-  CloseHandle(write_handle);
-
-  // Read the child's output
-  std::vector<char> buffer(buffer_size);
-  DWORD bytes_read;
-  while (ReadFile(read_handle, buffer.data(), static_cast<DWORD>(buffer.size()), &bytes_read, NULL) && bytes_read > 0)
-  {
-    output.append(buffer.data(), bytes_read);
-  }
-
-  // Close the read end of the pipe
-  CloseHandle(read_handle);
-
-  // Wait for the process to complete and get exit status
-  int result = wait_for_process(pi.dwProcessId);
-
-  // Clean up process handles
-  CloseHandle(pi.hProcess);
-  CloseHandle(pi.hThread);
-
-  return result > 0;
-
-#else
-
-if (buffer_size == 0)
-{
-  bld::log(Log_type::ERR, "Buffer size cannot be zero.");
-  return false;
-}
-
-int pipefd[2];
-if (pipe(pipefd) == -1)
-{
-  bld::log(Log_type::ERR, "Failed to create pipe: " + std::string(strerror(errno)));
-  return false;
-}
-
-auto args = cmd.to_exec_args();
-bld::log(Log_type::INFO, "Extracting output from: " + cmd.get_print_string());
-
-pid_t pid = fork();
-if (pid == -1)
-{
-  bld::log(Log_type::ERR, "Failed to create child process: " + std::string(strerror(errno)));
-  close(pipefd[0]);
-  close(pipefd[1]);
-  return false;
-}
-else if (pid == 0)
-{
-  // Child process
-  close(pipefd[0]);                // Close the read end
-  dup2(pipefd[1], STDOUT_FILENO);  // Redirect stdout to the pipe
-  dup2(pipefd[1], STDERR_FILENO);  // Redirect stderr to the pipe
-  close(pipefd[1]);                // Close the write end
-
-  if (execvp(args[0], args.data()) == -1)
-  {
-    perror("execvp");
-    bld::log(Log_type::ERR, "Failed with error: " + std::string(strerror(errno)));
-    exit(EXIT_FAILURE);
-  }
-  abort();  // Should never reach here
-}
-else
-{
-  // Parent process
-  close(pipefd[1]);  // Close the write end
-
-  std::vector<char> buffer(buffer_size);
-  ssize_t bytes_read;
-  output.clear();
-
-  while ((bytes_read = read(pipefd[0], buffer.data(), buffer.size())) > 0) output.append(buffer.data(), bytes_read);
-  close(pipefd[0]);  // Close the read end
-
-  return bld::wait_for_process(pid) > 0;  // Use wait_for_process to handle the exit status
-}
-#endif
-}
-
-bool bld::read_shell_output(const std::string &cmd, std::string &output, size_t buffer_size)
-{
-  if (cmd.empty())
-  {
-    bld::log(bld::Log_type::ERR, "No command to execute.");
-    return false;
-  }
-
-  if (buffer_size == 0)
-  {
-    bld::log(bld::Log_type::ERR, "Buffer size cannot be zero.");
-    return false;
-  }
-
-  bld::log(bld::Log_type::INFO, "Extracting shell output from: " + cmd);
-  output.clear();
-
-#ifdef _WIN32
-  SECURITY_ATTRIBUTES sa;
-  sa.nLength = sizeof(SECURITY_ATTRIBUTES);
-  sa.bInheritHandle = TRUE;
-  sa.lpSecurityDescriptor = NULL;
-
-  HANDLE read_handle, write_handle;
-  if (!CreatePipe(&read_handle, &write_handle, &sa, 0))
-  {
-    bld::log(bld::Log_type::ERR, "Failed to create pipe. Error: " + std::to_string(GetLastError()));
-    return false;
-  }
-
-  // Set the stdout and stderr for the child process
-  STARTUPINFOA si = {sizeof(STARTUPINFOA)};
-  si.dwFlags = STARTF_USESTDHANDLES;
-  si.hStdOutput = write_handle;
-  si.hStdError = write_handle;
-  si.hStdInput = GetStdHandle(STD_INPUT_HANDLE);
-
-  PROCESS_INFORMATION pi;
-
-  // Use default shell from environment variables
-  std::string shell_path;
-  char *comspec = getenv("COMSPEC");
-  if (comspec)
-  {
-    shell_path = comspec;
+    // Process is still running - exited remains false
   }
   else
   {
-    // Fallback to cmd.exe if COMSPEC is not defined
-    shell_path = "cmd.exe";
+    // Error occurred
+    bld::log(Log_type::ERR, "WaitForSingleObject failed. Error: " + std::to_string(GetLastError()));
+    // exited remains false, caller will retry or handle as appropriate
   }
 
-  std::string command_str = shell_path + " /c " + cmd;
+#else
+  int wait_status;
+  pid_t result = waitpid(proc.p_id, &wait_status, WNOHANG);  // WNOHANG = non-blocking
 
-  if (!CreateProcessA(NULL, const_cast<char *>(command_str.c_str()), NULL, NULL, TRUE,
-                      CREATE_NO_WINDOW, NULL, NULL, &si, &pi))
+  if (result == proc.p_id)
   {
-    bld::log(bld::Log_type::ERR, "Failed to create process. Error: " + std::to_string(GetLastError()));
-    CloseHandle(read_handle);
-    CloseHandle(write_handle);
+    // Process has terminated
+    status.exited = true;
+
+    if (WIFEXITED(wait_status))
+    {
+      status.normal = true;
+      status.exit_code = WEXITSTATUS(wait_status);
+      if (status.exit_code != 0)
+        bld::internal_log(Log_type::ERR, "Process exited with code: " + std::to_string(status.exit_code));
+    }
+    else if (WIFSIGNALED(wait_status))
+    {
+      status.signal = WTERMSIG(wait_status);
+      bld::internal_log(Log_type::ERR, "Process terminated by signal: " + std::to_string(status.signal));
+      // status.normal remains false
+    }
+  }
+  else if (result == 0)
+  {
+    status.exited = false;
+  }
+  else  // result == -1
+  {
+    // Error occurred
+    if (errno == ECHILD)
+    {
+      // Process doesn't exist anymore (already reaped)
+      bld::internal_log(Log_type::WARNING, "Process already reaped");
+      status.exited = true;  // Treat as exited
+      status.normal = true;  // Assume successful exit
+    }
+    else
+    {
+      bld::internal_log(Log_type::ERR, "waitpid failed: " + std::string(strerror(errno)));
+      status.exited = true;
+      status.waitpid_failed = true;
+      // exited remains false, let caller handle retry
+    }
+  }
+#endif
+
+  return status;
+}
+
+bool bld::read_shell_output(const std::string &cmd, std::string &output)
+{
+#ifdef _WIN32
+  FILE *pipe = _popen(command.c_str(), "r");
+#else
+  FILE *pipe = popen(cmd.c_str(), "r");
+#endif
+
+  if (!pipe)
+  {
+    bld::internal_log(Log_type::ERR, "Failed to open pipe for command: " + cmd);
     return false;
   }
 
-  // Close the write end of the pipe as the child will write to it
-  CloseHandle(write_handle);
+  char buffer[4096];
+  while (fgets(buffer, sizeof(buffer), pipe) != nullptr) output += buffer;
 
-  // Read the child's output
-  std::vector<char> buffer(buffer_size);
-  DWORD bytes_read;
-  while (ReadFile(read_handle, buffer.data(), static_cast<DWORD>(buffer.size()), &bytes_read, NULL) && bytes_read > 0)
+#ifdef _WIN32
+  int exit_code = _pclose(pipe);
+#else
+  int exit_code = pclose(pipe);
+#endif
+
+  // Check if command executed successfully
+  if (exit_code != 0)
   {
-    output.append(buffer.data(), bytes_read);
+    bld::internal_log(Log_type::ERR, "Command failed with exit code: " + std::to_string(exit_code));
+    return false;
   }
 
-  // Close the read end of the pipe
-  CloseHandle(read_handle);
-
-  // Wait for the process to complete and get exit status
-  int result = wait_for_process(pi.dwProcessId);
-
-  // Clean up process handles
-  CloseHandle(pi.hProcess);
-  CloseHandle(pi.hThread);
-
-  return result > 0;
-#else
-int pipefd[2];
-if (pipe(pipefd) == -1)
-{
-  bld::log(Log_type::ERR, "Failed to create pipe: " + std::string(strerror(errno)));
-  return false;
-}
-
-pid_t pid = fork();
-if (pid == -1)
-{
-  bld::log(Log_type::ERR, "Failed to create child process: " + std::string(strerror(errno)));
-  return false;
-}
-else if (pid == 0)
-{
-  close(pipefd[0]);                // Close the read end
-  dup2(pipefd[1], STDOUT_FILENO);  // Redirect stdout to the pipe
-  dup2(pipefd[1], STDERR_FILENO);  // Redirect stderr to the pipe
-  close(pipefd[1]);                // Close the write end
-
-  std::vector<char *> args;
-  args.push_back(const_cast<char *>("/bin/sh"));
-  args.push_back(const_cast<char *>("-c"));
-  args.push_back(const_cast<char *>(cmd.c_str()));
-  args.push_back(nullptr);
-
-  execvp(args[0], args.data());
-  perror("execvp");
-  exit(EXIT_FAILURE);
-}
-else
-{
-  close(pipefd[1]);  // Close the write end
-
-  std::vector<char> buffer(buffer_size);
-  ssize_t bytes_read;
-  output.clear();
-
-  while ((bytes_read = read(pipefd[0], buffer.data(), buffer.size())) > 0) output.append(buffer.data(), bytes_read);
-  close(pipefd[0]);  // Close the read end
-
-  return wait_for_process(pid) > 0;  // Use wait_for_process instead of direct waitpid
-}
-#endif
+  return true;
 }
 
 bool bld::is_executable_outdated(std::string file_name, std::string executable)
@@ -1586,12 +1926,13 @@ bool bld::is_executable_outdated(std::string file_name, std::string executable)
     // Check if the source file exists
     if (!std::filesystem::exists(file_name))
     {
-      bld::log(Log_type::ERR, "Source file does not exist: " + file_name);
+      bld::internal_log(Log_type::ERR, "Source file does not exist: " + file_name);
       return false;  // Or handle this case differently
     }
 
     // Check if the executable exists
-    if (!std::filesystem::exists(executable)) return true;  // Treat as changed if the executable doesn't exist
+    if (!std::filesystem::exists(executable))
+      return true;  // Treat as changed if the executable doesn't exist
 
     // Get last write times
     auto last_write_time = std::filesystem::last_write_time(file_name);
@@ -1602,12 +1943,12 @@ bool bld::is_executable_outdated(std::string file_name, std::string executable)
   }
   catch (const std::filesystem::filesystem_error &e)
   {
-    bld::log(Log_type::ERR, "Filesystem error: " + std::string(e.what()));
+    bld::internal_log(Log_type::ERR, "Filesystem error: " + std::string(e.what()));
     return false;  // Or handle the error differently
   }
   catch (const std::exception &e)
   {
-    bld::log(Log_type::ERR, std::string(e.what()));
+    bld::internal_log(Log_type::ERR, std::string(e.what()));
     return false;  // Or handle the error differently
   }
 }
@@ -1620,22 +1961,24 @@ void bld::rebuild_yourself_onchange_and_run(const std::string &filename, const s
   fs::path exec_path(executable);
   fs::path backup_path = exec_path.string() + ".old";
 
-  if (!bld::is_executable_outdated(filename, executable)) return;  // No rebuild needed
+  if (!bld::is_executable_outdated(filename, executable))
+    return;  // No rebuild needed
 
-  bld::log(Log_type::INFO, "Build executable not up-to-date. Rebuilding...");
+  bld::internal_log(Log_type::INFO, "Build executable not up-to-date. Rebuilding...");
 
   // Create backup of existing executable if it exists
   if (fs::exists(exec_path))
   {
     try
     {
-      if (fs::exists(backup_path)) fs::remove(backup_path);  // Remove existing backup
+      if (fs::exists(backup_path))
+        fs::remove(backup_path);  // Remove existing backup
       fs::rename(exec_path, backup_path);
-      bld::log(Log_type::INFO, "Created backup at: " + backup_path.string());
+      bld::internal_log(Log_type::INFO, "Created backup at: " + backup_path.string());
     }
     catch (const fs::filesystem_error &e)
     {
-      bld::log(Log_type::ERR, "Failed to create backup: " + std::string(e.what()));
+      bld::internal_log(Log_type::ERR, "Failed to create backup: " + std::string(e.what()));
       return;
     }
   }
@@ -1663,7 +2006,7 @@ void bld::rebuild_yourself_onchange_and_run(const std::string &filename, const s
   int compile_result = bld::execute(cmd);
   if (compile_result <= 0)
   {
-    bld::log(Log_type::ERR, "Compilation failed.");
+    bld::internal_log(Log_type::ERR, "Compilation failed.");
 
     // Restore backup if compilation failed and backup exists
     if (fs::exists(backup_path))
@@ -1672,22 +2015,22 @@ void bld::rebuild_yourself_onchange_and_run(const std::string &filename, const s
       {
         fs::remove(exec_path);  // Remove failed compilation output if it exists
         fs::rename(backup_path, exec_path);
-        bld::log(Log_type::INFO, "Restored previous executable from backup.");
+        bld::internal_log(Log_type::INFO, "Restored previous executable from backup.");
       }
       catch (const fs::filesystem_error &e)
       {
-        bld::log(Log_type::ERR, "Failed to restore backup: " + std::string(e.what()));
+        bld::internal_log(Log_type::ERR, "Failed to restore backup: " + std::string(e.what()));
       }
     }
     return;
   }
 
-  bld::log(Log_type::INFO, "Compilation successful. Restarting w/o any args for safety...");
+  bld::internal_log(Log_type::INFO, "Compilation successful. Restarting w/o any args for safety...");
 
   // Verify the new executable exists and is executable
   if (!fs::exists(exec_path))
   {
-    bld::log(Log_type::ERR, "New executable not found after successful compilation.");
+    bld::internal_log(Log_type::ERR, "New executable not found after successful compilation.");
     return;
   }
 
@@ -1698,7 +2041,7 @@ void bld::rebuild_yourself_onchange_and_run(const std::string &filename, const s
   }
   catch (const fs::filesystem_error &e)
   {
-    bld::log(Log_type::WARNING, "Failed to set executable permissions: " + std::string(e.what()));
+    bld::internal_log(Log_type::WARNING, "Failed to set executable permissions: " + std::string(e.what()));
   }
 
   // Run the new executable
@@ -1708,18 +2051,19 @@ void bld::rebuild_yourself_onchange_and_run(const std::string &filename, const s
   int restart_result = bld::execute(restart_cmd);
   if (restart_result <= 0)
   {
-    bld::log(Log_type::ERR, "Failed to start new executable.");
+    bld::internal_log(Log_type::ERR, "Failed to start new executable.");
     return;
   }
 
   // Only remove backup after successful restart
   try
   {
-    if (fs::exists(backup_path)) fs::remove(backup_path);
+    if (fs::exists(backup_path))
+      fs::remove(backup_path);
   }
   catch (const fs::filesystem_error &e)
   {
-    bld::log(Log_type::WARNING, "Failed to remove backup: " + std::string(e.what()));
+    bld::internal_log(Log_type::WARNING, "Failed to remove backup: " + std::string(e.what()));
   }
 
   // Exit the current process after successfully restarting
@@ -1730,7 +2074,7 @@ void bld::rebuild_yourself_onchange(const std::string &filename, const std::stri
 {
   if (bld::is_executable_outdated(filename, executable))
   {
-    bld::log(Log_type::INFO, "Build executable not up-to-date. Rebuilding...");
+    bld::internal_log(Log_type::INFO, "Build executable not up-to-date. Rebuilding...");
     bld::Command cmd = {};
 
     // Detect the compiler if not provided
@@ -1754,7 +2098,7 @@ void bld::rebuild_yourself_onchange(const std::string &filename, const std::stri
     // Execute the compile command
     if (bld::execute(cmd) <= 0)
     {
-      bld::log(Log_type::WARNING, "Failed to rebuild executable.");
+      bld::internal_log(Log_type::WARNING, "Failed to rebuild executable.");
       return;
     }
   }
@@ -1762,7 +2106,8 @@ void bld::rebuild_yourself_onchange(const std::string &filename, const std::stri
 
 bool bld::args_to_vec(int argc, char *argv[], std::vector<std::string> &args)
 {
-  if (argc < 1) return false;
+  if (argc < 1)
+    return false;
 
   args.reserve(argc - 1);
   for (int i = 1; i < argc; i++) args.push_back(argv[i]);
@@ -1789,7 +2134,8 @@ bld::Config::Config() : hot_reload_files(), cmd_args()
 
   init();
   // Automatically load configuration if the file exists
-  if (std::filesystem::exists(BLD_DEFAULT_CONFIG_FILE)) load_from_file(BLD_DEFAULT_CONFIG_FILE);
+  if (std::filesystem::exists(BLD_DEFAULT_CONFIG_FILE))
+    load_from_file(BLD_DEFAULT_CONFIG_FILE);
 }
 
 bld::Config &bld::Config::get()
@@ -1798,7 +2144,7 @@ bld::Config &bld::Config::get()
   static Config instance;
   return instance;
 #else
-  bld::log(bld::Log_type::ERR, "Config is disabled. Please enable BLD_USE_CONFIG macro to use the Config class.");
+  bld::internal_log(bld::Log_type::ERR, "Config is disabled. Please enable BLD_USE_CONFIG macro to use the Config class.");
   exit(1);
 #endif  // BLD_USE_CONFIG
 }
@@ -1830,21 +2176,22 @@ bool bld::Config::load_from_file(const std::string &filename)
 {
   if (!std::filesystem::exists(filename))
   {
-    bld::log(bld::Log_type::WARNING, "Config file not found: " + filename);
+    bld::internal_log(bld::Log_type::WARNING, "Config file not found: " + filename);
     return false;
   }
 
   std::ifstream file(filename);
   if (!file.is_open())
   {
-    bld::log(bld::Log_type::ERR, "Failed to open config file: " + filename);
+    bld::internal_log(bld::Log_type::ERR, "Failed to open config file: " + filename);
     return false;
   }
 
   std::string line;
   while (std::getline(file, line))
   {
-    if (line.empty() || line[0] == '#') continue;
+    if (line.empty() || line[0] == '#')
+      continue;
 
     std::stringstream ss(line);
     std::string key, value;
@@ -1880,7 +2227,10 @@ bool bld::Config::load_from_file(const std::string &filename)
       std::string file;
       while (std::getline(fs, file, ',')) hot_reload_files.push_back(file);
     }
-    else { bld::log(bld::Log_type::WARNING, "Unknown key in config file: " + key); }
+    else
+    {
+      bld::internal_log(bld::Log_type::WARNING, "Unknown key in config file: " + key);
+    }
   }
   return true;
 }
@@ -1888,19 +2238,31 @@ bool bld::Config::load_from_file(const std::string &filename)
 bool bld::Config::save_to_file(const std::string &filename)
 {
   std::ofstream file(filename);
-  if (!file.is_open()) return false;
+  if (!file.is_open())
+    return false;
 
-  if (hot_reload) file << "hot_reload=true\n";
-  if (!compiler.empty()) file << "compiler=" << compiler << "\n";
-  if (!target_executable.empty()) file << "target=" << target_executable << "\n";
-  if (!target_platform.empty()) file << "platform=" << target_platform << "\n";
-  if (!build_dir.empty()) file << "build_dir=" << build_dir << "\n";
-  if (!compiler_flags.empty()) file << "compiler_flags=" << compiler_flags << "\n";
-  if (!linker_flags.empty()) file << "linker_flags=" << linker_flags << "\n";
-  if (verbose) file << "verbose=true\n";
-  if (!pre_build_command.empty()) file << "pre_build_command=" << pre_build_command << "\n";
-  if (!post_build_command.empty()) file << "post_build_command=" << post_build_command << "\n";
-  if (override_run) file << "override_run=true\n";
+  if (hot_reload)
+    file << "hot_reload=true\n";
+  if (!compiler.empty())
+    file << "compiler=" << compiler << "\n";
+  if (!target_executable.empty())
+    file << "target=" << target_executable << "\n";
+  if (!target_platform.empty())
+    file << "platform=" << target_platform << "\n";
+  if (!build_dir.empty())
+    file << "build_dir=" << build_dir << "\n";
+  if (!compiler_flags.empty())
+    file << "compiler_flags=" << compiler_flags << "\n";
+  if (!linker_flags.empty())
+    file << "linker_flags=" << linker_flags << "\n";
+  if (verbose)
+    file << "verbose=true\n";
+  if (!pre_build_command.empty())
+    file << "pre_build_command=" << pre_build_command << "\n";
+  if (!post_build_command.empty())
+    file << "post_build_command=" << post_build_command << "\n";
+  if (override_run)
+    file << "override_run=true\n";
 
   if (!hot_reload_files.empty())
   {
@@ -1908,7 +2270,8 @@ bool bld::Config::save_to_file(const std::string &filename)
     for (size_t i = 0; i < hot_reload_files.size(); ++i)
     {
       file << hot_reload_files[i];
-      if (i < hot_reload_files.size() - 1) file << ",";
+      if (i < hot_reload_files.size() - 1)
+        file << ",";
     }
     file << "\n";
   }
@@ -1946,31 +2309,32 @@ int bld::handle_run_command(std::vector<std::string> args)
 #else
   if (args.size() < 2)
   {
-    bld::log(bld::Log_type::ERR,
+    bld::internal_log(bld::Log_type::ERR,
              "No target executable specified in config. Config is disabled. Please enable BLD_USE_CONFIG macro to use the Config class.");
     exit(EXIT_FAILURE);
   }
   else if (args.size() == 2)
   {
-    bld::log(bld::Log_type::WARNING, "Command 'run' specified with the executable");
-    bld::log(bld::Log_type::INFO, "Proceeding to run the specified command: " + args[1]);
+    bld::internal_log(bld::Log_type::WARNING, "Command 'run' specified with the executable");
+    bld::internal_log(bld::Log_type::INFO, "Proceeding to run the specified command: " + args[1]);
     bld::Command cmd(args[1]);
     return bld::execute(cmd);
   }
   else if (args.size() > 2)
   {
-    bld::log(bld::Log_type::ERR, "Too many arguments for 'run' command. Only executables are supported.");
-    bld::log(bld::Log_type::INFO, "Usage: run <executable>");
+    bld::internal_log(bld::Log_type::ERR, "Too many arguments for 'run' command. Only executables are supported.");
+    bld::internal_log(bld::Log_type::INFO, "Usage: run <executable>");
     exit(EXIT_FAILURE);
   }
 #endif
-  bld::log(bld::Log_type::ERR, "Should never be reached: " + std::to_string(__LINE__));
+  bld::internal_log(bld::Log_type::ERR, "Should never be reached: " + std::to_string(__LINE__));
   exit(EXIT_FAILURE);
 }
 
 bool bld::starts_with(const std::string &str, const std::string &prefix)
 {
-  if (prefix.size() > str.size()) return false;
+  if (prefix.size() > str.size())
+    return false;
   return str.compare(0, prefix.size(), prefix) == 0;
 }
 
@@ -1978,9 +2342,9 @@ void bld::handle_config_command(std::vector<std::string> args, std::string name)
 {
   if (args.size() < 2)
   {
-    log(bld::Log_type::ERR, "Config command requires arguments");
+    internal_log(bld::Log_type::ERR, "Config command requires arguments");
     std::string usage = name + " config -[key]=value \n" + "        E.g: ' " + name + " config -verbose=true '";
-    log(bld::Log_type::INFO, "Usage: " + usage);
+    internal_log(bld::Log_type::INFO, "Usage: " + usage);
     return;
   }
 
@@ -1998,13 +2362,13 @@ void bld::handle_config_command(std::vector<std::string> args, std::string name)
       std::string number = arg.substr(9);
       if (number.empty())
       {
-        bld::log(bld::Log_type::WARNING, "No value provided for threads. Setting 1.");
+        bld::internal_log(bld::Log_type::WARNING, "No value provided for threads. Setting 1.");
         config.threads = 1;
         continue;
       }
       else if (number.find_first_not_of("0123456789") != std::string::npos)
       {
-        bld::log(bld::Log_type::ERR, "Invalid value for threads: " + number);
+        bld::internal_log(bld::Log_type::ERR, "Invalid value for threads: " + number);
         continue;
       }
       config.threads = std::stoi(number);
@@ -2014,13 +2378,13 @@ void bld::handle_config_command(std::vector<std::string> args, std::string name)
       std::string number = arg.substr(3);
       if (number.empty())
       {
-        bld::log(bld::Log_type::WARNING, "No value provided for threads. Setting 1.");
+        bld::internal_log(bld::Log_type::WARNING, "No value provided for threads. Setting 1.");
         config.threads = 1;
         continue;
       }
       else if (number.find_first_not_of("0123456789") != std::string::npos)
       {
-        bld::log(bld::Log_type::ERR, "Invalid value for threads: " + number);
+        bld::internal_log(bld::Log_type::ERR, "Invalid value for threads: " + number);
         continue;
       }
       config.threads = std::stoi(number);
@@ -2060,7 +2424,7 @@ void bld::handle_config_command(std::vector<std::string> args, std::string name)
         if (std::find(config.hot_reload_files.begin(), config.hot_reload_files.end(), file) == config.hot_reload_files.end())
           config.hot_reload_files.push_back(file);
         else
-          bld::log(bld::Log_type::WARNING, "File already exists in hot reload list: " + file);
+          bld::internal_log(bld::Log_type::WARNING, "File already exists in hot reload list: " + file);
     }
     else if (bld::starts_with(arg, "-hr_files_rem="))
     {
@@ -2072,7 +2436,7 @@ void bld::handle_config_command(std::vector<std::string> args, std::string name)
         if (it != config.hot_reload_files.end())
           config.hot_reload_files.erase(it);
         else
-          bld::log(bld::Log_type::WARNING, "File not found in hot reload list: " + file);
+          bld::internal_log(bld::Log_type::WARNING, "File not found in hot reload list: " + file);
       }
     }
     else if (bld::starts_with(arg, "-") && config.use_extra_config_keys)
@@ -2081,12 +2445,12 @@ void bld::handle_config_command(std::vector<std::string> args, std::string name)
       std::string value = arg.substr(arg.find('=') + 1);
       if (key.empty())
       {
-        bld::log(bld::Log_type::WARNING, "Key not provided: " + arg + ". No value will be set!");
+        bld::internal_log(bld::Log_type::WARNING, "Key not provided: " + arg + ". No value will be set!");
         continue;
       }
       else if (value.empty())
       {
-        bld::log(bld::Log_type::WARNING, "Value not provided: " + arg + ". No value will be set!");
+        bld::internal_log(bld::Log_type::WARNING, "Value not provided: " + arg + ". No value will be set!");
         continue;
       }
       else if (value == "true" || value == "false")
@@ -2094,29 +2458,29 @@ void bld::handle_config_command(std::vector<std::string> args, std::string name)
         if (config.extra_config_bool.find(key) != config.extra_config_bool.end())
           config.extra_config_bool[key] = (value == "true");
         else
-          bld::log(bld::Log_type::WARNING, "Unknown key: " + key + ". No value will be set.");
+          bld::internal_log(bld::Log_type::WARNING, "Unknown key: " + key + ". No value will be set.");
         continue;
       }
       else
       {
         if (config.extra_config_val.find(key) != config.extra_config_val.end())
-          config.extra_config_val[key] = (value == "true");
+          config.extra_config_val[key] = value;
         else
-          bld::log(bld::Log_type::WARNING, "Unknown key: " + key + ". No value will be set.");
+          bld::internal_log(bld::Log_type::WARNING, "Unknown key: " + key + ". No value will be set.");
         continue;
       }
     }
     else
     {
-      bld::log(bld::Log_type::ERR, "Unknown argument for config: ' " + arg + " '. Remember to use the format '-key=value'");
-      bld::log(bld::Log_type::INFO,
+      bld::internal_log(bld::Log_type::ERR, "Unknown argument for config: ' " + arg + " '. Remember to use the format '-key=value'");
+      bld::internal_log(bld::Log_type::INFO,
                "If ' " + arg + " ' this is a valid key for config, consider configuring Config before 'BLD_HANDLE_ARGS' macro.");
     }
   }
 
   // Save the updated configuration to file
   config.save_to_file(BLD_DEFAULT_CONFIG_FILE);
-  bld::log(bld::Log_type::INFO, "Configuration saved to: " + std::string(BLD_DEFAULT_CONFIG_FILE));
+  bld::internal_log(bld::Log_type::INFO, "Configuration saved to: " + std::string(BLD_DEFAULT_CONFIG_FILE));
 }
 
 void bld::handle_args(int argc, char *argv[])
@@ -2132,19 +2496,20 @@ void bld::handle_args(int argc, char *argv[])
       std::string command = args[0];
       if (command == "run")
       {
-#ifdef BLD_USE_CONFIG
-        if (!bld::Config::get().override_run) bld::handle_run_command(args);
-#else
+      #ifdef BLD_USE_CONFIG
+        if (!bld::Config::get().override_run)
+          bld::handle_run_command(args);
+      #else
         bld::handle_run_command(args);
-#endif
+      #endif
       }
       else if (command == "config")
       {
-#ifdef BLD_USE_CONFIG
+      #ifdef BLD_USE_CONFIG
         bld::handle_config_command(args, argv[0]);
-#else
-        bld::log(bld::Log_type::ERR, "Config is disabled. Please enable BLD_USE_CONFIG macro to use the Config class.");
-#endif  // BLD_USE_CONFIG
+      #else
+        bld::internal_log(bld::Log_type::ERR, "Config is disabled. Please enable BLD_USE_CONFIG macro to use the Config class.");
+      #endif  // BLD_USE_CONFIG
       }
     }
   }
@@ -2154,7 +2519,7 @@ bool bld::fs::read_file(const std::string &path, std::string &content)
 {
   if (!std::filesystem::exists(path))
   {
-    bld::log(bld::Log_type::ERR, "File does not exist: " + path);
+    bld::internal_log(bld::Log_type::ERR, "File does not exist: " + path);
     return false;
   }
 
@@ -2162,7 +2527,7 @@ bool bld::fs::read_file(const std::string &path, std::string &content)
 
   if (!file)
   {
-    bld::log(bld::Log_type::ERR, "Failed to open file: " + path);
+    bld::internal_log(bld::Log_type::ERR, "Failed to open file: " + path);
     return false;
   }
 
@@ -2177,7 +2542,7 @@ bool bld::fs::write_entire_file(const std::string &path, const std::string &cont
 
   if (!file)
   {
-    bld::log(bld::Log_type::ERR, "Failed to open file for writing: " + path);
+    bld::internal_log(bld::Log_type::ERR, "Failed to open file for writing: " + path);
     return false;
   }
 
@@ -2192,7 +2557,7 @@ bool bld::fs::append_file(const std::string &path, const std::string &content)
   std::ofstream file(path, std::ios::app | std::ios::binary);
   if (!file)
   {
-    bld::log(bld::Log_type::ERR, "Failed to open file for appending: " + path);
+    bld::internal_log(bld::Log_type::ERR, "Failed to open file for appending: " + path);
     return false;
   }
 
@@ -2207,7 +2572,7 @@ bool bld::fs::read_lines(const std::string &path, std::vector<std::string> &line
   std::ifstream file(path);
   if (!file)
   {
-    bld::log(bld::Log_type::ERR, "Failed to open file: " + path);
+    bld::internal_log(bld::Log_type::ERR, "Failed to open file: " + path);
     return false;
   }
 
@@ -2222,12 +2587,12 @@ bool bld::fs::replace_in_file(const std::string &path, const std::string &from, 
   std::string content = "";
   if (!bld::fs::read_file(path, content))
   {
-    bld::log(bld::Log_type::ERR, "Failed to read file: " + path);
+    bld::internal_log(bld::Log_type::ERR, "Failed to read file: " + path);
     return false;
   }
   if (content.empty())
   {
-    bld::log(bld::Log_type::ERR, "Failed to read file or it is empty: " + path);
+    bld::internal_log(bld::Log_type::ERR, "Failed to read file or it is empty: " + path);
     return false;
   }
   size_t pos = 0;
@@ -2246,7 +2611,7 @@ bool bld::fs::copy_file(const std::string &from, const std::string &to, bool ove
   {
     if (!overwrite && std::filesystem::exists(to))
     {
-      bld::log(bld::Log_type::ERR, "Destination file already exists: " + to);
+      bld::internal_log(bld::Log_type::ERR, "Destination file already exists: " + to);
       return false;
     }
     std::filesystem::copy_file(from, to,
@@ -2255,7 +2620,7 @@ bool bld::fs::copy_file(const std::string &from, const std::string &to, bool ove
   }
   catch (const std::filesystem::filesystem_error &e)
   {
-    bld::log(bld::Log_type::ERR, "Failed to copy file: " + std::string(e.what()));
+    bld::internal_log(bld::Log_type::ERR, "Failed to copy file: " + std::string(e.what()));
     return false;
   }
 }
@@ -2269,7 +2634,7 @@ bool bld::fs::move_file(const std::string &from, const std::string &to)
   }
   catch (const std::filesystem::filesystem_error &e)
   {
-    bld::log(bld::Log_type::ERR, "Failed to move file: " + std::string(e.what()));
+    bld::internal_log(bld::Log_type::ERR, "Failed to move file: " + std::string(e.what()));
     return false;
   }
 }
@@ -2278,7 +2643,7 @@ std::string bld::fs::get_extension(const std::string &path)
 {
   if (!std::filesystem::exists(path))
   {
-    bld::log(bld::Log_type::ERR, "File for extension request does not exist: " + path);
+    bld::internal_log(bld::Log_type::ERR, "File for extension request does not exist: " + path);
     return "";
   }
   std::filesystem::path p(path);
@@ -2288,7 +2653,8 @@ std::string bld::fs::get_extension(const std::string &path)
 std::string bld::fs::get_stem(const std::string &path, bool with_full_path)
 {
   std::string filename = path;
-  if (!with_full_path) filename = bld::fs::get_file_name(path);
+  if (!with_full_path)
+    filename = bld::fs::get_file_name(path);
   auto pos = filename.find_last_of('.');
   return pos == std::string::npos ? filename : filename.substr(0, pos);
 }
@@ -2301,7 +2667,7 @@ bool bld::fs::create_directory(const std::string &path)
   }
   catch (const std::filesystem::filesystem_error &e)
   {
-    bld::log(bld::Log_type::ERR, "Failed to create directory: " + std::string(e.what()));
+    bld::internal_log(bld::Log_type::ERR, "Failed to create directory: " + std::string(e.what()));
     return false;
   }
 }
@@ -2310,7 +2676,7 @@ bool bld::fs::create_dir_if_not_exists(const std::string &path)
 {
   if (std::filesystem::exists(path))
   {
-    bld::log(bld::Log_type::WARNING, "Directory ' "  + path + " ' already exists, manage it yourself to not lose data!" );
+    bld::internal_log(bld::Log_type::WARNING, "Directory ' " + path + " ' already exists, manage it yourself to not lose data!");
     return true;
   }
 
@@ -2318,29 +2684,36 @@ bool bld::fs::create_dir_if_not_exists(const std::string &path)
   {
     bool created = std::filesystem::create_directories(path);
     if (created)
-      bld::log(bld::Log_type::INFO, "Directory created: " + path);
+      bld::internal_log(bld::Log_type::INFO, "Directory created: " + path);
     else
-      bld::log(bld::Log_type::ERR, "Failed to create directory: " + path);
+      bld::internal_log(bld::Log_type::ERR, "Failed to create directory: " + path);
     return created;
   }
   catch (const std::filesystem::filesystem_error &e)
   {
-    bld::log(bld::Log_type::ERR, "Failed to create directory: " + std::string(e.what()));
+    bld::internal_log(bld::Log_type::ERR, "Failed to create directory: " + std::string(e.what()));
     return false;
   }
 }
 
 template <typename... Paths, typename>
-bool bld::fs::create_dirs_if_not_exists(const Paths&... paths)
+bool bld::fs::create_dirs_if_not_exists(const Paths &...paths)
 {
-    return (... && create_dir_if_not_exists(paths));
+  return (... && create_dir_if_not_exists(paths));
 }
+
+template <typename... Paths, typename>
+bool bld::fs::remove(const Paths &...paths)
+{
+  return (... & std::filesystem::remove(paths));
+}
+
 
 bool bld::fs::remove_dir(const std::string &path)
 {
   if (!std::filesystem::exists(path))
   {
-    bld::log(bld::Log_type::INFO, "Directory does not exist: " + path);
+    bld::internal_log(bld::Log_type::INFO, "Directory does not exist: " + path);
     return true;
   }
 
@@ -2348,14 +2721,14 @@ bool bld::fs::remove_dir(const std::string &path)
   {
     std::uintmax_t removed_count = std::filesystem::remove_all(path);
     if (removed_count > 0)
-      bld::log(bld::Log_type::INFO, "Directory removed: " + path);
+      bld::internal_log(bld::Log_type::INFO, "Directory removed: " + path);
     else
-      bld::log(bld::Log_type::ERR, "Failed to remove directory: " + path);
+      bld::internal_log(bld::Log_type::ERR, "Failed to remove directory: " + path);
     return removed_count > 0;
   }
   catch (const std::filesystem::filesystem_error &e)
   {
-    bld::log(bld::Log_type::ERR, "Failed to remove directory: " + std::string(e.what()));
+    bld::internal_log(bld::Log_type::ERR, "Failed to remove directory: " + std::string(e.what()));
     return false;
   }
 }
@@ -2368,17 +2741,19 @@ std::vector<std::string> bld::fs::list_files_in_dir(const std::string &path, boo
     if (recursive)
     {
       for (const auto &entry : std::filesystem::recursive_directory_iterator(path))
-        if (entry.is_regular_file()) files.push_back(entry.path().string());
+        if (entry.is_regular_file())
+          files.push_back(entry.path().string());
     }
     else
     {
       for (const auto &entry : std::filesystem::directory_iterator(path))
-        if (entry.is_regular_file()) files.push_back(entry.path().string());
+        if (entry.is_regular_file())
+          files.push_back(entry.path().string());
     }
   }
   catch (const std::filesystem::filesystem_error &e)
   {
-    bld::log(bld::Log_type::ERR, "Failed to list files: " + std::string(e.what()));
+    bld::internal_log(bld::Log_type::ERR, "Failed to list files: " + std::string(e.what()));
   }
   return files;
 }
@@ -2391,17 +2766,19 @@ std::vector<std::string> bld::fs::list_directories(const std::string &path, bool
     if (recursive)
     {
       for (const auto &entry : std::filesystem::recursive_directory_iterator(path))
-        if (entry.is_directory()) directories.push_back(entry.path().string());
+        if (entry.is_directory())
+          directories.push_back(entry.path().string());
     }
     else
     {
       for (const auto &entry : std::filesystem::directory_iterator(path))
-        if (entry.is_directory()) directories.push_back(entry.path().string());
+        if (entry.is_directory())
+          directories.push_back(entry.path().string());
     }
   }
   catch (const std::filesystem::filesystem_error &e)
   {
-    bld::log(bld::Log_type::ERR, "Failed to list directories: " + std::string(e.what()));
+    bld::internal_log(bld::Log_type::ERR, "Failed to list directories: " + std::string(e.what()));
   }
   return directories;
 }
@@ -2418,54 +2795,302 @@ std::string bld::fs::strip_file_name(std::string full_path)
   return path.parent_path().string();
 }
 
+
+std::vector<std::string> get_all_files_with_extension(const std::string &path, 
+                                                     std::vector<std::string> extensions, 
+                                                     bool recursive = false,
+                                                     bool case_insensitive = true)
+{
+    std::vector<std::string> matching_files;
+    
+    // Check if path exists and is a directory
+    std::filesystem::path fs_path(path);
+    if (!std::filesystem::exists(fs_path) || !std::filesystem::is_directory(fs_path))
+    {
+        // Could log error here if you have logging
+        return matching_files; // Return empty vector
+    }
+    
+    // Normalize extensions (ensure they start with '.' and handle case sensitivity)
+    std::vector<std::string> normalized_extensions;
+    for (const auto& ext : extensions)
+    {
+        if (ext.empty()) continue;
+        
+        std::string normalized = ext;
+        
+        // Ensure extension starts with '.' - handle both "cpp" and ".cpp"
+        if (normalized[0] != '.')
+        {
+            normalized = "." + normalized;
+        }
+        
+        // Apply case transformation if case_insensitive is true
+        if (case_insensitive)
+        {
+            std::transform(normalized.begin(), normalized.end(), normalized.begin(), 
+                          [](unsigned char c) { return std::tolower(c); });
+        }
+        
+        normalized_extensions.push_back(normalized);
+    }
+    
+    // If no valid extensions provided, return empty
+    if (normalized_extensions.empty())
+    {
+        return matching_files;
+    }
+    
+    try
+    {
+        // Choose iterator based on recursive flag
+        if (recursive)
+        {
+            for (const auto& entry : std::filesystem::recursive_directory_iterator(fs_path))
+            {
+                if (entry.is_regular_file())
+                {
+                    std::string file_ext = entry.path().extension().string();
+                    
+                    // Apply case transformation to file extension if case_insensitive is true
+                    std::string comparison_ext = file_ext;
+                    if (case_insensitive)
+                    {
+                        std::transform(comparison_ext.begin(), comparison_ext.end(), comparison_ext.begin(),
+                                      [](unsigned char c) { return std::tolower(c); });
+                    }
+                    
+                    // Check if file extension matches any of the requested extensions
+                    for (const auto& target_ext : normalized_extensions)
+                    {
+                        if (comparison_ext == target_ext)
+                        {
+                            matching_files.push_back(entry.path().string());
+                            break; // No need to check other extensions for this file
+                        }
+                    }
+                }
+            }
+        }
+        else
+        {
+            for (const auto& entry : std::filesystem::directory_iterator(fs_path))
+            {
+                if (entry.is_regular_file())
+                {
+                    std::string file_ext = entry.path().extension().string();
+                    
+                    // Apply case transformation to file extension if case_insensitive is true
+                    std::string comparison_ext = file_ext;
+                    if (case_insensitive)
+                    {
+                        std::transform(comparison_ext.begin(), comparison_ext.end(), comparison_ext.begin(),
+                                      [](unsigned char c) { return std::tolower(c); });
+                    }
+                    
+                    // Check if file extension matches any of the requested extensions
+                    for (const auto& target_ext : normalized_extensions)
+                    {
+                        if (comparison_ext == target_ext)
+                        {
+                            matching_files.push_back(entry.path().string());
+                            break; // No need to check other extensions for this file
+                        }
+                    }
+                }
+            }
+        }
+    }
+    catch (const std::filesystem::filesystem_error& e)
+    {
+        // Handle filesystem errors (permission denied, etc.)
+        // Could log error here if you have logging: 
+        // bld::log(Log_type::ERR, "Filesystem error: " + std::string(e.what()));
+        return matching_files; // Return whatever we found so far
+    }
+    
+    return matching_files;
+}
+
+// Alternative version with more robust error handling and logging
+std::vector<std::string> bld::fs::get_all_files_with_extensions(const std::string &path, std::vector<std::string> extensions, bool recursive, bool case_insensitive)
+{
+  std::vector<std::string> matching_files;
+
+  // Validate input
+  if (path.empty())
+  {
+    bld::internal_log(Log_type::ERR, "Empty path provided: " + path);
+    return matching_files;
+  }
+
+  if (extensions.empty())
+  {
+    bld::internal_log(Log_type::WARNING, "No extensions provided for path: " + path);
+    return matching_files;
+  }
+
+  // Check if path exists and is a directory
+  std::filesystem::path fs_path(path);
+  std::error_code ec;
+
+  if (!std::filesystem::exists(fs_path, ec))
+  {
+    bld::internal_log(Log_type::ERR, "Path does not exist: " + path);
+    return matching_files;
+  }
+
+  if (ec)
+  {
+    bld::internal_log(Log_type::ERR, "Error checking path existence: " + ec.message());
+    return matching_files;
+  }
+
+  if (!std::filesystem::is_directory(fs_path, ec))
+  {
+    bld::internal_log(Log_type::ERR, "Path is not a directory: " + path);
+    return matching_files;
+  }
+
+  if (ec)
+  {
+    bld::internal_log(Log_type::ERR, "Error checking if path is directory: " + ec.message());
+    return matching_files;
+  }
+
+  // Normalize extensions - handle both "cpp" and ".cpp" formats
+  std::vector<std::string> normalized_extensions;
+  for (const auto &ext : extensions)
+  {
+    if (ext.empty())
+      continue;
+
+    std::string normalized = ext;
+
+    // Ensure extension starts with '.' - handle both "cpp" and ".cpp"
+    if (normalized[0] != '.')
+      normalized = "." + normalized;
+
+    // Apply case transformation if case_insensitive is true
+    if (case_insensitive)
+      std::transform(normalized.begin(), normalized.end(), normalized.begin(), [](unsigned char c) { return std::tolower(c); });
+
+    normalized_extensions.push_back(normalized);
+  }
+
+  if (normalized_extensions.empty())
+  {
+    bld::internal_log(Log_type::WARNING, "No valid extensions after normalization");
+    return matching_files;
+  }
+
+  // Process files
+  auto process_entry = [&](const std::filesystem::directory_entry &entry)
+  {
+    std::error_code entry_ec;
+
+    if (!entry.is_regular_file(entry_ec))
+      return;
+
+    if (entry_ec)
+      return;  // Skip this entry if we can't determine its type
+
+    std::string file_ext = entry.path().extension().string();
+
+    // Apply case transformation to file extension if case_insensitive is true
+    std::string comparison_ext = file_ext;
+    if (case_insensitive)
+      std::transform(comparison_ext.begin(), comparison_ext.end(), comparison_ext.begin(), [](unsigned char c) { return std::tolower(c); });
+
+    for (const auto &target_ext : normalized_extensions)
+    {
+      if (comparison_ext == target_ext)
+      {
+        matching_files.push_back(entry.path().string());
+        break;
+      }
+    }
+  };
+
+  // Iterate through directory
+  if (recursive)
+  {
+    for (const auto &entry :
+         std::filesystem::recursive_directory_iterator(fs_path, std::filesystem::directory_options::skip_permission_denied, ec))
+    {
+      if (ec)
+      {
+        bld::internal_log(Log_type::WARNING, "Error during recursive iteration: " + ec.message());
+        ec.clear();  // Clear error and continue
+        continue;
+      }
+      process_entry(entry);
+    }
+  }
+  else
+  {
+    for (const auto &entry : std::filesystem::directory_iterator(fs_path, ec))
+    {
+      if (ec)
+      {
+        bld::internal_log(Log_type::WARNING, "Error during directory iteration: " + ec.message());
+        break;
+      }
+      process_entry(entry);
+    }
+  }
+
+  return matching_files;
+}
+
 std::string bld::env::get(const std::string &key)
 {
 #ifdef _WIN32
-    char buffer[32767]; // Maximum size for environment variables on Windows
-    DWORD size = GetEnvironmentVariableA(key.c_str(), buffer, sizeof(buffer));
-    return size > 0 ? std::string(buffer, size) : "";
+  char buffer[32767];  // Maximum size for environment variables on Windows
+  DWORD size = GetEnvironmentVariableA(key.c_str(), buffer, sizeof(buffer));
+  return size > 0 ? std::string(buffer, size) : "";
 #else
-    const char* value = std::getenv(key.c_str());
-    return value ? std::string(value) : "";
+  const char *value = std::getenv(key.c_str());
+  return value ? std::string(value) : "";
 #endif
 }
 
 bool bld::env::set(const std::string &key, const std::string &value)
 {
 #ifdef _WIN32
-    return SetEnvironmentVariableA(key.c_str(), value.c_str()) != 0;
+  return SetEnvironmentVariableA(key.c_str(), value.c_str()) != 0;
 #else
-    return setenv(key.c_str(), value.c_str(), 1) == 0;
+  return setenv(key.c_str(), value.c_str(), 1) == 0;
 #endif
 }
 
 bool bld::env::exists(const std::string &key)
 {
 #ifdef _WIN32
-    return GetEnvironmentVariableA(key.c_str(), nullptr, 0) > 0;
+  return GetEnvironmentVariableA(key.c_str(), nullptr, 0) > 0;
 #else
-    return std::getenv(key.c_str()) != nullptr;
+  return std::getenv(key.c_str()) != nullptr;
 #endif
 }
 
 bool bld::env::unset(const std::string &key)
 {
 #ifdef _WIN32
-    return SetEnvironmentVariableA(key.c_str(), nullptr) != 0;
+  return SetEnvironmentVariableA(key.c_str(), nullptr) != 0;
 #else
-    return unsetenv(key.c_str()) == 0;
+  return unsetenv(key.c_str()) == 0;
 #endif
 }
 
 #if defined(__APPLE__) || defined(__FreeBSD__)
-  #include <crt_externs.h>  // For `_NSGetEnviron()`
-  #define ENVIRON (*_NSGetEnviron())
+#include <crt_externs.h>  // For `_NSGetEnviron()`
+#define ENVIRON (*_NSGetEnviron())
 #elif defined(_WIN32)
-  #include <windows.h>
-  #define ENVIRON nullptr  // Not used in Windows implementation
+#include <windows.h>
+#define ENVIRON nullptr  // Not used in Windows implementation
 #else
-  extern char **environ;  // Standard for Linux
-  #define ENVIRON environ
+extern char **environ;  // Standard for Linux
+#define ENVIRON environ
 #endif
 
 std::unordered_map<std::string, std::string> bld::env::get_all()
@@ -2475,7 +3100,8 @@ std::unordered_map<std::string, std::string> bld::env::get_all()
 #if defined(_WIN32)
   // Windows uses `GetEnvironmentStrings()` to retrieve environment variables
   LPWCH env_block = GetEnvironmentStringsW();
-  if (!env_block) return env_vars;
+  if (!env_block)
+    return env_vars;
 
   LPWCH env = env_block;
   while (*env)
@@ -2498,7 +3124,8 @@ std::unordered_map<std::string, std::string> bld::env::get_all()
   {
     std::string entry(*env);
     size_t pos = entry.find('=');
-    if (pos != std::string::npos) env_vars[entry.substr(0, pos)] = entry.substr(pos + 1);
+    if (pos != std::string::npos)
+      env_vars[entry.substr(0, pos)] = entry.substr(pos + 1);
   }
 #endif
   return env_vars;
@@ -2580,18 +3207,21 @@ void bld::Dep_graph::add_phony(const std::string &target, const std::vector<std:
 
 bool bld::Dep_graph::needs_rebuild(const Node *node)
 {
-  if (node->dep.is_phony) return true;
-  if (!std::filesystem::exists(node->dep.target)) return !node->dep.dependencies.empty();
+  if (node->dep.is_phony)
+    return true;
+  if (!std::filesystem::exists(node->dep.target))
+    return !node->dep.dependencies.empty();
 
   auto target_time = std::filesystem::last_write_time(node->dep.target);
   for (const auto &dep : node->dep.dependencies)
   {
     if (!std::filesystem::exists(dep))
     {
-      bld::log(bld::Log_type::ERR, "Dependency does not exist: " + dep);
+      bld::internal_log(bld::Log_type::ERR, "Dependency does not exist: " + dep);
       return true;  // Missing dependency forces rebuild
     }
-    if (std::filesystem::last_write_time(dep) > target_time) return true;
+    if (std::filesystem::last_write_time(dep) > target_time)
+      return true;
   }
   return false;  // Explicit return when no rebuild needed
 }
@@ -2601,7 +3231,7 @@ bool bld::Dep_graph::build(const std::string &target)
   std::unordered_set<std::string> visited, in_progress;
   if (detect_cycle(target, visited, in_progress))
   {
-    bld::log(bld::Log_type::ERR, "Circular dependency detected for target: " + target);
+    bld::internal_log(bld::Log_type::ERR, "Circular dependency detected for target: " + target);
     return false;
   }
   checked_sources.clear();
@@ -2618,7 +3248,8 @@ bool bld::Dep_graph::build_all()
 {
   bool success = true;
   for (const auto &node : nodes)
-    if (!build(node.first)) success = false;
+    if (!build(node.first))
+      success = false;
   return success;
 }
 
@@ -2627,7 +3258,8 @@ bool bld::Dep_graph::F_build_all()
   checked_sources.clear();
   bool success = true;
   for (const auto &node : nodes)
-    if (!build(node.first)) success = false;
+    if (!build(node.first))
+      success = false;
   return success;
 }
 
@@ -2640,12 +3272,12 @@ bool bld::Dep_graph::build_node(const std::string &target)
     {
       if (checked_sources.find(target) == checked_sources.end())
       {
-        bld::log(bld::Log_type::INFO, "Using existing source file: " + target);
+        bld::internal_log(bld::Log_type::INFO, "Using existing source file: " + target);
         checked_sources.insert(target);
       }
       return true;
     }
-    bld::log(bld::Log_type::ERR, "Target not found: " + target);
+    bld::internal_log(bld::Log_type::ERR, "Target not found: " + target);
     return false;
   }
 
@@ -2655,12 +3287,13 @@ bool bld::Dep_graph::build_node(const std::string &target)
 
   // First build all dependencies
   for (const auto &dep : node->dependencies)
-    if (!build_node(dep)) return false;
+    if (!build_node(dep))
+      return false;
 
   // Check if we need to rebuild
   if (!needs_rebuild(node))
   {
-    bld::log(bld::Log_type::INFO, "Target up to date: " + target);
+    bld::internal_log(bld::Log_type::INFO, "Target up to date: " + target);
     node->checked = true;
     return true;
   }
@@ -2668,17 +3301,17 @@ bool bld::Dep_graph::build_node(const std::string &target)
   // Execute build command if not phony
   if (!node->dep.is_phony && !node->dep.command.is_empty())
   {
-    bld::log(bld::Log_type::INFO, "Building target: " + target);
+    bld::internal_log(bld::Log_type::INFO, "Building target: " + target);
     if (execute(node->dep.command) <= 0)
     {
-      bld::log(bld::Log_type::ERR, "Failed to build target: " + target);
+      bld::internal_log(bld::Log_type::ERR, "Failed to build target: " + target);
       return false;
     }
   }
   else if (node->dep.is_phony)
-    bld::log(bld::Log_type::INFO, "Phony target: " + target);
+    bld::internal_log(bld::Log_type::INFO, "Phony target: " + target);
   else
-    bld::log(bld::Log_type::WARNING, "No command for target: " + target);
+    bld::internal_log(bld::Log_type::WARNING, "No command for target: " + target);
 
   node->checked = true;
   return true;
@@ -2687,17 +3320,21 @@ bool bld::Dep_graph::build_node(const std::string &target)
 bool bld::Dep_graph::detect_cycle(const std::string &target, std::unordered_set<std::string> &visited,
                                   std::unordered_set<std::string> &in_progress)
 {
-  if (in_progress.find(target) != in_progress.end()) return true;  // Cycle detected
+  if (in_progress.find(target) != in_progress.end())
+    return true;  // Cycle detected
 
-  if (visited.find(target) != visited.end()) return false;  // Already processed
+  if (visited.find(target) != visited.end())
+    return false;  // Already processed
 
   auto it = nodes.find(target);
-  if (it == nodes.end()) return false;  // Target doesn't exist
+  if (it == nodes.end())
+    return false;  // Target doesn't exist
 
   in_progress.insert(target);
 
   for (const auto &dep : it->second->dependencies)
-    if (detect_cycle(dep, visited, in_progress)) return true;
+    if (detect_cycle(dep, visited, in_progress))
+      return true;
 
   in_progress.erase(target);
   visited.insert(target);
@@ -2706,20 +3343,23 @@ bool bld::Dep_graph::detect_cycle(const std::string &target, std::unordered_set<
 
 bool bld::Dep_graph::build_parallel(const std::string &target, size_t thread_count)
 {
-  if (thread_count > std::thread::hardware_concurrency() - 1) thread_count = std::thread::hardware_concurrency() - 1;
-  if (thread_count == 0) thread_count = 1;
+  if (thread_count > std::thread::hardware_concurrency() - 1)
+    thread_count = std::thread::hardware_concurrency() - 1;
+  if (thread_count == 0)
+    thread_count = 1;
 
   std::unordered_set<std::string> visited, in_progress;
   if (detect_cycle(target, visited, in_progress))
   {
-    bld::log(bld::Log_type::ERR, "Circular dependency detected for target: " + target);
+    bld::internal_log(bld::Log_type::ERR, "Circular dependency detected for target: " + target);
     return false;
   }
 
-  bld::log(bld::Log_type::INFO, "Building all targets in parallel using " + std::to_string(thread_count) + " threads");
+  bld::internal_log(bld::Log_type::INFO, "Building all targets in parallel using " + std::to_string(thread_count) + " threads");
 
   std::queue<std::string> ready_targets;
-  if (!prepare_build_graph(target, ready_targets)) return false;
+  if (!prepare_build_graph(target, ready_targets))
+    return false;
 
   std::mutex queue_mutex, log_mutex;
   std::condition_variable cv;
@@ -2741,7 +3381,8 @@ bool bld::Dep_graph::build_parallel(const std::string &target, size_t thread_cou
                       [&]() { return !ready_targets.empty() || build_failed || completed_targets == total_targets; });
         }
 
-        if (ready_targets.empty() || build_failed) return;
+        if (ready_targets.empty() || build_failed)
+          return;
 
         current_target = ready_targets.front();
         ready_targets.pop();
@@ -2756,14 +3397,14 @@ bool bld::Dep_graph::build_parallel(const std::string &target, size_t thread_cou
         {
           {
             std::lock_guard<std::mutex> log_lock(log_mutex);
-            bld::log(bld::Log_type::INFO, "Building target: " + current_target);
+            bld::internal_log(bld::Log_type::INFO, "Building target: " + current_target);
           }
 
           if (execute(node->dep.command) <= 0)
           {
             {
               std::lock_guard<std::mutex> log_lock(log_mutex);
-              bld::log(bld::Log_type::ERR, "Failed to build target: " + current_target);
+              bld::internal_log(bld::Log_type::ERR, "Failed to build target: " + current_target);
             }
             build_failed = true;
             cv.notify_all();
@@ -2785,7 +3426,8 @@ bool bld::Dep_graph::build_parallel(const std::string &target, size_t thread_cou
   for (size_t i = 0; i < thread_count; ++i) workers.emplace_back(worker);
 
   for (auto &t : workers)
-    if (t.joinable()) t.join();
+    if (t.joinable())
+      t.join();
 
   return !build_failed;
 }
@@ -2799,30 +3441,34 @@ bool bld::Dep_graph::prepare_build_graph(const std::string &target, std::queue<s
     {
       if (checked_sources.find(target) == checked_sources.end())
       {
-        bld::log(bld::Log_type::INFO, "Using existing source file: " + target);
+        bld::internal_log(bld::Log_type::INFO, "Using existing source file: " + target);
         checked_sources.insert(target);
       }
       return true;
     }
-    bld::log(bld::Log_type::ERR, "Target not found: " + target);
+    bld::internal_log(bld::Log_type::ERR, "Target not found: " + target);
     return false;
   }
 
   auto node = it->second.get();
-  if (node->visited) return true;
+  if (node->visited)
+    return true;
   node->visited = true;
 
   // Process dependencies
   for (const auto &dep : node->dependencies)
   {
-    if (!prepare_build_graph(dep, ready_targets)) return false;
+    if (!prepare_build_graph(dep, ready_targets))
+      return false;
 
     // Only track node dependencies that actually need rebuilding
-    if (nodes.find(dep) != nodes.end() && needs_rebuild(nodes[dep].get())) node->waiting_on.push_back(dep);
+    if (nodes.find(dep) != nodes.end() && needs_rebuild(nodes[dep].get()))
+      node->waiting_on.push_back(dep);
   }
 
   // Only add to ready queue if NEEDS rebuild and dependencies are met
-  if (node->waiting_on.empty() && needs_rebuild(node)) ready_targets.push(target);
+  if (node->waiting_on.empty() && needs_rebuild(node))
+    ready_targets.push(target);
 
   return true;
 }
@@ -2844,7 +3490,8 @@ void bld::Dep_graph::process_completed_target(const std::string &target, std::qu
       waiting.erase(std::remove(waiting.begin(), waiting.end(), target), waiting.end());
 
       // If no more dependencies, add to ready queue
-      if (waiting.empty()) ready_targets.push(node_pair.first);
+      if (waiting.empty())
+        ready_targets.push(node_pair.first);
     }
   }
 }
@@ -2864,7 +3511,8 @@ bool bld::Dep_graph::build_all_parallel(size_t thread_count)
         break;
       }
     }
-    if (!is_dependency) root_targets.push_back(node.first);
+    if (!is_dependency)
+      root_targets.push_back(node.first);
   }
 
   // Create a master phony target that depends on all root targets
@@ -2880,7 +3528,8 @@ std::string bld::str::trim(const std::string &str)
 {
   {
     const auto begin = str.find_first_not_of(" \t\n\r\f\v");
-    if (begin == std::string::npos) return "";  // No non-space characters
+    if (begin == std::string::npos)
+      return "";  // No non-space characters
     const auto end = str.find_last_not_of(" \t\n\r\f\v");
     return str.substr(begin, end - begin + 1);
   }
@@ -2888,20 +3537,24 @@ std::string bld::str::trim(const std::string &str)
 
 std::string bld::str::trim_left(const std::string &str)
 {
-  if (str.size() == 0) return "";
+  if (str.size() == 0)
+    return "";
 
   const auto begin = str.find_first_not_of(" \t\n\r\f\v");
-  if (begin == std::string::npos) return "";  // No non-space characters
+  if (begin == std::string::npos)
+    return "";  // No non-space characters
   const auto end = str.size();
   return str.substr(begin, end - begin + 1);
 }
 
 std::string bld::str::trim_right(const std::string &str)
 {
-  if (str.size() == 0) return "";
+  if (str.size() == 0)
+    return "";
 
   const auto begin = 0;
-  if (begin == std::string::npos) return "";  // No non-space characters
+  if (begin == std::string::npos)
+    return "";  // No non-space characters
   const auto end = str.find_last_not_of(" \t\n\r\f\v");
   return str.substr(begin, end - begin + 1);
 }
@@ -2943,18 +3596,21 @@ bool bld::str::starts_with(const std::string &str, const std::string &prefix) { 
 
 bool bld::str::ends_with(const std::string &str, const std::string &suffix)
 {
-  if (str.length() < suffix.length()) return false;
+  if (str.length() < suffix.length())
+    return false;
   return str.compare(str.length() - suffix.length(), suffix.length(), suffix) == 0;
 }
 
 std::string bld::str::join(const std::vector<std::string> &strings, const std::string &delimiter)
 {
-  if (strings.size() == 0) return "";
+  if (strings.size() == 0)
+    return "";
 
   std::ostringstream oss;
   for (size_t i = 0; i < strings.size(); ++i)
   {
-    if (i != 0) oss << delimiter;
+    if (i != 0)
+      oss << delimiter;
     oss << strings[i];
   }
   return oss.str();
@@ -2962,23 +3618,27 @@ std::string bld::str::join(const std::vector<std::string> &strings, const std::s
 
 std::string bld::str::trim_till(const std::string &str, char delimiter)
 {
-  if (str.size() == 0 || str.size() == 1) return "";
+  if (str.size() == 0 || str.size() == 1)
+    return "";
 
   const auto pos = str.find(delimiter);
-  if (pos == std::string::npos) return str;  // Delimiter not found, return the whole string
+  if (pos == std::string::npos)
+    return str;  // Delimiter not found, return the whole string
   return str.substr(pos + 1);
 }
 
 bool bld::str::equal_ignorecase(const std::string &str1, const std::string &str2)
 {
-  if (str1.size() != str2.size()) return false;
+  if (str1.size() != str2.size())
+    return false;
 
   return std::equal(str1.begin(), str1.end(), str2.begin(), [](char c1, char c2) { return std::tolower(c1) == std::tolower(c2); });
 }
 
 std::vector<std::string> bld::str::chop_by_delimiter(const std::string &s, const std::string &delimiter)
 {
-  if (delimiter.size() == 0) return {s};
+  if (delimiter.size() == 0)
+    return {s};
   // Estimate number of splits to reduce vector reallocations
   std::vector<std::string> res;
   res.reserve(std::count(s.begin(), s.end(), delimiter[0]) + 1);
@@ -3000,7 +3660,8 @@ std::vector<std::string> bld::str::chop_by_delimiter(const std::string &s, const
 std::string bld::str::remove_duplicates(const std::string &str)
 {
   // Early exit for empty or single-character strings
-  if (str.size() <= 1) return str;
+  if (str.size() <= 1)
+    return str;
 
   // Use a character set to track seen characters
   std::unordered_set<char> seen;
@@ -3010,7 +3671,8 @@ std::string bld::str::remove_duplicates(const std::string &str)
   for (char c : str)
   {
     // Only insert if not previously seen
-    if (seen.insert(c).second) result += c;
+    if (seen.insert(c).second)
+      result += c;
   }
 
   return result;
@@ -3019,7 +3681,8 @@ std::string bld::str::remove_duplicates(const std::string &str)
 std::string bld::str::remove_duplicates_case_insensitive(const std::string &str)
 {
   // Early exit for empty or single-character strings
-  if (str.size() <= 1) return str;
+  if (str.size() <= 1)
+    return str;
 
   // Use a character set to track seen characters, converted to lowercase
   std::unordered_set<char> seen;
@@ -3030,7 +3693,8 @@ std::string bld::str::remove_duplicates_case_insensitive(const std::string &str)
   {
     // Convert to lowercase for comparison, but preserve original case
     char lower = std::tolower(c);
-    if (seen.insert(lower).second) result += c;
+    if (seen.insert(lower).second)
+      result += c;
   }
 
   return result;
@@ -3038,7 +3702,8 @@ std::string bld::str::remove_duplicates_case_insensitive(const std::string &str)
 
 bool bld::str::is_numeric(const std::string &str)
 {
-  if (str.empty()) return false;
+  if (str.empty())
+    return false;
 
   // Track if we've seen a decimal point
   bool decimal_point_seen = false;
@@ -3052,13 +3717,15 @@ bool bld::str::is_numeric(const std::string &str)
     if (str[i] == '.')
     {
       // Only one decimal point allowed
-      if (decimal_point_seen) return false;
+      if (decimal_point_seen)
+        return false;
       decimal_point_seen = true;
       continue;
     }
 
     // Must be a digit
-    if (!std::isdigit(str[i])) return false;
+    if (!std::isdigit(str[i]))
+      return false;
   }
 
   return true;
@@ -3066,7 +3733,8 @@ bool bld::str::is_numeric(const std::string &str)
 
 std::string bld::str::replace_all(const std::string &str, const std::string &from, const std::string &to)
 {
-  if (from.empty()) return str;
+  if (from.empty())
+    return str;
 
   std::string result = str;
   size_t start_pos = 0;
