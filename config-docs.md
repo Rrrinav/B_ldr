@@ -1,8 +1,10 @@
 # Configuration System
 
+> AI generated
+
 ## Overview
 
-The `Config` class is a **singleton configuration manager** for build tools or other CLI programs.
+The `Config` class is a **singleton configuration manager**.
 
 It allows you to:
 
