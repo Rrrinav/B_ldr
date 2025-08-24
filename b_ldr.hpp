@@ -36,8 +36,6 @@
 
 #pragma once
 
-#include <cstdint>
-#include <utility>
 #ifdef _WIN32
   #define WIN32_LEAN_AND_MEAN
   #define _WINUSER_
@@ -929,9 +927,10 @@ private:
   };
 }  // namespace bld
 
-#define B_LDR_IMPLEMENTATION
 #ifdef B_LDR_IMPLEMENTATION
 
+#include <cstdint>
+#include <utility>
 #include <algorithm>
 #include <atomic>
 #include <cstdlib>
