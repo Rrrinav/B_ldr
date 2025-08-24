@@ -1,6 +1,7 @@
 #include <array>
 #include <ostream>
 #include <string>
+#define BLD_NO_LOGGING
 #define B_LDR_IMPLEMENTATION
 #include "../../b_ldr.hpp"
 
@@ -12,8 +13,7 @@ struct Test
 
   void print()
   {
-    bld::log(bld::Log_type::INFO, name);
-    std::cout << "    [ " + std::to_string(id) + " ]: " + (pass == 0 ? "failed" : "passed") << std::endl;
+    bld::log(bld::Log_type::INFO, "[ " + std::to_string(id) + " ]: " + (pass == 0 ? "failed: " : "passed: ") + name);
   }
 };
 
@@ -286,6 +286,8 @@ void test_read_output()
 int main(int argc, char *argv[])
 {
   BLD_REBUILD_YOURSELF_ONCHANGE();
+
+  bld::log(bld::Log_type::INFO , "------------------- Basic functions ---------------------");
   test_execute();
   test_async();
   test_redirect();
@@ -297,15 +299,13 @@ int main(int argc, char *argv[])
   test_read_output();
 
   bld::fs::remove("./test1.cpp", "test");
-
-  std::cout << std::endl << std::endl;
   int passed = TOTAL_TESTS - TEST_FAILED;
   for (auto t : tests) t.print();
-  std::cout << "----------------------------------------------------------" << std::endl;
+  std::cout << "------------------------Basic Functions-------------------" << std::endl;
   bld::log(bld::Log_type::INFO, "Total tests:  " + std::to_string(TOTAL_TESTS));
   bld::log(bld::Log_type::INFO, "Tests passed: " + std::to_string(passed));
   bld::log(bld::Log_type::INFO, "Tests failed: " + std::to_string(TEST_FAILED));
-  std::cout << "----------------------------------------------------------\n" << std::endl;
+  std::cout << "----------------------------------------------------------\n";
 
   return 0;
 }

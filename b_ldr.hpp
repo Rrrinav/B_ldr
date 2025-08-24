@@ -36,6 +36,7 @@
 
 #pragma once
 
+#include <cstdint>
 #include <utility>
 #ifdef _WIN32
   #define WIN32_LEAN_AND_MEAN
@@ -700,7 +701,7 @@ namespace bld
 
     // Remove files variadic
     template <typename... Paths, typename = std::enable_if_t<(std::is_convertible_v<Paths, std::string> && ...)>>
-    bool remove(const Paths &...paths);
+    void remove(const Paths &...paths);
 
     /* @brief: Get list of all files in directory
      * @param path: Directory path
@@ -734,9 +735,10 @@ namespace bld
      * @param bool (false): whether to look into a directory recursively
      * @param bool (false): whether the matching must be case insensitive or not
      */
-    std::vector<std::string> get_all_files_with_extensions(const std::string &path, std::vector<std::string> extensions,
+    std::vector<std::string> get_all_files_with_extensions(const std::string &path,const std::vector<std::string> &extensions,
                                                            bool recursive = false, bool case_insensitive = false);
 
+    std::vector<std::string> get_all_files_with_name(const std::string &dir, const std::string &name, bool recursive = false);
   }  // namespace fs
 
   namespace env
@@ -2527,9 +2529,6 @@ namespace bld
 
     std::vector<std::string> config_args(args.begin() + 1, args.end());
     Config::get().parse_args(config_args);
-    Config::get().save_to_file();
-
-    std::cout << "Configuration saved\n";
   }
 
   void handle_args(int argc, char *argv[])
@@ -2547,8 +2546,18 @@ namespace bld
       return;
 
     std::string command = args[1];
-    if (command == "config")
+    if (command == "-configure")
+    {
       handle_config_command(args, argv[0]);
+      bld::Config::get().save_to_file();
+      internal_log(Log_type::INFO, "Configuration saved.");
+    }
+    if (command == "-use-config")
+    {
+      bld::Config::get().load_from_file();
+      return;
+    }
+    handle_config_command(args, argv[0]);
     // Users can handle other commands themselves
   }
 
@@ -2813,9 +2822,9 @@ bool bld::fs::create_dirs_if_not_exists(const Paths &...paths)
 }
 
 template <typename... Paths, typename>
-bool bld::fs::remove(const Paths &...paths)
+void bld::fs::remove(const Paths &...paths)
 {
-  return (... & std::filesystem::remove(paths));
+  (... & std::filesystem::remove(paths));
 }
 
 
@@ -2905,125 +2914,62 @@ std::string bld::fs::strip_file_name(std::string full_path)
   return path.parent_path().string();
 }
 
-
-std::vector<std::string> get_all_files_with_extension(const std::string &path, 
-                                                     std::vector<std::string> extensions, 
-                                                     bool recursive = false,
-                                                     bool case_insensitive = true)
+std::vector<std::string> bld::fs::get_all_files_with_name(const std::string &dir, const std::string &name, bool recursive)
 {
-    std::vector<std::string> matching_files;
-    
-    // Check if path exists and is a directory
-    std::filesystem::path fs_path(path);
-    if (!std::filesystem::exists(fs_path) || !std::filesystem::is_directory(fs_path))
-    {
-        // Could log error here if you have logging
-        return matching_files; // Return empty vector
-    }
-    
-    // Normalize extensions (ensure they start with '.' and handle case sensitivity)
-    std::vector<std::string> normalized_extensions;
-    for (const auto& ext : extensions)
-    {
-        if (ext.empty()) continue;
-        
-        std::string normalized = ext;
-        
-        // Ensure extension starts with '.' - handle both "cpp" and ".cpp"
-        if (normalized[0] != '.')
-        {
-            normalized = "." + normalized;
-        }
-        
-        // Apply case transformation if case_insensitive is true
-        if (case_insensitive)
-        {
-            std::transform(normalized.begin(), normalized.end(), normalized.begin(), 
-                          [](unsigned char c) { return std::tolower(c); });
-        }
-        
-        normalized_extensions.push_back(normalized);
-    }
-    
-    // If no valid extensions provided, return empty
-    if (normalized_extensions.empty())
-    {
-        return matching_files;
-    }
-    
-    try
-    {
-        // Choose iterator based on recursive flag
-        if (recursive)
-        {
-            for (const auto& entry : std::filesystem::recursive_directory_iterator(fs_path))
-            {
-                if (entry.is_regular_file())
-                {
-                    std::string file_ext = entry.path().extension().string();
-                    
-                    // Apply case transformation to file extension if case_insensitive is true
-                    std::string comparison_ext = file_ext;
-                    if (case_insensitive)
-                    {
-                        std::transform(comparison_ext.begin(), comparison_ext.end(), comparison_ext.begin(),
-                                      [](unsigned char c) { return std::tolower(c); });
-                    }
-                    
-                    // Check if file extension matches any of the requested extensions
-                    for (const auto& target_ext : normalized_extensions)
-                    {
-                        if (comparison_ext == target_ext)
-                        {
-                            matching_files.push_back(entry.path().string());
-                            break; // No need to check other extensions for this file
-                        }
-                    }
-                }
-            }
-        }
-        else
-        {
-            for (const auto& entry : std::filesystem::directory_iterator(fs_path))
-            {
-                if (entry.is_regular_file())
-                {
-                    std::string file_ext = entry.path().extension().string();
-                    
-                    // Apply case transformation to file extension if case_insensitive is true
-                    std::string comparison_ext = file_ext;
-                    if (case_insensitive)
-                    {
-                        std::transform(comparison_ext.begin(), comparison_ext.end(), comparison_ext.begin(),
-                                      [](unsigned char c) { return std::tolower(c); });
-                    }
-                    
-                    // Check if file extension matches any of the requested extensions
-                    for (const auto& target_ext : normalized_extensions)
-                    {
-                        if (comparison_ext == target_ext)
-                        {
-                            matching_files.push_back(entry.path().string());
-                            break; // No need to check other extensions for this file
-                        }
-                    }
-                }
-            }
-        }
-    }
-    catch (const std::filesystem::filesystem_error& e)
-    {
-        // Handle filesystem errors (permission denied, etc.)
-        // Could log error here if you have logging: 
-        // bld::log(Log_type::ERR, "Filesystem error: " + std::string(e.what()));
-        return matching_files; // Return whatever we found so far
-    }
-    
-    return matching_files;
-}
+  namespace fs = std::filesystem;
+  std::vector<std::string> results;
 
+  try
+  {
+    if (!fs::exists(dir) || !fs::is_directory(dir))
+    {
+      bld::internal_log(bld::Log_type::WARNING, "Directory: " + dir + " doesnt exist.");
+      return results;
+    }
+    if (recursive)
+    {
+      for (const auto &entry : fs::recursive_directory_iterator(dir, fs::directory_options::skip_permission_denied))
+      {
+        try
+        {
+          if (entry.is_regular_file() && entry.path().filename() == name)
+            results.push_back(entry.path().string());
+        }
+        catch (const fs::filesystem_error &e)
+        {
+          bld::internal_log(bld::Log_type::WARNING, "Filesystem error: " + std::string(e.what()));
+          bld::internal_log(bld::Log_type::INFO, "Skipping previous file");
+          continue;
+        }
+      }
+    }
+    else
+    {
+      for (const auto &entry : fs::directory_iterator(dir, fs::directory_options::skip_permission_denied))
+      {
+        try
+        {
+          if (entry.is_regular_file() && entry.path().filename() == name)
+            results.push_back(entry.path().string());
+        }
+        catch (const fs::filesystem_error &e)
+        {
+          bld::internal_log(bld::Log_type::WARNING, "Filesystem error: " + std::string(e.what()));
+          bld::internal_log(bld::Log_type::INFO, "Skipping previous file");
+          continue;
+        }
+      }
+    }
+  }
+  catch (const fs::filesystem_error &e)
+  {
+    bld::internal_log(bld::Log_type::WARNING, "Filesystem error: " + std::string(e.what()));
+  }
+
+  return results;
+}
 // Alternative version with more robust error handling and logging
-std::vector<std::string> bld::fs::get_all_files_with_extensions(const std::string &path, std::vector<std::string> extensions, bool recursive, bool case_insensitive)
+std::vector<std::string> bld::fs::get_all_files_with_extensions(const std::string &path,const std::vector<std::string> &extensions, bool recursive, bool case_insensitive)
 {
   std::vector<std::string> matching_files;
 

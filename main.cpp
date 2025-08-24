@@ -1,5 +1,6 @@
 #include <unistd.h>
 #include <chrono>
+#include <condition_variable>
 #include <string>
 #define B_LDR_IMPLEMENTATION
 #define BLD_USE_CONFIG
@@ -23,24 +24,28 @@ int main(int argc, char *argv[])
     bld::log(bld::Log_type::INFO, "Building and running tests...");
 
     std::string test_target = config["test"];
-    bld::Command c = {"g++", "-o", "./test" , test_target + "/main.cpp"};
+    auto files = bld::fs::get_all_files_with_name("./tests/", "main.cpp", true);
+    std::string target = "test";
+    auto run = [&] (std::string f) -> void {
+      if (!bld::execute({config.compiler, "-o", target, f}))
+      {
+        bld::log(bld::Log_type::ERR,"Execution failed!");
+      }
+      if (!bld::execute({"./" + target}))
+      {
+        bld::log(bld::Log_type::ERR,"Execution failed!");
+      }
+      bld::fs::remove(target);
+    };
 
-    if (!bld::execute(c))
+    bld::time::stamp s;
+    for (auto f: files )
     {
-      bld::log(bld::Log_type::ERR, "Test build failed!");
-      return 1;
+      s.reset();
+      run(f);
+      auto elapsed = bld::time::since<double, std::chrono::microseconds>(s);
+      bld::log(bld::Log_type::INFO, "Test time: " + std::to_string(elapsed) + " microseconds");
     }
-
-    bld::time::stamp start;
-    c = {"./test"};
-    if (!bld::execute(c))
-    {
-      bld::log(bld::Log_type::ERR, "Test execution failed!");
-      return 1;
-    }
-
-    auto elapsed = bld::time::since<double, std::chrono::microseconds>(start);
-    bld::log(bld::Log_type::INFO, "Test time: " + std::to_string(elapsed) + " microseconds");
     return 0;
   }
 
