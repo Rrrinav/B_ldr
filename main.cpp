@@ -7,43 +7,66 @@
 
 int main(int argc, char *argv[])
 {
-  // TODO: Make command-line parsing and config user friendly
-  bld::Config::get().use_extra_config_keys = true;
-  bld::Config::get().extra_config_val["test"] = "no";
-  BLD_REBUILD_AND_ARGS();
-  if (bld::Config::get().extra_config_val["test"] == "yes")
+  BLD_REBUILD_YOURSELF_ONCHANGE();
+  auto &config = bld::Config::get();
+  config.add_flag("test", "Build and run tests instead of main project");
+  BLD_HANDLE_ARGS();
+
+  if (config["help"] || config["h"])
   {
-    bld::Command c = { "g++", "-o", "./test", "./tests/core/main.cpp" };
-    bld::execute(c);
-    c.clear();
+    config.show_help();
+    return 0;
+  }
+
+  if (config["test"])
+  {
+    bld::log(bld::Log_type::INFO, "Building and running tests...");
+
+    std::string test_target = config["test"];
+    bld::Command c = {"g++", "-o", "./test" , test_target + "/main.cpp"};
+
+    if (!bld::execute(c))
+    {
+      bld::log(bld::Log_type::ERR, "Test build failed!");
+      return 1;
+    }
+
     bld::time::stamp start;
-    c = { "./test" };
-    bld::execute(c);
-    auto e = bld::time::since<double, std::chrono::microseconds>(start);
-    bld::log(bld::Log_type::INFO, "Time: " + std::to_string(e) + " microseconds" );
+    c = {"./test"};
+    if (!bld::execute(c))
+    {
+      bld::log(bld::Log_type::ERR, "Test execution failed!");
+      return 1;
+    }
+
+    auto elapsed = bld::time::since<double, std::chrono::microseconds>(start);
+    bld::log(bld::Log_type::INFO, "Test time: " + std::to_string(elapsed) + " microseconds");
     return 0;
   }
 
   bld::time::stamp start;
-
   bld::Dep_graph graph{};
 
-  graph.add_dep({"./main2",                                                // Target
-                 {"./main2.cpp", "./foo.o", "./bar.o"},                    // Dependencies
-                 {"g++", "main2.cpp", "-o", "main2", "foo.o", "bar.o"}});  // Command
+  bld::Command main_cmd = {"g++", "main2.cpp", "-o", "main2", "foo.o", "bar.o"};
+  bld::Command foo_cmd = {"g++", "-c", "foo.cpp", "-o", "foo.o"};
+  bld::Command bar_cmd = {"g++", "-c", "bar.cpp", "-o", "bar.o"};
 
-  graph.add_dep({"./foo.o", {"./foo.cpp"}, {"g++", "-c", "foo.cpp", "-o", "foo.o"}});
+  // Add dependencies to graph
+  graph.add_dep({"./" "main", {"./main2.cpp", "./foo.o", "./bar.o"}, main_cmd});
 
-  graph.add_dep({"./bar.o", {"./bar.cpp"}, {"g++", "-c", "bar.cpp", "-o", "bar.o"}});
+  graph.add_dep({"./foo.o", {"./foo.cpp"}, foo_cmd});
+  graph.add_dep({"./bar.o", {"./bar.cpp"}, bar_cmd});
 
-  if (!graph.build_parallel("./main2", 3))
+  // Build with specified number of parallel jobs
+  if (!graph.build_parallel("./main2"))
   {
     bld::log(bld::Log_type::ERR, "Build failed!");
     return 1;
   }
-  auto e = bld::time::since<double, std::chrono::microseconds>(start);
-  bld::log(bld::Log_type::INFO, "Time: " + std::to_string(e) + " microseconds");
 
+  auto elapsed = bld::time::since<double, std::chrono::microseconds>(start);
+  bld::log(bld::Log_type::INFO, "Build time: " + std::to_string(elapsed) + " microseconds");
   bld::log(bld::Log_type::INFO, "Build completed successfully!");
+
   return 0;
 }

@@ -275,84 +275,115 @@ namespace bld
   class Config
   {
   private:
-    Config();
+    Config() = default;
     Config(const Config &) = delete;
     Config &operator=(const Config &) = delete;
 
   public:
-    /* INFO: Most of these options are just to save the configuration and wont be used by the library itself.
-     * It is upto the user to use them or not and infact how to use them.
-     * However, some of them are used by the library itself and are important.
-     * 1. override_run: If set to true, it will disable the default run command and will not run the target executable.
-     * 2. target_executable: Target executable to run. If not provided, it will run the target executable from config.
-     * 3. cmd_args: It saves the command line arguments passed to the program.
-     *
-     * There are some params that can't be set in commnad line and are to be set in program itself.
-     * 1. extra_args 2. use_extra_config_keys 3. the keys themself (you can only provide values in command line).
-     * Make sure to set use_extra_config_keys before BLD_HANDLE_ARGS so the function knows whether to parse extra keys!
-     */
 
-    // if hot reload is enabled
-    bool hot_reload;
-    // if verbose output is enabled.
-    bool verbose;
-    // Override the run command.. If true, it will disable default run command ( runs target executable )
-    bool override_run;
-    // If user wants to execute their own commands, won't log error if somehting other than "config" or "run" is passed
-    bool extra_args;
-    // If user wants to add extra configuration keys.
-    bool use_extra_config_keys;
-    // Number of threads to use for parallel execution
-    size_t threads;
-    // Compiler command to use.
-    std::string compiler;
-    // Target executable to run
-    std::string target_executable;
-    // Target platform E.g win32, linux, darwin
-    std::string target_platform;
-    // Build directory
-    std::string build_dir;
-    // Compiler flags
-    std::string compiler_flags;
-    // Linker flags
-    std::string linker_flags;
-    // Command to run before build
-    std::string pre_build_command;
-    // Command to run after build
-    std::string post_build_command;
-    // Files to hot reload
+  #ifdef __clang__
+    std::string compiler = "clang++";
+  #elif defined(__GNUC__)
+    std::string compiler = "g++";
+  #elif defined(_MSC_VER)
+    std::string compiler = "cl";
+  #else
+    std::string compiler = "g++";
+  #endif
+    std::string target         = "main";
+    std::string build_dir      = "./build";
+    std::string compiler_flags = "-O2";
+    std::string linker_flags   = "";
+    std::string pre_build      = "";
+    std::string post_build     = "";
+
+    bool verbose      = false;
+    bool hot_reload   = false;
+    bool override_run = false;
+    size_t threads    = 1;
+
     std::vector<std::string> hot_reload_files;
-    // Save the command line arguments
     std::vector<std::string> cmd_args;
-    // Extra configuration keys-value pairs
-    std::unordered_map<std::string, std::string> extra_config_val;
-    // Extra configuration keys-bool pairs
-    std::unordered_map<std::string, bool> extra_config_bool;
 
-    /* @brief: Get the singleton instance of the Config class
-     * @description: This class works as a singleton and this function returns the instance of the class, this will be the only instance.
-     */
+  private:
+    // Simple storage - strings and flags
+    mutable std::unordered_map<std::string, std::string> values;
+    mutable std::unordered_set<std::string> flags;
+
+    // Custom config definitions
+    struct CustomConfig
+    {
+      std::string default_value;
+      std::string description;
+      bool is_flag;  // true for flags, false for key=value
+    };
+    std::unordered_map<std::string, CustomConfig> custom_configs;
+
+  public:
     static Config &get();
+    // Define custom config options
+    void add_flag(const std::string &name, const std::string &description = "");
+    void add_option(const std::string &name, const std::string &default_value = "", const std::string &description = "");
 
-    /* @brief: Initialize the configuration with default values
-     * @description: sets the default values for the configuration
-     *  compiler & target_platform if not provided
-     */
-    void init();
+    // Get all custom configs (for help display)
+    const std::unordered_map<std::string, CustomConfig> &get_custom_configs() const;
 
-    /* @brief: Load the configuration from a file BLD_DEFAULT_CONFIG_FILE: "./build.conf")
-     * @param filename ( std::string ): Name of the file to load the configuration from
-     * @description: Load the configuration from a file. The file should be in the format of key=value pairs.
-     */
-    bool load_from_file(const std::string &filename);
+    // Magic config access
+    class Config_proxy
+    {
+    private:
+      std::string key;
+      Config *config;
 
-    /* @brief: Save the configuration to a file BLD_DEFAULT_CONFIG_FILE: "./build.conf")
-     * @param filename ( std::string ): Name of the file to save the configuration to.
-     * @description: Save the configuration to a file. The file will be in the format of key=value pairs.
-     */
-    bool save_to_file(const std::string &filename);
+    public:
+      Config_proxy(const std::string &k, Config *c);
+
+      // Set value
+      Config_proxy &operator=(const std::string &value);
+      Config_proxy &operator=(const char *value);
+
+      // Get as string
+      operator std::string() const;
+
+      // Check if flag is set or value equals something
+      bool operator==(const std::string &other) const;
+      bool operator==(const char *other) const;
+
+      // Convert to bool - true if flag is set or value is truthy
+      operator bool() const;
+
+      // Check if this key exists at all
+      bool exists() const;
+
+      // Get as int (0 if not a number)
+      int as_int() const;
+    };
+
+    Config_proxy operator[](const std::string &key);
+    const Config_proxy operator[](const std::string &key) const;
+
+    void initialize_builtin_options();
+    // Argument parsing
+    void parse_args(const std::vector<std::string> &args);
+
+    // Help and documentation
+    void show_help() const;
+
+    // Debug: show all stored config
+    void dump() const;
+
+    // File operations
+    bool load_from_file(const std::string &filename = "build.conf");
+    bool save_to_file(const std::string &filename = "build.conf") const;
+
+  private:
+    bool is_true(const std::string &value) const;
+    bool is_number(const std::string &value) const;
+    void parse_file_list(const std::string &value);
   };
 
+  void handle_config_command(const std::vector<std::string>& args, const std::string& program_name);
+  void handle_args(int argc, char* argv[]);
   /* @brief: Convert command-line arguments to vector of strings
    * @param argc ( int ): Number of arguments
    * @param argv ( char*[] ): Array of arguments
@@ -530,26 +561,11 @@ namespace bld
    */
   void rebuild_yourself_onchange(const std::string &filename, const std::string &executable, std::string compiler);
 
-  /* @brief: Handle command-line arguments
-   * @param argc ( int ): Number of arguments
-   * @param argv ( char*[] ): Array of arguments
-   * @description: Handle command-line arguments... Currently only handles 'run' and 'config' commands.
-   *    run: Run the target executable or execute the command provided after run 'run <command>'
-   *    config: Set the configuration for the build system and save it to a file. Saving is not handled by function but Config class.
-   */
-  void handle_args(int argc, char *argv[]);
-
   /* @brief: Handle the 'run' command
    * @param args ( std::vector<std::string> ): Arguments for the command
    * @description: Handle the 'run' command. If no arguments are provided, it runs the target executable from config.
    */
   int handle_run_command(std::vector<std::string> args);
-
-  /* @brief: Handle the 'config' command
-   * @param args ( std::vector<std::string> ): Arguments for the command
-   * @description: Handle the 'config' command. Sets the configuration based on the arguments.
-   */
-  void handle_config_command(std::vector<std::string> args, std::string name);
 
   /* @brief: Check if a string starts with a prefix
    * @param str ( std::string ): String to check
@@ -911,6 +927,7 @@ private:
   };
 }  // namespace bld
 
+#define B_LDR_IMPLEMENTATION
 #ifdef B_LDR_IMPLEMENTATION
 
 #include <algorithm>
@@ -2080,16 +2097,16 @@ void bld::rebuild_yourself_onchange(const std::string &filename, const std::stri
     // Detect the compiler if not provided
     if (compiler.empty())
     {
-#ifdef __clang__
+    #ifdef __clang__
       compiler = "clang++";
-#elif defined(__GNUC__)
+    #elif defined(__GNUC__)
       compiler = "g++";
-#elif defined(_MSC_VER)
+    #elif defined(_MSC_VER)
       compiler = "cl";  // MSVC uses 'cl' as the compiler command
-#else
+    #else
       bld::log(Log_type::ERROR, "Unknown compiler. Defaulting to g++.");
       compiler = "g++";
-#endif
+    #endif
     }
 
     // Set up the compile command
@@ -2104,6 +2121,439 @@ void bld::rebuild_yourself_onchange(const std::string &filename, const std::stri
   }
 }
 
+namespace bld
+{
+  // Static instance getter
+  Config &Config::get()
+  {
+    static Config instance;
+    static bool initialized = false;
+    if (!initialized)
+    {
+      instance.initialize_builtin_options();
+      initialized = true;
+    }
+    return instance;
+  }
+
+  // Define custom config options
+  void Config::add_flag(const std::string &name, const std::string &description)
+  {
+    custom_configs[name] = {.default_value = "", .description = description, .is_flag = true};
+  }
+
+  void Config::add_option(const std::string &name, const std::string &default_value, const std::string &description)
+  {
+    custom_configs[name] = {.default_value = default_value, .description = description, .is_flag = false};
+    if (!default_value.empty())
+      values[name] = default_value;
+  }
+
+  const std::unordered_map<std::string, Config::CustomConfig> &Config::get_custom_configs() const { return custom_configs; }
+
+  // Config_proxy implementation
+  Config::Config_proxy::Config_proxy(const std::string &k, Config *c) : key(k), config(c) {}
+
+  Config::Config_proxy &Config::Config_proxy::operator=(const std::string &value)
+  {
+    config->values[key] = value;
+    config->flags.erase(key);  // Remove from flags if it was there
+
+    // Sync to built-in members
+    if (key == "compiler" || key == "c")
+    {
+      config->compiler = value;
+    }
+    else if (key == "target" || key == "t")
+    {
+      config->target = value;
+    }
+    else if (key == "build-dir" || key == "d")
+    {
+      config->build_dir = value;
+    }
+    else if (key == "flags" || key == "f")
+    {
+      config->compiler_flags = value;
+    }
+    else if (key == "link" || key == "l")
+    {
+      config->linker_flags = value;
+    }
+    else if (key == "threads" || key == "j")
+    {
+      if (str::is_numeric(value))
+        config->threads = std::max(1, std::stoi(value));
+    }
+    else if (key == "pre")
+    {
+      config->pre_build = value;
+    }
+    else if (key == "post")
+    {
+      config->post_build = value;
+    }
+
+    return *this;
+  }
+
+  Config::Config_proxy &Config::Config_proxy::operator=(const char *value)
+  {
+    config->values[key] = std::string(value);
+    config->flags.erase(key);
+    return *this;
+  }
+
+  Config::Config_proxy::operator std::string() const
+  {
+    auto it = config->values.find(key);
+    if (it != config->values.end())
+      return it->second;
+
+    auto custom_it = config->custom_configs.find(key);
+    if (custom_it != config->custom_configs.end())
+      return custom_it->second.default_value;
+
+    // Fallback: check if it's a built-in that wasn't synced
+    if (key == "compiler" || key == "c")
+      return config->compiler;
+    if (key == "target" || key == "t")
+      return config->target;
+    if (key == "build-dir" || key == "d")
+      return config->build_dir;
+    if (key == "flags" || key == "f")
+      return config->compiler_flags;
+    if (key == "link" || key == "l")
+      return config->linker_flags;
+    if (key == "threads" || key == "j")
+      return std::to_string(config->threads);
+    if (key == "pre")
+      return config->pre_build;
+    if (key == "post")
+      return config->post_build;
+
+    return "";
+  }
+
+  bool Config::Config_proxy::operator==(const std::string &other) const
+  {
+    // First check if it's a flag
+    if (config->flags.count(key))
+      return other == "true" || other == "yes" || other == "1" || other.empty();
+    // Then check value
+    auto it = config->values.find(key);
+    return it != config->values.end() && it->second == other;
+  }
+
+  bool Config::Config_proxy::operator==(const char *other) const { return *this == std::string(other); }
+
+  Config::Config_proxy::operator bool() const
+  {
+    if (config->flags.count(key))
+      return true;
+
+    auto it = config->values.find(key);
+    if (it != config->values.end())
+    {
+      const std::string &value = it->second;
+      return value == "true" || value == "yes" || value == "1" || (!value.empty() && value != "false" && value != "no" && value != "0");
+    }
+
+    // Check built-in boolean flags
+    if (key == "verbose" || key == "v")
+      return config->verbose;
+    if (key == "hot-reload" || key == "hr")
+      return config->hot_reload;
+    if (key == "override-run")
+      return config->override_run;
+
+    return false;
+  }
+
+  bool Config::Config_proxy::exists() const { return config->flags.count(key) || config->values.count(key); }
+
+  int Config::Config_proxy::as_int() const
+  {
+    std::string val = *this;
+    if (val.empty() || val.find_first_not_of("0123456789") != std::string::npos)
+      return 0;
+    return std::stoi(val);
+  }
+
+  // Config subscript operators
+  Config::Config_proxy Config::operator[](const std::string &key) { return Config_proxy(key, this); }
+
+  const Config::Config_proxy Config::operator[](const std::string &key) const { return Config_proxy(key, const_cast<Config *>(this)); }
+
+  void Config::initialize_builtin_options()
+  {
+    // Initialize built-in options as custom configs so they work with []
+    add_option("compiler", compiler, "Compiler to use");
+    add_option("c", compiler, "Compiler to use (short form)");
+    add_option("target", target, "Target executable name");
+    add_option("t", target, "Target executable name (short form)");
+    add_option("build-dir", build_dir, "Build directory");
+    add_option("d", build_dir, "Build directory (short form)");
+    add_option("flags", compiler_flags, "Compiler flags");
+    add_option("f", compiler_flags, "Compiler flags (short form)");
+    add_option("link", linker_flags, "Linker flags");
+    add_option("l", linker_flags, "Linker flags (short form)");
+    add_option("threads", std::to_string(threads), "Number of build threads");
+    add_option("j", std::to_string(threads), "Number of build threads (short form)");
+    add_option("pre", pre_build, "Pre-build command");
+    add_option("post", post_build, "Post-build command");
+
+    // Flags
+    add_flag("verbose", "Enable verbose output");
+    add_flag("v", "Enable verbose output (short form)");
+    add_flag("hot-reload", "Enable hot reload");
+    add_flag("hr", "Enable hot reload (short form)");
+    add_flag("override-run", "Override run behavior");
+    add_flag("help", "Show help");
+    add_flag("h", "Show help (short form)");
+  }
+  // Argument parsing
+  void Config::parse_args(const std::vector<std::string> &args)
+  {
+    for (const auto &arg : args)
+    {
+      if (!str::starts_with(arg, "-"))
+        continue;
+
+      auto eq_pos = arg.find('=');
+
+      if (eq_pos == std::string::npos)
+      {
+        std::string flag = arg.substr(1);
+        flags.insert(flag);
+        values.erase(flag);  // Remove from values if it was there
+
+        if (flag == "v" || flag == "verbose")
+        {
+          verbose = true;
+          flags.insert("verbose");
+          flags.insert("v");
+        }
+        else if (flag == "hr" || flag == "hot-reload")
+        {
+          hot_reload = true;
+          flags.insert("hot-reload");
+          flags.insert("hr");
+        }
+        else if (flag == "override-run")
+        {
+          override_run = true;
+        }
+        else if (flag == "h" || flag == "help")
+        {
+          // Don't show help automatically, let user handle it
+        }
+      }
+      else
+      {
+        // Key=value pair like -compiler=g++, -test=yes
+        std::string key = arg.substr(1, eq_pos - 1);
+        std::string value = arg.substr(eq_pos + 1);
+
+        values[key] = value;
+        flags.erase(key);  // Remove from flags if it was there
+
+        // Use [] assignment operator which will sync to built-ins automatically
+        (*this)[key] = value;
+      }
+    }
+  }
+
+  // Private helper methods
+  bool Config::is_true(const std::string &value) const { return value == "true" || value == "1" || value == "yes"; }
+
+  bool Config::is_number(const std::string &value) const
+  {
+    return !value.empty() && value.find_first_not_of("0123456789") == std::string::npos;
+  }
+
+  void Config::parse_file_list(const std::string &value)
+  {
+    if (!value.empty())
+    {
+      std::stringstream ss(value);
+      std::string file;
+      hot_reload_files.clear();
+      while (std::getline(ss, file, ','))
+        if (!file.empty())
+          hot_reload_files.push_back(file);
+      hot_reload = true;
+    }
+  }
+
+  // Help and documentation
+  void Config::show_help() const
+  {
+    std::cout << "Config Usage:\n"
+              << "Flags (no value needed):\n"
+              << "  -flag_name              Set flag (e.g., -test, -debug, -verbose)\n"
+              << "\nKey=Value pairs:\n"
+              << "  -key=value              Set config value (e.g., -compiler=clang++)\n"
+              << "\nBuilt-in options:\n"
+              << "  -c, -compiler=COMPILER  Compiler to use\n"
+              << "  -t, -target=TARGET      Target executable name\n"
+              << "  -f, -flags=FLAGS        Compiler flags\n"
+              << "  -j, -threads=N          Build threads\n"
+              << "  -v, -verbose            Enable verbose output\n"
+              << "  -hr, -hot-reload        Enable hot reload\n"
+              << "  --watch=files           Comma-separated files to watch\n";
+
+    if (!custom_configs.empty())
+    {
+      std::cout << "\nCustom options:\n";
+      for (const auto &[name, config] : custom_configs)
+      {
+        if (config.is_flag)
+        {
+          std::cout << "  -" << name;
+          if (!config.description.empty())
+            std::cout << "                    " << config.description;
+          std::cout << "\n";
+        }
+        else
+        {
+          std::cout << "  -" << name << "=VALUE";
+          if (!config.default_value.empty())
+            std::cout << "           (default: " << config.default_value << ")";
+          if (!config.description.empty())
+            std::cout << " " << config.description;
+          std::cout << "\n";
+        }
+      }
+    }
+
+    std::cout << "\nAny other -key=value and -flags are automatically stored!\n";
+  }
+
+  void Config::dump() const
+  {
+    std::cout << "=== Config Dump ===\n";
+    std::cout << "Flags:\n";
+    for (const auto &flag : flags) std::cout << "  " << flag << "\n";
+    std::cout << "Values:\n";
+    for (const auto &[key, value] : values) std::cout << "  " << key << " = " << value << "\n";
+    std::cout << "==================\n";
+  }
+
+  // File operations
+  bool Config::load_from_file(const std::string &filename)
+  {
+    std::ifstream file(filename);
+    if (!file.is_open())
+      return false;
+
+    std::vector<std::string> file_args;
+    std::string line;
+    while (std::getline(file, line))
+    {
+      line.erase(0, line.find_first_not_of(" \t"));
+      if (line.empty() || line[0] == '#')
+        continue;
+
+      if (line.find('=') != std::string::npos)
+      {
+        // key=value format
+        if (!str::starts_with(line, "-"))
+          line = "-" + line;
+        file_args.push_back(line);
+      }
+      else
+      {
+        // Simple flag
+        if (!str::starts_with(line, "-"))
+          line = "-" + line;
+        file_args.push_back(line);
+      }
+    }
+
+    parse_args(file_args);
+    return true;
+  }
+
+  bool Config::save_to_file(const std::string &filename) const
+  {
+    std::ofstream file(filename);
+    if (!file.is_open())
+      return false;
+
+    file << "# Build configuration\n";
+
+    // Save built-in options
+    file << "compiler=" << compiler << "\n";
+    file << "target=" << target << "\n";
+    file << "build-dir=" << build_dir << "\n";
+    file << "flags=" << compiler_flags << "\n";
+    file << "threads=" << threads << "\n";
+
+    if (verbose)
+      file << "verbose\n";
+    if (hot_reload)
+      file << "hot-reload\n";
+    if (override_run)
+      file << "override-run\n";
+
+    // Save custom flags
+    for (const auto &flag : flags)
+      if (flag != "verbose" && flag != "hot-reload" && flag != "override-run" && flag != "v" && flag != "hr")
+        file << flag << "\n";
+
+    // Save custom values
+    for (const auto &[key, value] : values)
+    {
+      if (key != "compiler" && key != "target" && key != "build-dir" && key != "flags" && key != "threads" && key != "c" && key != "t" &&
+          key != "d" && key != "f" && key != "j")
+      {
+        file << key << "=" << value << "\n";
+      }
+    }
+
+    return true;
+  }
+
+  // Command handler functions
+  void handle_config_command(const std::vector<std::string> &args, const std::string &program_name)
+  {
+    if (args.size() < 2)
+    {
+      std::cout << "Usage: " << program_name << " config [options]\n";
+      Config::get().show_help();
+      return;
+    }
+
+    std::vector<std::string> config_args(args.begin() + 1, args.end());
+    Config::get().parse_args(config_args);
+    Config::get().save_to_file();
+
+    std::cout << "Configuration saved\n";
+  }
+
+  void handle_args(int argc, char *argv[])
+  {
+    std::vector<std::string> args;
+    Config::get().cmd_args.clear();
+
+    for (int i = 0; i < argc; ++i)
+    {
+      args.push_back(argv[i]);
+      Config::get().cmd_args.push_back(argv[i]);
+    }
+
+    if (args.size() <= 1)
+      return;
+
+    std::string command = args[1];
+    if (command == "config")
+      handle_config_command(args, argv[0]);
+    // Users can handle other commands themselves
+  }
+
+}  // namespace bld
+
 bool bld::args_to_vec(int argc, char *argv[], std::vector<std::string> &args)
 {
   if (argc < 1)
@@ -2111,170 +2561,6 @@ bool bld::args_to_vec(int argc, char *argv[], std::vector<std::string> &args)
 
   args.reserve(argc - 1);
   for (int i = 1; i < argc; i++) args.push_back(argv[i]);
-
-  return true;
-}
-
-bld::Config::Config() : hot_reload_files(), cmd_args()
-{
-  hot_reload = false;
-  extra_args = false;
-  verbose = false;
-  override_run = false;
-  use_extra_config_keys = false;
-  threads = 1;
-  compiler = "";
-  target_executable = "";
-  target_platform = "";
-  build_dir = "build";
-  compiler_flags = "";
-  linker_flags = "";
-  pre_build_command = "";
-  post_build_command = "";
-
-  init();
-  // Automatically load configuration if the file exists
-  if (std::filesystem::exists(BLD_DEFAULT_CONFIG_FILE))
-    load_from_file(BLD_DEFAULT_CONFIG_FILE);
-}
-
-bld::Config &bld::Config::get()
-{
-#ifdef BLD_USE_CONFIG
-  static Config instance;
-  return instance;
-#else
-  bld::internal_log(bld::Log_type::ERR, "Config is disabled. Please enable BLD_USE_CONFIG macro to use the Config class.");
-  exit(1);
-#endif  // BLD_USE_CONFIG
-}
-
-void bld::Config::init()
-{
-#ifdef _WIN32
-  target_platform = "win32";
-#elif defined(__APPLE__)
-  target_platform = "darwin";
-#elif defined(__linux__)
-  target_platform = "linux";
-#else
-  target_platform = "unknown";
-#endif
-
-#ifdef __clang__
-  compiler = "clang++";
-#elif defined(__GNUC__)
-  compiler = "g++";
-#elif defined(_MSC_VER)
-  compiler = "cl";
-#else
-  compiler = "g++";
-#endif
-}
-
-bool bld::Config::load_from_file(const std::string &filename)
-{
-  if (!std::filesystem::exists(filename))
-  {
-    bld::internal_log(bld::Log_type::WARNING, "Config file not found: " + filename);
-    return false;
-  }
-
-  std::ifstream file(filename);
-  if (!file.is_open())
-  {
-    bld::internal_log(bld::Log_type::ERR, "Failed to open config file: " + filename);
-    return false;
-  }
-
-  std::string line;
-  while (std::getline(file, line))
-  {
-    if (line.empty() || line[0] == '#')
-      continue;
-
-    std::stringstream ss(line);
-    std::string key, value;
-    std::getline(ss, key, '=');
-    std::getline(ss, value);
-
-    if (key == "hot_reload")
-      hot_reload = (value == "true");
-    else if (key == "compiler")
-      compiler = value;
-    else if (key == "target")
-      target_executable = value;
-    else if (key == "platform")
-      target_platform = value;
-    else if (key == "build_dir")
-      build_dir = value;
-    else if (key == "compiler_flags")
-      compiler_flags = value;
-    else if (key == "linker_flags")
-      linker_flags = value;
-    else if (key == "verbose")
-      verbose = (value == "true");
-    else if (key == "pre_build_command")
-      pre_build_command = value;
-    else if (key == "post_build_command")
-      post_build_command = value;
-    else if (key == "override_run")
-      override_run = (value == "true");
-    else if (key == "hot_reload_files")
-    {
-      hot_reload_files.clear();
-      std::stringstream fs(value);
-      std::string file;
-      while (std::getline(fs, file, ',')) hot_reload_files.push_back(file);
-    }
-    else
-    {
-      bld::internal_log(bld::Log_type::WARNING, "Unknown key in config file: " + key);
-    }
-  }
-  return true;
-}
-
-bool bld::Config::save_to_file(const std::string &filename)
-{
-  std::ofstream file(filename);
-  if (!file.is_open())
-    return false;
-
-  if (hot_reload)
-    file << "hot_reload=true\n";
-  if (!compiler.empty())
-    file << "compiler=" << compiler << "\n";
-  if (!target_executable.empty())
-    file << "target=" << target_executable << "\n";
-  if (!target_platform.empty())
-    file << "platform=" << target_platform << "\n";
-  if (!build_dir.empty())
-    file << "build_dir=" << build_dir << "\n";
-  if (!compiler_flags.empty())
-    file << "compiler_flags=" << compiler_flags << "\n";
-  if (!linker_flags.empty())
-    file << "linker_flags=" << linker_flags << "\n";
-  if (verbose)
-    file << "verbose=true\n";
-  if (!pre_build_command.empty())
-    file << "pre_build_command=" << pre_build_command << "\n";
-  if (!post_build_command.empty())
-    file << "post_build_command=" << post_build_command << "\n";
-  if (override_run)
-    file << "override_run=true\n";
-
-  if (!hot_reload_files.empty())
-  {
-    file << "files=";
-    for (size_t i = 0; i < hot_reload_files.size(); ++i)
-    {
-      file << hot_reload_files[i];
-      if (i < hot_reload_files.size() - 1)
-        file << ",";
-    }
-    file << "\n";
-  }
 
   return true;
 }
@@ -2295,14 +2581,14 @@ int bld::handle_run_command(std::vector<std::string> args)
     bld::log(bld::Log_type::INFO, "Usage: run <executable>");
     exit(EXIT_FAILURE);
   }
-  if (bld::Config::get().target_executable.empty())
+  if (bld::Config::get().target.empty())
   {
     bld::log(bld::Log_type::ERR, "No target executable specified in config");
     exit(1);
   }
 
   bld::Command cmd;
-  cmd.parts.push_back(Config::get().target_executable);
+  cmd.parts.push_back(Config::get().target);
 
   bld::execute(cmd);
   exit(EXIT_SUCCESS);
@@ -2338,182 +2624,6 @@ bool bld::starts_with(const std::string &str, const std::string &prefix)
   return str.compare(0, prefix.size(), prefix) == 0;
 }
 
-void bld::handle_config_command(std::vector<std::string> args, std::string name)
-{
-  if (args.size() < 2)
-  {
-    internal_log(bld::Log_type::ERR, "Config command requires arguments");
-    std::string usage = name + " config -[key]=value \n" + "        E.g: ' " + name + " config -verbose=true '";
-    internal_log(bld::Log_type::INFO, "Usage: " + usage);
-    return;
-  }
-
-  auto &config = bld::Config::get();
-
-  for (size_t i = 1; i < args.size(); i++)
-  {
-    const auto &arg = args[i];
-    if (bld::starts_with(arg, "-hreload="))
-      config.hot_reload = (arg.substr(9) == "true");
-    else if (bld::starts_with(arg, "-hreload"))
-      config.hot_reload = true;
-    else if (bld::starts_with(arg, "-threads="))
-    {
-      std::string number = arg.substr(9);
-      if (number.empty())
-      {
-        bld::internal_log(bld::Log_type::WARNING, "No value provided for threads. Setting 1.");
-        config.threads = 1;
-        continue;
-      }
-      else if (number.find_first_not_of("0123456789") != std::string::npos)
-      {
-        bld::internal_log(bld::Log_type::ERR, "Invalid value for threads: " + number);
-        continue;
-      }
-      config.threads = std::stoi(number);
-    }
-    else if (bld::starts_with(arg, "-j="))
-    {
-      std::string number = arg.substr(3);
-      if (number.empty())
-      {
-        bld::internal_log(bld::Log_type::WARNING, "No value provided for threads. Setting 1.");
-        config.threads = 1;
-        continue;
-      }
-      else if (number.find_first_not_of("0123456789") != std::string::npos)
-      {
-        bld::internal_log(bld::Log_type::ERR, "Invalid value for threads: " + number);
-        continue;
-      }
-      config.threads = std::stoi(number);
-    }
-    else if (bld::starts_with(arg, "-compiler="))
-      config.compiler = arg.substr(10);
-    else if (bld::starts_with(arg, "-target="))
-      config.target_executable = arg.substr(8);
-    else if (bld::starts_with(arg, "-build_dir="))
-      config.build_dir = arg.substr(11);
-    else if (bld::starts_with(arg, "-compiler_flags="))
-      config.compiler_flags = arg.substr(16);
-    else if (bld::starts_with(arg, "-linker_flags="))
-      config.linker_flags = arg.substr(14);
-    else if (bld::starts_with(arg, "-verbose="))
-      config.verbose = (arg.substr(9) == "true");
-    else if (bld::starts_with(arg, "-v") && arg.size() == 2)
-      config.verbose = true;
-    else if (bld::starts_with(arg, "-pre_build_command="))
-      config.pre_build_command = arg.substr(19);
-    else if (bld::starts_with(arg, "-post_build_command="))
-      config.post_build_command = arg.substr(20);
-    else if (bld::starts_with(arg, "-override_run="))
-      config.override_run = (arg.substr(14) == "true");
-    else if (bld::starts_with(arg, "-hr_files="))
-    {
-      config.hot_reload_files.clear();
-      std::stringstream fs(arg.substr(7));
-      std::string file;
-      while (std::getline(fs, file, ',')) config.hot_reload_files.push_back(file);
-    }
-    else if (bld::starts_with(arg, "-hr_files_app="))
-    {
-      std::stringstream fs(arg.substr(7));
-      std::string file;
-      while (std::getline(fs, file, ','))
-        if (std::find(config.hot_reload_files.begin(), config.hot_reload_files.end(), file) == config.hot_reload_files.end())
-          config.hot_reload_files.push_back(file);
-        else
-          bld::internal_log(bld::Log_type::WARNING, "File already exists in hot reload list: " + file);
-    }
-    else if (bld::starts_with(arg, "-hr_files_rem="))
-    {
-      std::stringstream fs(arg.substr(7));
-      std::string file;
-      while (std::getline(fs, file, ','))
-      {
-        auto it = std::find(config.hot_reload_files.begin(), config.hot_reload_files.end(), file);
-        if (it != config.hot_reload_files.end())
-          config.hot_reload_files.erase(it);
-        else
-          bld::internal_log(bld::Log_type::WARNING, "File not found in hot reload list: " + file);
-      }
-    }
-    else if (bld::starts_with(arg, "-") && config.use_extra_config_keys)
-    {
-      std::string key = arg.substr(1, arg.find('=') - 1);
-      std::string value = arg.substr(arg.find('=') + 1);
-      if (key.empty())
-      {
-        bld::internal_log(bld::Log_type::WARNING, "Key not provided: " + arg + ". No value will be set!");
-        continue;
-      }
-      else if (value.empty())
-      {
-        bld::internal_log(bld::Log_type::WARNING, "Value not provided: " + arg + ". No value will be set!");
-        continue;
-      }
-      else if (value == "true" || value == "false")
-      {
-        if (config.extra_config_bool.find(key) != config.extra_config_bool.end())
-          config.extra_config_bool[key] = (value == "true");
-        else
-          bld::internal_log(bld::Log_type::WARNING, "Unknown key: " + key + ". No value will be set.");
-        continue;
-      }
-      else
-      {
-        if (config.extra_config_val.find(key) != config.extra_config_val.end())
-          config.extra_config_val[key] = value;
-        else
-          bld::internal_log(bld::Log_type::WARNING, "Unknown key: " + key + ". No value will be set.");
-        continue;
-      }
-    }
-    else
-    {
-      bld::internal_log(bld::Log_type::ERR, "Unknown argument for config: ' " + arg + " '. Remember to use the format '-key=value'");
-      bld::internal_log(bld::Log_type::INFO,
-               "If ' " + arg + " ' this is a valid key for config, consider configuring Config before 'BLD_HANDLE_ARGS' macro.");
-    }
-  }
-
-  // Save the updated configuration to file
-  config.save_to_file(BLD_DEFAULT_CONFIG_FILE);
-  bld::internal_log(bld::Log_type::INFO, "Configuration saved to: " + std::string(BLD_DEFAULT_CONFIG_FILE));
-}
-
-void bld::handle_args(int argc, char *argv[])
-{
-  std::vector<std::string> args;
-  if (bld::args_to_vec(argc, argv, args))
-  {
-    bld::Config::get().cmd_args = args;
-    if (args.size() <= 0)
-      return;
-    else
-    {
-      std::string command = args[0];
-      if (command == "run")
-      {
-      #ifdef BLD_USE_CONFIG
-        if (!bld::Config::get().override_run)
-          bld::handle_run_command(args);
-      #else
-        bld::handle_run_command(args);
-      #endif
-      }
-      else if (command == "config")
-      {
-      #ifdef BLD_USE_CONFIG
-        bld::handle_config_command(args, argv[0]);
-      #else
-        bld::internal_log(bld::Log_type::ERR, "Config is disabled. Please enable BLD_USE_CONFIG macro to use the Config class.");
-      #endif  // BLD_USE_CONFIG
-      }
-    }
-  }
-}
 
 bool bld::fs::read_file(const std::string &path, std::string &content)
 {

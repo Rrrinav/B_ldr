@@ -300,12 +300,12 @@ int main(int argc, char *argv[])
 
   std::cout << std::endl << std::endl;
   int passed = TOTAL_TESTS - TEST_FAILED;
+  for (auto t : tests) t.print();
   std::cout << "----------------------------------------------------------" << std::endl;
   bld::log(bld::Log_type::INFO, "Total tests:  " + std::to_string(TOTAL_TESTS));
   bld::log(bld::Log_type::INFO, "Tests passed: " + std::to_string(passed));
   bld::log(bld::Log_type::INFO, "Tests failed: " + std::to_string(TEST_FAILED));
   std::cout << "----------------------------------------------------------\n" << std::endl;
-  for (auto t : tests) t.print();
 
   return 0;
 }
