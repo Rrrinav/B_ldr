@@ -91,15 +91,6 @@
  */
 #define BLD_DEFAULT_CONFIG_FILE "build.conf"
 
-/*
- * INFO:The BLD_USE_CONFIG macro is used to enable or disable the configuration system in your build tool. When BLD_USE_CONFIG is defined, the Config class and its related
- * functionality are included in the program because you can't access singleton using Config::get().
- * When BLD_USE_CONFIG is not defined, the configuration system is disabled, and the program operates without it.
- * You can define your own configuration system or use the Config class directly.
- *
- * I dont know why I didn't wrap whole class in the macro. Probably because I want to extend it later to not just be a singleton.
- */
-
 namespace bld
 {
   // Log type is enumeration for bld::function to show type of loc>
@@ -112,7 +103,8 @@ namespace bld
     using pid = pid_t;
   #endif
   // Abstraction for process for cross platform API.
-    enum class State {
+    enum class State
+    {
       INIT_ERROR,  // Failed to start
       RUNNING,     // Currently executing
       EXITED,      // Exited normally
@@ -123,16 +115,16 @@ namespace bld
     // Single process handle
     struct Proc
     {
-      bool ok = false;
-      pid p_id = 0;
-      State state = State::INIT_ERROR;
+      bool ok       = false;
+      pid p_id      = 0;
+      State state   = State::INIT_ERROR;
       int exit_code = 0;
 
     #ifndef _WIN32
       int signal = 0;
     #else
       HANDLE process_handle = nullptr;
-      HANDLE thread_handle = nullptr;
+      HANDLE thread_handle  = nullptr;
     #endif
 
       // Constructors
@@ -229,6 +221,14 @@ namespace bld
 
     Redirect() = default;
     Redirect(Fd in, Fd out, Fd err) : stdin_fd(in), stdout_fd(out), stderr_fd(err) {}
+    Redirect(const std::string& in = "", const std::string& out = "", const std::string& err = "");
+    Redirect(const Redirect&) = delete;
+    Redirect& operator=(const Redirect&) = delete;
+
+    static Redirect in(const std::string &_path)  { return Redirect(_path, "", ""); }
+    static Redirect out(const std::string &_path) { return Redirect("", _path, ""); }
+    static Redirect err(const std::string &_path) { return Redirect("", "", _path); }
+    ~Redirect();
   };
 
   // Logging function used by library
@@ -241,32 +241,20 @@ namespace bld
   struct Command
   {
     std::vector<std::string> parts;  // > parts of the command
-    Command() : parts{} {}
 
+    Command() : parts{} {}
     // @tparam args ( variadic template ): Command parts
     template <typename... Args>
     Command(Args... args);
-
-    // @tparam args ( variadic template ): Command parts
     template <typename... Args>
     void add_parts(Args... args);
-
-    /* @return ( std::string ): Get the full command as a single string
-     * @description: Get the full command as a single string
-     */
+    // Get the full command as a single string
     std::string get_command_string() const;
-
-    /* @return ( std::vector<char *> ): Get the full command but as C-style arguments for `execvp`
-     * @description: Get the full command as a C-style arguments for sys calls
-     */
+    // Get the full command as a C-style arguments for sys calls
     std::vector<char *> to_exec_args() const;
-
-    // @return ( bool ): Check if the command is empty
     bool is_empty() const { return parts.empty(); }
-
-    // @return ( std::string ): Get the command as a printable string wrapped in single quotes
+    // Get the command as a printable string wrapped in single quotes
     std::string get_print_string() const;
-
     void clear() { parts.clear(); }
   };
 
@@ -1475,14 +1463,37 @@ bld::Fd bld::open_for_write(const std::string &path, bool append)
 #endif
 }
 
+bld::Redirect::Redirect(const std::string& _in, const std::string& _out, const std::string& _err)
+{
+  if (_in.empty())
+    this->stdin_fd = bld::INVALID_FD;
+  else
+    this->stdin_fd = bld::open_for_read(_in);
+  if (_out.empty())
+    this->stdout_fd = bld::INVALID_FD;
+  else
+    this->stdout_fd = bld::open_for_write(_out);
+  if (_err.empty())
+    this->stderr_fd = bld::INVALID_FD;
+  else
+    this->stderr_fd = bld::open_for_write(_err);
+}
+
+bld::Redirect::~Redirect()
+{
+  if (this->stdin_fd  != bld::INVALID_FD) bld::close_fd(stdin_fd);
+  if (this->stdout_fd != bld::INVALID_FD) bld::close_fd(stdout_fd);
+  if (this->stderr_fd != bld::INVALID_FD) bld::close_fd(stderr_fd);
+}
+
 template <typename... Fds, typename>
 void bld::close_fd(Fds ...fds)
 {
   (..., (
   [&]
   {
-    if (fds == INVALID_FD)
-      return;
+    if (fds == INVALID_FD) return;
+
     #ifdef _WIN32
       CloseHandle((HANDLE)fds);
     #else

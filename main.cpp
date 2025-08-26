@@ -1,40 +1,32 @@
 #include <unistd.h>
 #include <chrono>
-#include <condition_variable>
 #include <string>
 #define B_LDR_IMPLEMENTATION
 #define BLD_USE_CONFIG
 #include "./b_ldr.hpp"
 
+auto &cfg = bld::Config::get();
+
 int main(int argc, char *argv[])
 {
   BLD_REBUILD_YOURSELF_ONCHANGE();
-  auto &config = bld::Config::get();
-  config.add_flag("test", "Build and run tests instead of main project");
   BLD_HANDLE_ARGS();
 
-  if (config["help"] || config["h"])
-  {
-    config.show_help();
-    return 0;
-  }
-
-  if (config["test"])
+  if (cfg["test"])
   {
     bld::log(bld::Log_type::INFO, "Building and running tests...");
 
-    std::string test_target = config["test"];
-    auto files = bld::fs::get_all_files_with_name("./tests/", "main.cpp", true);
+    std::string test_target = cfg["test"];
+    auto files = bld::fs::get_all_files_with_name(test_target, "main.cpp", true);
+
     std::string target = "test";
+
     auto run = [&] (std::string f) -> void {
-      if (!bld::execute({config.compiler, "-o", target, f}))
-      {
+      if (!bld::execute({cfg.compiler, "-o", target, f}))
         bld::log(bld::Log_type::ERR,"Execution failed!");
-      }
       if (!bld::execute({"./" + target}))
-      {
         bld::log(bld::Log_type::ERR,"Execution failed!");
-      }
+
       bld::fs::remove(target);
     };
 
@@ -49,19 +41,19 @@ int main(int argc, char *argv[])
     return 0;
   }
 
-  bld::time::stamp start;
   bld::Dep_graph graph{};
 
   bld::Command main_cmd = {"g++", "main2.cpp", "-o", "main2", "foo.o", "bar.o"};
-  bld::Command foo_cmd = {"g++", "-c", "foo.cpp", "-o", "foo.o"};
-  bld::Command bar_cmd = {"g++", "-c", "bar.cpp", "-o", "bar.o"};
+  bld::Command foo_cmd  = {"g++", "-c", "foo.cpp", "-o", "foo.o"};
+  bld::Command bar_cmd  = {"g++", "-c", "bar.cpp", "-o", "bar.o"};
 
   // Add dependencies to graph
-  graph.add_dep({"./" "main", {"./main2.cpp", "./foo.o", "./bar.o"}, main_cmd});
+  graph.add_dep({"./main", {"./main2.cpp", "./foo.o", "./bar.o"}, main_cmd});
 
   graph.add_dep({"./foo.o", {"./foo.cpp"}, foo_cmd});
   graph.add_dep({"./bar.o", {"./bar.cpp"}, bar_cmd});
 
+  bld::time::stamp start;
   // Build with specified number of parallel jobs
   if (!graph.build_parallel("./main2"))
   {

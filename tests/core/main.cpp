@@ -60,30 +60,33 @@ int main() {
   return 0;
 })";
 
-const int TOTAL_TESTS = 12;
+const int TOTAL_TESTS = 13;
 int TEST_FAILED = 0;
 std::array<Test, TOTAL_TESTS> tests{};
 int id = 1;
+int ind = 0;
 bld::Command cmd = {"g++", "-o", "test", "./test1.cpp"};
 
 void test_execute()
 {
-  tests[0] = {0, id++, "Basic execute no file."};
+  int x = ind++;
+  tests[x] = {0, id++, "Basic execute no file."};
   auto e = bld::execute(cmd);
 
   if (e.exit_code == 1)
-    tests[0].pass = 1;
+    tests[x].pass = 1;
   else
     TEST_FAILED++;
 
   bld::fs::write_entire_file("./test1.cpp", code);
-
-  tests[1] = {0, id++, "Basic execute."};
+  
+  x = ind++;
+  tests[x] = {0, id++, "Basic execute."};
 
   e = bld::execute(cmd);
 
   if (e.exit_code == 0 && e.normal)
-    tests[1].pass = 1;
+    tests[x].pass = 1;
   else
     TEST_FAILED++;
 
@@ -94,7 +97,8 @@ void test_async()
 {
   bld::fs::write_entire_file("./test1.cpp", code_signal);
 
-  tests[2] = {0, id++, "Signal execute async and wait_proc."};
+  int x = ind++;
+  tests[x] = {0, id++, "Signal execute async and wait_proc."};
 
   auto p = bld::execute_async(cmd);
   kill(p.p_id, 6);
@@ -102,7 +106,7 @@ void test_async()
   auto e = bld::wait_proc(p);
 
   if (e.signal == 6 && !e.normal)
-    tests[2].pass = 1;
+    tests[x].pass = 1;
   else
     TEST_FAILED++;
 
@@ -111,7 +115,8 @@ void test_async()
 
 void test_redirect()
 {
-  tests[3] = {0, id++, "execute redirect single."};
+  int x = ind++;
+  tests[x] = {0, id++, "execute redirect single."};
   bld::fs::write_entire_file("./test1.cpp", code);
   if (bld::execute(cmd))
   {
@@ -123,14 +128,29 @@ void test_redirect()
     if (bld::fs::read_file("./output", s))
     {
       if ("Test" == s)
-        tests[3].pass = 1;
+        tests[x].pass = 1;
+      else
+        TEST_FAILED++;
+    }
+    bld::fs::remove("./output");
+    x = ind++;
+    tests[x] = { 0, id++, "Execute redirect using string constructor"};
+    bld::execute_redirect({"./test"}, bld::Redirect("", "./output", ""));
+    bld::close_fd(fd);
+    s = "";
+    if (bld::fs::read_file("./output", s))
+    {
+      std::cout << s;
+      if ("Test" == s)
+        tests[x].pass = 1;
       else
         TEST_FAILED++;
     }
     bld::fs::remove("./output", "./test1", "test");
   }
 
-  tests[4] = {0, id++, "execute async redirect multiple."};
+  x = ind++;
+  tests[x] = {0, id++, "execute async redirect multiple."};
 
   bld::fs::write_entire_file("./test1.cpp", code_io);
   if (bld::execute(cmd))
@@ -148,7 +168,7 @@ void test_redirect()
     if (bld::fs::read_file("./output", o) && bld::fs::read_file("./input", i) && bld::fs::read_file("./error", e))
     {
       if (o == s && i == s && e == "Test err")
-        tests[4].pass = 1;
+        tests[x].pass = 1;
       else
         TEST_FAILED++;
     }
@@ -158,8 +178,9 @@ void test_redirect()
 
 void test_wait_and_cleanup()
 {
+  int x = ind++;
   bld::fs::write_entire_file("./test1.cpp", code_signal);
-  tests[5] = {0, id++, "wait_proc + cleanup_process + try_wait_nb"};
+  tests[x] = {0, id++, "wait_proc + cleanup_process + try_wait_nb"};
 
   auto proc = bld::execute_async(cmd);
 
@@ -175,7 +196,7 @@ void test_wait_and_cleanup()
       bld::cleanup_process(proc);
       if (proc.p_id == -1)
       {
-        tests[5].pass = 1;
+        tests[x].pass = 1;
         return;
       }
     }
@@ -188,7 +209,8 @@ void test_wait_procs()
 {
   bld::fs::write_entire_file("./test1.cpp", code_sleep);
 
-  tests[6] = {0, id++, "wait_procs multiple processes"};
+  int x = ind++;
+  tests[x] = {0, id++, "wait_procs multiple processes"};
 
   std::vector<bld::Proc> procs;
   for (int i = 0; i < 3; i++) procs.push_back(bld::execute_async(cmd));
@@ -196,7 +218,7 @@ void test_wait_procs()
   auto res = bld::wait_procs(procs, 20);
 
   if (res.completed == 3 && res.failed_indices.empty())
-    tests[6].pass = 1;
+    tests[x].pass = 1;
   else
     TEST_FAILED++;
 
@@ -205,7 +227,8 @@ void test_wait_procs()
 
 void test_async_redirect()
 {
-  tests[7] = {0, id++, "execute_async_redirect"};
+  int x = ind++;
+  tests[x] = {0, id++, "execute_async_redirect"};
 
   bld::fs::write_entire_file("./test1.cpp", code_io);
   if (bld::execute(cmd))
@@ -225,7 +248,7 @@ void test_async_redirect()
     bld::fs::read_file("./error", e);
 
     if (st && o == "Hello" && e == "Test err")
-      tests[7].pass = 1;
+      tests[x].pass = 1;
     else
       TEST_FAILED++;
     bld::fs::remove("./input", "./output", "./error", "./test1.cpp", "test");
@@ -234,7 +257,8 @@ void test_async_redirect()
 
 void test_execute_threads()
 {
-  tests[8] = {0, id++, "execute_threads"};
+  int x = ind++;
+  tests[x] = {0, id++, "execute_threads"};
 
   bld::fs::write_entire_file("./test1.cpp", code);
 
@@ -242,7 +266,7 @@ void test_execute_threads()
   auto res = bld::execute_threads(cmds, 2);
 
   if (res.completed == cmds.size() && res.failed_indices.empty())
-    tests[8].pass = 1;
+    tests[x].pass = 1;
   else
     TEST_FAILED++;
 
@@ -251,11 +275,12 @@ void test_execute_threads()
 
 void test_shell()
 {
-  tests[9] = {0, id++, "execute_shell"};
+  int x = ind++;
+  tests[x] = {0, id++, "execute_shell"};
   int res = bld::execute_shell("echo HelloShell > shellout.txt");
   std::string s;
   if (res == 0 && bld::fs::read_file("shellout.txt", s) && s.find("HelloShell") != std::string::npos)
-    tests[9].pass = 1;
+    tests[x].pass = 1;
   else
     TEST_FAILED++;
   bld::fs::remove("shellout.txt");
@@ -263,22 +288,24 @@ void test_shell()
 
 void test_read_output()
 {
-  tests[10] = {0, id++, "read_process_output"};
+  int x = ind++;
+  tests[x] = {0, id++, "read_process_output"};
   bld::fs::write_entire_file("./test1.cpp", code);
   if (bld::execute(cmd))
   {
     std::string out;
     if (bld::read_process_output({"./test"}, out) && out == "Test")
-      tests[10].pass = 1;
+      tests[x].pass = 1;
     else
       TEST_FAILED++;
   }
   bld::fs::remove("./test1.cpp", "test");
 
-  tests[11] = {0, id++, "read_shell_output"};
+  x = ind++;
+  tests[x] = {0, id++, "read_shell_output"};
   std::string out;
   if (bld::read_shell_output("echo HelloWorld", out) && out.find("HelloWorld") != std::string::npos)
-    tests[11].pass = 1;
+    tests[x].pass = 1;
   else
     TEST_FAILED++;
 }
