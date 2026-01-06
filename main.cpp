@@ -14,7 +14,7 @@ int main(int argc, char *argv[])
 
   bld::fs::walk_directory(".", [](bld::fs::Walk_fn_opt& opt) -> bool {
     if (bld::starts_with(opt.path.string(),"./.git")) opt.action = bld::fs::Walk_act::Ignore;
-    if (opt.path.string() == "build.conf") opt.action = bld::fs::Walk_act::Stop;
+    if (opt.path.string() == "./build.conf") opt.action = bld::fs::Walk_act::Stop;
     std::cout << opt.path.string() << std::endl;
     return true; // required
   });
