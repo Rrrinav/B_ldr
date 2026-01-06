@@ -12,6 +12,13 @@ int main(int argc, char *argv[])
   BLD_REBUILD_YOURSELF_ONCHANGE();
   BLD_HANDLE_ARGS();
 
+  bld::fs::walk_directory(".", [](bld::fs::Walk_fn_opt& opt) -> bool {
+    if (bld::starts_with(opt.path.string(),"./.git")) opt.action = bld::fs::Walk_act::Ignore;
+    if (opt.path.string() == "build.conf") opt.action = bld::fs::Walk_act::Stop;
+    std::cout << opt.path.string() << std::endl;
+    return true; // required
+  });
+
   if (cfg["test"])
   {
     bld::log(bld::Log_type::INFO, "Building and running tests...");

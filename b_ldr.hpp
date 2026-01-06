@@ -36,6 +36,7 @@
 
 #pragma once
 
+#include <limits>
 #ifdef _WIN32
   #define WIN32_LEAN_AND_MEAN
   #define _WINUSER_
@@ -64,6 +65,7 @@
 #include <unordered_map>
 #include <unordered_set>
 #include <vector>
+#include <filesystem>
 
 /* @brief: Rebuild the build executable if the source file is newer than the executable and run it
  * @description: Takes no parameters and calls bld::rebuild_yourself_onchange_and_run() with the current file and executable.
@@ -725,7 +727,22 @@ namespace bld
                                                            bool recursive = false, bool case_insensitive = false);
 
     std::vector<std::string> get_all_files_with_name(const std::string &dir, const std::string &name, bool recursive = false);
-  }  // namespace fs
+
+    enum class Walk_act : uint8_t { Continue, Ignore, Stop };
+    enum class Path_type { File, Directory, Symlink, Other };
+    struct Walk_fn_opt
+    {
+      std::filesystem::path path;
+      Path_type type;
+      std::size_t level{0};
+      Walk_act action = Walk_act::Continue;
+      void * args;
+    };
+    using Walk_func = bool(*)(Walk_fn_opt& opt);
+    inline bool walk_directory(const std::string & path, Walk_func cb, std::size_t depth = std::numeric_limits<std::size_t>::max());
+    inline bool walk_directory(const std::string & path, Walk_func cb, void* arg);
+    inline bool walk_directory(const std::string & path, Walk_func cb, std::size_t depth, void * arg);
+    }  // namespace fs
 
   namespace env
   {
@@ -3108,6 +3125,66 @@ std::vector<std::string> bld::fs::get_all_files_with_extensions(const std::strin
 
   return matching_files;
 }
+
+
+inline bld::fs::Path_type classify(const std::filesystem::directory_entry& e)
+{
+    if (e.is_directory()) return bld::fs::Path_type::Directory;
+    if (e.is_regular_file()) return bld::fs::Path_type::File;
+    if (e.is_symlink()) return bld::fs::Path_type::Symlink;
+    return bld::fs::Path_type::Other;
+}
+
+
+inline bool walk_directory_impl(const std::string &root, bld::fs::Walk_func cb, std::size_t max_depth, void *arg)
+{
+  namespace fs = std::filesystem;
+  std::error_code ec;
+  fs::recursive_directory_iterator it(root, ec), end;
+
+  if (ec)
+    return false;
+
+  while (it != end)
+  {
+    const std::size_t level = it.depth();
+
+    if (level > max_depth)
+    {
+      it.disable_recursion_pending();
+      ++it;
+      continue;
+    }
+
+    bld::fs::Walk_fn_opt opt{
+      .path = it->path(),
+      .type = classify(*it),
+      .level = level,
+      .action = bld::fs::Walk_act::Continue,
+      .args = arg
+    };
+
+    // Callback failure propagates
+    if (!cb(opt))
+      return false;
+
+    // Normal early stop (SUCCESS)
+    if (opt.action == bld::fs::Walk_act::Stop)
+      return true;
+
+    // Skip recursion if requested
+    if (opt.action == bld::fs::Walk_act::Ignore && it->is_directory())
+      it.disable_recursion_pending();
+
+    ++it;
+  }
+
+  return true;  // normal completion
+}
+
+inline bool bld::fs::walk_directory( const std::string& path, bld::fs::Walk_func cb, std::size_t depth) { return walk_directory_impl(path, cb, depth, nullptr); }
+inline bool bld::fs::walk_directory( const std::string& path, bld::fs::Walk_func cb, void* arg) { return walk_directory_impl( path, cb, std::numeric_limits<std::size_t>::max(), arg); }
+inline bool bld::fs::walk_directory( const std::string& path, bld::fs::Walk_func cb, std::size_t depth, void* arg) { return walk_directory_impl(path, cb, depth, arg); }
 
 std::string bld::env::get(const std::string &key)
 {
