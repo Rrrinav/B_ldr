@@ -1531,7 +1531,10 @@ bld::Proc bld::execute_async(const Command &command)
     return proc;
   }
 
-  return Proc(pi.hProcess, pi.hThread, pi.dwProcessId);
+  Proc prc(pi.hProcess, pi.hThread, pi.dwProcessId);
+  prc.label = command.get_command_string();
+
+  return prc;
 
 #else
   auto args = command.to_exec_args();
@@ -1556,7 +1559,10 @@ bld::Proc bld::execute_async(const Command &command)
     std::exit(EXIT_FAILURE);
   }
 
-  return Proc(pid);
+  Proc proc(pid);
+  proc.label = command.get_command_string();
+
+  return proc;
 #endif
 }
 
@@ -1604,7 +1610,9 @@ bld::Proc bld::execute_async_redirect(const Command &command, const Redirect &re
   }
 
   CloseHandle(pi.hThread);  // We don't need the thread handle
-  return Proc(pi.hProcess, nullptr, pi.dwProcessId);
+  Proc proc(pi.hProcess, nullptr, pi.dwProcessId);
+  proc.label = command.get_command_string();
+  return proc;
 
 #else
   auto args = command.to_exec_args();
@@ -1671,7 +1679,9 @@ bld::Proc bld::execute_async_redirect(const Command &command, const Redirect &re
   if (redirect.stderr_fd != INVALID_FD)
     close(redirect.stderr_fd);
 
-  return Proc(pid);
+  Proc proc(pid);
+  proc.label = command.get_command_string();
+  return proc;
 #endif
 }
 
