@@ -456,7 +456,7 @@ namespace bld
    * @param sleep_ms (int): Time to sleep to avoid busy looping.
    * @return Exec_par_result: process ids that failed
    */
-  Par_exec_res wait_procs(std::vector<bld::Proc> procs, bool show_progress);
+  Par_exec_res wait_procs(std::vector<bld::Proc> procs, bool show_progress = true);
 
   /* @brief: Execute the command
    * @param command ( Command ): Command to execute, must be a valid process command and not shell command
