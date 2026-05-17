@@ -30,9 +30,9 @@ int main(int argc, char *argv[])
 
     auto run = [&] (std::string f) -> void {
       if (!bld::execute({cfg.compiler, "-o", target, f}))
-        bld::log(bld::Log_type::ERR,"Execution failed!");
+        bld::logger::e("Execution failed!");
       if (!bld::execute({"./" + target}))
-        bld::log(bld::Log_type::ERR,"Execution failed!");
+        bld::logger::e("Execution failed!");
 
       bld::fs::remove(target);
     };
@@ -43,7 +43,7 @@ int main(int argc, char *argv[])
       s.reset();
       run(f);
       auto elapsed = bld::time::since<double, std::chrono::microseconds>(s);
-      bld::log(bld::Log_type::INFO, "Test time: " + std::to_string(elapsed) + " microseconds");
+      bld::logger::i("Test time: {}microseconds", elapsed);
     }
     return 0;
   }
@@ -69,8 +69,8 @@ int main(int argc, char *argv[])
   }
 
   auto elapsed = bld::time::since<double, std::chrono::microseconds>(start);
-  bld::log(bld::Log_type::INFO, "Build time: " + std::to_string(elapsed) + " microseconds");
-  bld::log(bld::Log_type::INFO, "Build completed successfully!");
+  bld::logger::i("Build time: {}ms", elapsed);
+  bld::logger::i("Build completed successfully!");
 
   return 0;
 }
