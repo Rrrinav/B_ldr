@@ -30,6 +30,7 @@
 #include <cstdint>
 #include <cstdlib>
 #include <expected>
+#include <flat_map>
 #include <format>
 #include <functional>
 #include <iostream>
@@ -144,12 +145,12 @@ struct Logger
     };
 
     using Logger_fn_t = std::function<void(std::ostream &, const Log_record &)>;
+    inline static log::detail::Stream_proxy ostream;
 
     // clang-format off
     struct Default_logger_fn
     {
-        inline static Level min_lvl = Level::inf;
-        inline static log::detail::Stream_proxy ostream;
+        inline static Level min_lvl = Level::dbg;
 
         auto operator()(std::ostream &stream, const Log_record &record) const -> void
         {
@@ -214,31 +215,31 @@ inline void invoke_logger(bld::Logger::Level level, std::ostream &str, std::form
 template <typename... Args>
 void i(std::format_string<Args...> fmt, Args &&...args)
 {
-    invoke_logger(bld::Logger::Level::inf, bld::Logger::Default_logger_fn::ostream.get(), fmt, std::forward<Args>(args)...);
+    invoke_logger(bld::Logger::Level::inf, bld::Logger::ostream.get(), fmt, std::forward<Args>(args)...);
 }
 
 template <typename... Args>
 void w(std::format_string<Args...> fmt, Args &&...args)
 {
-    invoke_logger(bld::Logger::Level::wrn, bld::Logger::Default_logger_fn::ostream.get(), fmt, std::forward<Args>(args)...);
+    invoke_logger(bld::Logger::Level::wrn, bld::Logger::ostream.get(), fmt, std::forward<Args>(args)...);
 }
 
 template <typename... Args>
 void e(std::format_string<Args...> fmt, Args &&...args)
 {
-    invoke_logger(bld::Logger::Level::err, bld::Logger::Default_logger_fn::ostream.get(), fmt, std::forward<Args>(args)...);
+    invoke_logger(bld::Logger::Level::err, bld::Logger::ostream.get(), fmt, std::forward<Args>(args)...);
 }
 
 template <typename... Args>
 void d(std::format_string<Args...> fmt, Args &&...args)
 {
-    invoke_logger(bld::Logger::Level::dbg, bld::Logger::Default_logger_fn::ostream.get(), fmt, std::forward<Args>(args)...);
+    invoke_logger(bld::Logger::Level::dbg, bld::Logger::ostream.get(), fmt, std::forward<Args>(args)...);
 }
 
 template <typename... Args>
 void f(std::format_string<Args...> fmt, Args &&...args)
 {
-    invoke_logger(bld::Logger::Level::ftl, bld::Logger::Default_logger_fn::ostream.get(), fmt, std::forward<Args>(args)...);
+    invoke_logger(bld::Logger::Level::ftl, bld::Logger::ostream.get(), fmt, std::forward<Args>(args)...);
 }
 
 // explicit stream overloads
@@ -383,9 +384,9 @@ struct Proc
     };
     static inline constexpr Io_routing Default_route{STDIN_FILENO, STDOUT_FILENO, STDERR_FILENO, false};
 
-    Proc() = default;
+    explicit Proc() = default;
 
-    Proc(P_id id, const std::string &label_ = "") : id_(id)
+    explicit Proc(P_id id, const std::string &label_ = "") : id_(id)
     {
         if (label_.empty()) {
             constexpr ::std::size_t size{12};
@@ -962,22 +963,162 @@ template <typename... Configs>
 auto capture(Cmd_loc cl, Configs &&...confs) -> std::expected<bld::Proc::Status, bld::Err>
 {
     bld::validate_capture_configs<Configs...>();
+
     Capture_config cap_cfg{};
     (confs(cap_cfg), ...);
     if (cap_cfg.loc.line() == std::source_location::current().line()) {
         cap_cfg.loc = cl.loc;
     }
+
     return bld::details::capture_execute(cl.cmd, cap_cfg, cl.loc);
 }
+
+auto wait_all(std::span<bld::Proc> procs) -> std::expected<std::size_t, bld::Err>;
+
+struct Task
+{
+    bld::Cmd cmd;
+    bld::Proc_config cfg;
+
+    template <typename... Configs>
+        requires(Config_modifier_c<Configs> && ...)
+    explicit Task(Cmd_loc cl, Configs &&...confs) : cmd(cl.cmd)
+    {
+        bld::validate_run_configs<Configs...>();
+        (confs(cfg), ...);
+        cfg.loc = cl.loc;
+        cfg.async = true;
+    }
+};
+auto run(std::span<bld::Task> tasks, std::size_t max_jobs = 0) -> std::expected<void, bld::Err>;
 }; // namespace bld
 
 namespace bld {
+[[nodiscard]]
+auto is_outdated(std::string_view target, std::string_view source) -> bool;
 
+template <std::ranges::range Range>
+    requires std::convertible_to<std::ranges::range_value_t<Range>, std::string_view>
+[[nodiscard]] auto is_outdated(std::string_view target, const Range &sources) -> bool;
+
+auto get_current_cxx_compiler() -> std::string_view;
+auto rebuild_this_when_needed(int argc, char **argv, std::string_view compiler = "", std::source_location loc = std::source_location::current())
+    -> void;
+// Also considers changes in this header file.
+auto rebuild_this_when_needed_ext(int argc, char **argv, std::string_view compiler = "", std::source_location loc = std::source_location::current())
+    -> void;
 }; // namespace bld
+
+namespace bld {
+class Config
+{
+public:
+    enum val_t { Bool = 0, Int = 1, Double = 2, String = 3, String_arr = 4 };
+    using value_type = std::variant<bool, int, double, std::string, std::vector<std::string>>;
+
+    struct Option
+    {
+        val_t type;
+        std::string description;
+        value_type default_val;
+        std::vector<std::string> choices{};
+    };
+
+    std::unordered_map<std::string_view, value_type> data{};
+    std::flat_map<std::string_view, Option> options{};
+
+    static auto get() -> Config &
+    {
+        static Config instance;
+        return instance;
+    }
+
+    Config(const Config &) = delete;
+    Config &operator=(const Config &) = delete;
+    Config(Config &&) = delete;
+    Config &operator=(Config &&) = delete;
+
+    auto add_option(std::string_view flag, val_t type, std::string_view desc, value_type def = false, std::vector<std::string> valid_choices = {}) -> Config &;
+
+    struct Proxy
+    {
+        const Config *cfg;
+        std::string_view key;
+
+        operator bool() const;
+        operator std::string() const;
+        operator int() const;
+        operator double() const;
+        operator std::vector<std::string>() const;
+    };
+
+    auto operator[](std::string_view key) const -> Proxy
+    {
+        return Proxy{this, key};
+    }
+
+    auto print_help(std::string_view prog_name, std::string_view specific_opt = "") const -> void;
+
+    auto parse(int argc, char *argv[]) -> void;
+
+    template <typename T>
+    auto get_val(std::string_view key) const -> std::expected<T, bld::Err>;
+
+private:
+    Config() = default;
+};
+
+template <typename T>
+inline auto Config::get_val(std::string_view key) const -> std::expected<T, bld::Err>
+{
+    auto it = data.find(key);
+    if (it == data.end()) {
+        return std::unexpected(bld::Err::erc(std::errc::invalid_argument, std::format("Configuration key '{}' not found", key)));
+    }
+    if (auto *p = std::get_if<T>(&it->second)) {
+        return *p;
+    }
+    return std::unexpected(bld::Err::erc(std::errc::invalid_argument, std::format("Configuration key '{}' has mismatched type", key)));
+}
+
+} // namespace bld
+
+template <>
+struct std::formatter<std::unordered_map<std::string_view, bld::Config::value_type>>
+{
+    constexpr auto parse(std::format_parse_context &ctx)
+    {
+        auto it = ctx.begin();
+        return it;
+    }
+    auto format(const std::unordered_map<std::string_view, bld::Config::value_type> &m, std::format_context &ctx) const
+    {
+        auto out = ctx.out();
+        for (const auto &[k, v] : m) {
+            std::format_to(out, "{}: ", k);
+            if (auto *p = std::get_if<int>(&v); p) {
+                std::format_to(out, "(i){}", *p);
+            } else if (auto *p = std::get_if<bool>(&v); p) {
+                std::format_to(out, "(b){}", *p);
+            } else if (auto *p = std::get_if<double>(&v); p) {
+                std::format_to(out, "(d){}", *p);
+            } else if (auto *p = std::get_if<std::string>(&v); p) {
+                std::format_to(out, "(s){}", *p);
+            } else if (auto *p = std::get_if<std::vector<std::string>>(&v); p) {
+                std::format_to(out, "(s[]){}", *p);
+            } else {
+                std::format_to(out, "unknown");
+            }
+        }
+        return out;
+    }
+};
 
 #ifdef B_LDR_IMPLEMENTATION
 
+#include <cstring>
 #include <filesystem>
+#include <thread>
 
 auto bld::details::execute(const bld::Cmd &cmd, const Proc_config &cfg, std::source_location loc) -> std::expected<bld::Proc, bld::Err>
 {
@@ -1195,4 +1336,568 @@ bld::in_f::in_f(std::string_view path)
     bld::log::i("Opened in fd: {}: (file: '{}')", res->handle_, path);
     fd = std::move(*res);
 }
+
+auto bld::is_outdated(std::string_view target, std::string_view source) -> bool
+{
+    namespace fs = std::filesystem;
+    std::error_code ec;
+
+    if (!fs::exists(target, ec)) {
+        bld::log::w("Target '{}' does not exist. Rebuild required.", target);
+        return true;
+    }
+
+    auto target_time = fs::last_write_time(target, ec);
+    if (ec) {
+        bld::log::w("Failed to read timestamp for target '{}': {}. Defaulting to rebuild.", target, ec.message());
+        return true;
+    }
+
+    if (!fs::exists(source, ec)) {
+        bld::log::e("Source file missing: '{}'. Forcing rebuild.", source);
+        return true;
+    }
+
+    auto source_time = fs::last_write_time(source, ec);
+    if (ec) {
+        bld::log::w("Failed to read timestamp for source '{}': {}. Defaulting to rebuild.", source, ec.message());
+        return true;
+    }
+
+    bool outdated = target_time < source_time;
+
+    if (outdated) {
+        bld::log::i("Target '{}' is outdated relative to '{}'.", target, source);
+    } else {
+        bld::log::d("Target '{}' is up to date.", target);
+    }
+
+    return outdated;
+}
+
+template <std::ranges::range Range>
+    requires std::convertible_to<std::ranges::range_value_t<Range>, std::string_view>
+auto bld::is_outdated(std::string_view target, const Range &sources) -> bool
+{
+    namespace fs = std::filesystem;
+    std::error_code ec;
+    if (!fs::exists(target, ec)) {
+        bld::log::w("Target '{}' does not exist. Rebuild required.", target);
+        return true;
+    }
+    auto target_time = fs::last_write_time(target, ec);
+    if (ec) {
+        bld::log::w("Failed to read timestamp for target '{}': {}. Defaulting to rebuild.", target, ec.message());
+        return true;
+    }
+    for (const auto &src : sources) {
+        std::string_view source{src};
+        if (!fs::exists(source, ec)) {
+            bld::log::w("Source file missing: '{}'. Forcing rebuild.", source);
+            return true;
+        }
+        auto source_time = fs::last_write_time(source, ec);
+        if (ec) {
+            bld::log::w("Failed to read timestamp for source '{}': {}. Defaulting to rebuild.", source, ec.message());
+            return true;
+        }
+        if (target_time < source_time) {
+            return true;
+        }
+    }
+    return false;
+}
+
+auto bld::get_current_cxx_compiler() -> std::string_view
+{
+    using namespace std::literals::string_view_literals;
+
+#ifdef __clang__
+    auto compiler = "clang++"sv;
+#elif defined(__GNUC__)
+    auto compiler = "g++"sv;
+#elif defined(_MSC_VER)
+    auto compiler = "cl"sv;
+#else
+    auto compiler = "c++"sv;
+#endif
+    return compiler;
+}
+
+auto bld::rebuild_this_when_needed(int argc, char **argv, std::string_view compiler, std::source_location loc) -> void
+{
+    if (argv == nullptr || argc <= 0) {
+        return;
+    }
+
+    std::span<char *> args_span{argv, static_cast<std::size_t>(argc)};
+    namespace fs = std::filesystem;
+    std::string target = args_span[0];
+
+    std::string source = loc.file_name();
+
+    if (!bld::is_outdated(target, source)) {
+        return;
+    }
+
+    bld::log::i("Rebuilding...", target, source);
+
+    std::string old_target = target + ".old";
+    std::error_code ec;
+
+    fs::rename(target, old_target, ec);
+    if (ec) {
+        bld::log::w("Failed to rename currently running executable: {}", ec.message());
+    }
+
+    const char *cxx = nullptr;
+
+    if (!compiler.empty()) {
+        cxx = compiler.data();
+    } else {
+        cxx = bld::get_current_cxx_compiler().data();
+    }
+
+    bld::Cmd build_cmd{cxx, "-o", target, source, "-std=c++23", "-O3", "-Wall", "-Wextra"};
+
+    auto proc = bld::run(build_cmd);
+    if (!proc || proc->status_.code != 0) {
+        bld::log::e("FATAL: Failed to rebuild build script.");
+        fs::rename(old_target, target, ec);
+        std::exit(1);
+    }
+
+    bld::log::i("Successfully rebuilt! Restarting...");
+
+    // 5. The Restart
+    std::vector<char *> c_argv(args_span.begin(), args_span.end());
+    c_argv.push_back(nullptr);
+
+    ::execvp(target.c_str(), c_argv.data());
+
+    bld::log::f("FATAL: Failed to restart build script after compilation: {}", std::strerror(errno));
+    std::exit(1);
+}
+
+auto bld::rebuild_this_when_needed_ext(int argc, char **argv, std::string_view compiler, std::source_location loc) -> void
+{
+    if (argv == nullptr || argc <= 0) {
+        return;
+    }
+
+    std::span<char *> args_span{argv, static_cast<std::size_t>(argc)};
+    namespace fs = std::filesystem;
+    std::string target = args_span[0];
+
+    std::string source = loc.file_name();
+
+    if (!bld::is_outdated(target, std::array<std::string_view, 2>{source, std::string_view(__FILE__)})) {
+        return;
+    }
+
+    bld::log::i("Rebuilding...", target, source);
+
+    std::string old_target = target + ".old";
+    std::error_code ec;
+
+    fs::rename(target, old_target, ec);
+    if (ec) {
+        bld::log::w("Failed to rename currently running executable: {}", ec.message());
+    }
+
+    const char *cxx = nullptr;
+
+    if (!compiler.empty()) {
+        cxx = compiler.data();
+    } else {
+        cxx = bld::get_current_cxx_compiler().data();
+    }
+
+    bld::Cmd build_cmd{cxx, "-o", target, source, "-std=c++23", "-O3", "-Wall", "-Wextra"};
+
+    auto proc = bld::run(build_cmd);
+    if (!proc || proc->status_.code != 0) {
+        bld::log::e("FATAL: Failed to rebuild build script.");
+        fs::rename(old_target, target, ec);
+        std::exit(1);
+    }
+
+    bld::log::i("Successfully rebuilt! Restarting...");
+
+    // 5. The Restart
+    std::vector<char *> c_argv(args_span.begin(), args_span.end());
+    c_argv.push_back(nullptr);
+
+    ::execvp(target.c_str(), c_argv.data());
+
+    bld::log::f("FATAL: Failed to restart build script after compilation: {}", std::strerror(errno));
+    std::exit(1);
+}
+
+auto bld::wait_all(std::span<bld::Proc> procs) -> std::expected<std::size_t, bld::Err>
+{
+    std::size_t remaining{0};
+    std::size_t completed{0};
+    bool has_errors = false;
+
+    for (const auto &proc : procs) {
+        if (proc.is_running()) {
+            remaining++;
+        }
+    }
+    const std::size_t total = remaining;
+    if (total == 0) {
+        return {};
+    }
+
+    bld::log::i("Waiting for {} processes, asynchronously", total);
+    while (remaining > 0) {
+        int wstatus = 0;
+        // -1 to block this thread until any child process exits
+        pid_t pid = ::waitpid(-1, &wstatus, 0);
+
+        if (pid > 0) {
+            auto status = bld::Proc::parse_status(wstatus);
+
+            for (auto &proc : procs) {
+                if (proc.pid() == pid && proc.is_running()) {
+                    proc.status_ = status;
+                    remaining--;
+
+                    completed = total - remaining;
+                    int percentage = static_cast<int>((completed * 100) / total);
+
+                    if (status.code != 0) {
+                        bld::log::e("[{:>3}%] Process '{}' failed (pid: {}): exited with code {}", percentage, proc.label, pid, status.code);
+                        has_errors = true;
+                    } else {
+                        bld::log::i("[{:>3}%] Process '{}' (pid: {}): completed.", percentage, proc.label, pid);
+                    }
+
+                    break;
+                }
+            }
+        } else if (pid == -1) {
+            if (errno == EINTR) {
+                continue; // Interrupted by signal, just retry
+            }
+            if (errno == ECHILD) {
+                break; // No more child processes exist
+            }
+            bld::log::e("Error in waiting for procs.");
+            return std::unexpected(bld::Err::erno(errno, "waitpid failed in wait_all").with_payload(completed));
+        }
+    }
+
+    if (has_errors) {
+        return std::unexpected(bld::Err::erc(std::errc::operation_canceled, "One or more async processes failed").with_payload(completed));
+    }
+
+    return completed;
+}
+
+auto bld::run(std::span<bld::Task> tasks, std::size_t max_jobs) -> std::expected<void, bld::Err>
+{
+    if (max_jobs == 0) {
+        max_jobs = std::thread::hardware_concurrency();
+        if (max_jobs == 0) {
+            max_jobs = 1;
+        }
+    }
+
+    bld::log::i("Building in batches of: {}", max_jobs);
+
+    std::vector<bld::Proc> active_procs;
+    active_procs.reserve(max_jobs);
+    std::size_t batch_n{1};
+    std::size_t completed{0};
+
+    bld::log::i("Scheduling batch number: {}", batch_n);
+    for (const auto &t : tasks) {
+        // Wait until we have a free CPU core!
+        if (active_procs.size() >= max_jobs) {
+            auto wait_res = bld::wait_all(active_procs);
+            if (!wait_res) {
+                // FIX 1: Added std::any_cast
+                completed += std::any_cast<std::size_t>(wait_res.error().payload);
+                bld::log::i("Waiting failed; total completed tasks: {}", completed);
+
+                // FIX 3: Update the payload to reflect the TOTAL completed across all batches
+                auto err = wait_res.error();
+                err.payload = completed;
+                return std::unexpected(std::move(err));
+            }
+            active_procs.clear();
+            completed += *wait_res;
+            bld::log::i("Scheduling batch number: {}", ++batch_n);
+            bld::log::i("Remaining tasks: {}", (tasks.size() - completed));
+        }
+
+        auto proc_res = bld::details::execute(t.cmd, t.cfg, t.cfg.loc);
+        if (!proc_res) {
+            return std::unexpected(proc_res.error());
+        }
+        active_procs.push_back(std::move(*proc_res));
+    }
+
+    if (!active_procs.empty()) {
+        auto wait_res = bld::wait_all(active_procs);
+        if (!wait_res) {
+            completed += std::any_cast<std::size_t>(wait_res.error().payload);
+            auto err = wait_res.error();
+            err.payload = completed;
+            return std::unexpected(std::move(err));
+        }
+    }
+
+    bld::log::i("Done; total completed tasks: {}", completed);
+    return {};
+}
+
+auto bld::Config::add_option(std::string_view flag, val_t type, std::string_view desc, value_type def, std::vector<std::string> valid_choices) -> Config &
+{
+    options[flag] = Option{type, std::string(desc), std::move(def), std::move(valid_choices)};
+    return *this;
+}
+
+auto bld::Config::print_help(std::string_view prog_name, std::string_view specific_opt) const -> void
+{
+    std::string help_text;
+
+    if (!specific_opt.empty() && options.contains(specific_opt)) {
+        const auto &opt = options.at(specific_opt);
+        std::string_view type_str;
+        switch (opt.type) {
+        case Bool:
+            type_str = "bool";
+            break;
+        case Int:
+            type_str = "int";
+            break;
+        case Double:
+            type_str = "double";
+            break;
+        case String:
+            type_str = "string";
+            break;
+        case String_arr:
+            type_str = "string[]";
+            break;
+        }
+        std::format_to(std::back_inserter(help_text), "Option: {}\n", specific_opt);
+        std::format_to(std::back_inserter(help_text), "  Type: {}\n", type_str);
+        std::format_to(std::back_inserter(help_text), "  Desc: {}", opt.description);
+        if (!opt.choices.empty()) {
+            auto joined = opt.choices | std::views::join_with(std::string_view{"|"}) | std::ranges::to<std::string>();
+            std::format_to(std::back_inserter(help_text), "\n  Choices: [{}]", joined);
+        }
+        bld::log::i("{}", help_text);
+        return;
+    }
+
+    if (!specific_opt.empty()) {
+        bld::log::w("Option '{}' is not registered. Showing general help.", specific_opt);
+    }
+
+    std::format_to(std::back_inserter(help_text), "Usage: {} [options]\nOptions:", prog_name);
+
+    for (const auto &[flag, opt] : options) {
+        std::string_view type_str;
+        switch (opt.type) {
+        case Bool:
+            type_str = "bool";
+            break;
+        case Int:
+            type_str = "int";
+            break;
+        case Double:
+            type_str = "double";
+            break;
+        case String:
+            type_str = "string";
+            break;
+        case String_arr:
+            type_str = "string[]";
+            break;
+        }
+
+        std::string def_str = "null";
+        if (auto *p = std::get_if<int>(&opt.default_val); p) {
+            def_str = std::format("{}", *p);
+        } else if (auto *p = std::get_if<bool>(&opt.default_val); p) {
+            def_str = *p ? "true" : "false";
+        } else if (auto *p = std::get_if<double>(&opt.default_val); p) {
+            def_str = std::format("{}", *p);
+        } else if (auto *p = std::get_if<std::string>(&opt.default_val); p) {
+            def_str = std::format("\"{}\"", *p);
+        }
+
+        std::format_to(std::back_inserter(help_text), "\n  {:<15} [{:<8}] : {}", flag, type_str, opt.description);
+
+        if (!opt.choices.empty()) {
+            auto joined = opt.choices | std::views::join_with(std::string_view{"|"}) | std::ranges::to<std::string>();
+            std::format_to(std::back_inserter(help_text), " [{}]", joined);
+        }
+
+        std::format_to(std::back_inserter(help_text), " (default: {})", def_str);
+    }
+
+    bld::log::i("{}", help_text);
+}
+
+auto bld::Config::parse(int argc, char *argv[]) -> void
+{
+    std::span<char *> args{argv, static_cast<std::size_t>(argc)};
+    std::string_view prog_name = args.empty() ? "bld" : args[0];
+
+    for (auto i{1uz}; i < static_cast<std::size_t>(argc); ++i) {
+        std::string_view curr = args[i];
+        if (curr == "-h" || curr == "--help") {
+            std::string_view specific = "";
+            if (i > 1 && args[i - 1][0] != '-') {
+                specific = args[i - 1];
+            } else if (i + 1 < args.size() && args[i + 1][0] != '-') {
+                specific = args[i + 1];
+            }
+            print_help(prog_name, specific);
+            std::exit(0);
+        }
+    }
+
+    for (const auto &[flag, opt] : options) {
+        data[flag] = opt.default_val;
+    }
+
+    for (auto i{1uz}; i < static_cast<std::size_t>(argc); ++i) {
+        std::string_view curr = args[i];
+        auto eq_idx = curr.find_first_of('=');
+
+        if (eq_idx == std::string_view::npos) {
+            data[curr] = true;
+            continue;
+        }
+
+        std::string_view key = curr.substr(0, eq_idx);
+        std::string_view val = curr.substr(eq_idx + 1);
+
+        if (options.contains(key)) {
+            val_t expected_type = options[key].type;
+
+            if (expected_type == Bool) {
+                data[key] = (val == "true" || val == "1");
+            } else if (expected_type == Int) {
+                int v{};
+                auto [p, ec] = std::from_chars(val.data(), val.data() + val.size(), v);
+                if (ec == std::errc{} && p == val.data() + val.size()) {
+                    data[key] = v;
+                } else {
+                    bld::log::e("FATAL: Option '{}' expects an integer, got '{}'", key, val);
+                    std::exit(1);
+                }
+            } else if (expected_type == Double) {
+                double v{};
+                auto [p, ec] = std::from_chars(val.data(), val.data() + val.size(), v);
+                if (ec == std::errc{} && p == val.data() + val.size()) {
+                    data[key] = v;
+                } else {
+                    bld::log::e("FATAL: Option '{}' expects a double, got '{}'", key, val);
+                    std::exit(1);
+                }
+            } else if (expected_type == String) {
+                std::string string_val(val);
+                if (!options[key].choices.empty()) {
+                    auto &ch = options[key].choices;
+                    if (std::find(ch.begin(), ch.end(), string_val) == ch.end()) {
+                        bld::log::e("FATAL: Invalid choice '{}' for option '{}'.", string_val, key);
+                        std::exit(1);
+                    }
+                }
+                data[key] = std::move(string_val);
+            } else if (expected_type == String_arr) {
+                if (!std::holds_alternative<std::vector<std::string>>(data[key])) {
+                    data[key] = std::vector<std::string>{};
+                }
+                std::get<std::vector<std::string>>(data[key]).push_back(std::string(val));
+            }
+            continue;
+        }
+
+        int value_int{};
+        auto [ptr_i, ec_i] = std::from_chars(val.data(), val.data() + val.size(), value_int);
+        if (ec_i == std::errc{} && ptr_i == val.data() + val.size()) {
+            data[key] = value_int;
+            continue;
+        }
+
+        double value_double{};
+        auto [ptr_d, ec_d] = std::from_chars(val.data(), val.data() + val.size(), value_double);
+        if (ec_d == std::errc{} && ptr_d == val.data() + val.size()) {
+            data[key] = value_double;
+            continue;
+        }
+
+        data[key] = std::string(val);
+    }
+}
+
+bld::Config::Proxy::operator bool() const
+{
+    auto it = cfg->data.find(key);
+    if (it == cfg->data.end()) {
+        return false;
+    }
+    if (auto *b = std::get_if<bool>(&it->second)) {
+        return *b;
+    }
+    return true;
+}
+
+bld::Config::Proxy::operator std::string() const
+{
+    auto it = cfg->data.find(key);
+    if (it == cfg->data.end()) {
+        throw std::runtime_error(std::format("Config error: '{}' not found", key));
+    }
+    if (auto *p = std::get_if<std::string>(&it->second)) {
+        return *p;
+    }
+    if (auto *p = std::get_if<int>(&it->second)) {
+        return std::to_string(*p);
+    }
+    if (auto *p = std::get_if<double>(&it->second)) {
+        return std::to_string(*p);
+    }
+    if (auto *p = std::get_if<bool>(&it->second)) {
+        return *p ? "true" : "false";
+    }
+    throw std::runtime_error(std::format("Config error: Type mismatch for '{}'", key));
+}
+
+bld::Config::Proxy::operator int() const
+{
+    if (auto res = cfg->get_val<int>(key)) {
+        return *res;
+    } else {
+        throw std::runtime_error(std::format("Config error: {}", res.error().msg));
+    }
+}
+
+bld::Config::Proxy::operator double() const
+{
+    if (auto res = cfg->get_val<double>(key)) {
+        return *res;
+    } else {
+        throw std::runtime_error(std::format("Config error: {}", res.error().msg));
+    }
+}
+
+bld::Config::Proxy::operator std::vector<std::string>() const
+{
+    if (auto res = cfg->get_val<std::vector<std::string>>(key)) {
+        return *res;
+    } else {
+        throw std::runtime_error(std::format("Config error: {}", res.error().msg));
+    }
+}
+
 #endif // B_LDR_IMPLEMENTATION
