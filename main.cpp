@@ -1,29 +1,29 @@
 #define B_LDR_IMPLEMENTATION
 #include "b_ldr.hpp"
 
+auto &cfg = bld::Config::get();
+
+using namespace std::string_view_literals;
+
+const std::string TEST_DIR{"./tests/"};
+
 auto main(int argc, char *argv[]) -> int
 {
     bld::rebuild_this_when_needed_ext(argc, argv);
 
-    auto &cfg = bld::Config::get();
+    cfg.parse(argc, argv);
 
-    cfg.add_option("--debug", bld::Config::Bool, "Enable verbose output", false)
-        .add_option("jobs", bld::Config::Int, "Concurrent jobs", 8)
-        .add_option("build-type", bld::Config::String, "Build profile", std::string{"rel"}, {"rel", "debug", "profile"})
-        .parse(argc, argv);
-
-    if (cfg["--debug"]) {
-        bld::log::d("Verbose mode is enabled!");
-    }
-
-    if (cfg["build-type"]) {
-        std::string mode = cfg["build-type"];
-        bld::log::i("Compiling with mode: {}", mode);
-    }
-
-    if (cfg["custom_id"]) {
-        std::string id = cfg["custom_id"];
-        bld::log::i("Found custom ID: {}", id);
+    if (cfg["test"]) {
+        bld::log::i("test is set");
+        if (auto res = bld::run(bld::Cmd{"g++", "-o", "test", TEST_DIR + "main.cpp", "-std=c++23"}); !res) {
+            return 1;
+        } else {
+            if (auto res_run = bld::run(bld::Cmd{"./test"}); !res_run) {
+                bld::log::e("Test script run failed.");
+            } else {
+                bld::log::i("Test script ran successfully.");
+            }
+        }
     }
     return 0;
 }

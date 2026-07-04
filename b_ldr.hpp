@@ -29,6 +29,7 @@
 #include <chrono>
 #include <cstdint>
 #include <cstdlib>
+#include <cstring>
 #include <expected>
 #include <flat_map>
 #include <format>
@@ -40,9 +41,13 @@
 #include <ranges>
 #include <source_location>
 #include <stdexcept>
+#include <string>
 #include <string_view>
 #include <system_error>
+#include <unordered_map>
 #include <utility>
+#include <variant>
+#include <vector>
 
 // Linux
 #include <fcntl.h>
@@ -404,8 +409,8 @@ struct Proc
     ~Proc()
     {
         if (id_ > 0 && status_.state == State::running) {
-            kill(SIGKILL);
-            std::ignore = wait();
+            this->kill(SIGKILL);
+            std::ignore = this->wait();
         }
     }
 
@@ -1038,7 +1043,8 @@ public:
     Config(Config &&) = delete;
     Config &operator=(Config &&) = delete;
 
-    auto add_option(std::string_view flag, val_t type, std::string_view desc, value_type def = false, std::vector<std::string> valid_choices = {}) -> Config &;
+    auto add_option(std::string_view flag, val_t type, std::string_view desc, value_type def = false, std::vector<std::string> valid_choices = {})
+        -> Config &;
 
     struct Proxy
     {
@@ -1108,6 +1114,98 @@ struct std::formatter<std::unordered_map<std::string_view, bld::Config::value_ty
                 std::format_to(out, "(s[]){}", *p);
             } else {
                 std::format_to(out, "unknown");
+            }
+        }
+        return out;
+    }
+};
+
+namespace bld::test {
+
+// clang-format off
+enum class Edit_type : std::uint8_t { keep, insert, remove };
+struct Edit
+{
+    Edit_type type;
+    std::string_view content;
+};
+struct Frontier
+{
+    std::vector<std::ptrdiff_t> data;
+    std::ptrdiff_t offset;
+    explicit Frontier(std::ptrdiff_t max_d);
+    auto operator[](std::ptrdiff_t k) -> std::ptrdiff_t &;
+    auto operator[](std::ptrdiff_t k) const -> std::ptrdiff_t;
+};
+struct compute_diff_op
+{
+    bool same{false};
+    std::vector<Edit> edits;
+    operator bool() const { return same; }
+};
+// clang-format on
+
+auto compute_diff(std::span<const std::string_view> original, std::span<const std::string_view> updated) -> compute_diff_op;
+auto split_lines(std::string_view text) -> std::vector<std::string_view>;
+auto compute_diff(std::initializer_list<std::string_view> original, std::initializer_list<std::string_view> updated) -> compute_diff_op;
+auto compute_diff(std::string_view original, std::string_view updated) -> compute_diff_op;
+} // namespace bld::test
+
+template <>
+struct std::formatter<bld::test::compute_diff_op>
+{
+    bool use_color = true;
+
+    constexpr auto parse(std::format_parse_context &ctx)
+    {
+        auto it = ctx.begin();
+        auto end = ctx.end();
+        if (it != end && *it != '}') {
+            if (*it == 'n') {
+                use_color = false;
+                ++it;
+            } else if (*it == 'c') {
+                use_color = true;
+                ++it;
+            } else {
+                throw std::format_error("invalid format specifier for compute_diff_op");
+            }
+        }
+
+        if (it != end && *it != '}') {
+            throw std::format_error("invalid format specifier for compute_diff_op");
+        }
+
+        return it;
+    }
+
+    auto format(const bld::test::compute_diff_op &diff, std::format_context &ctx) const
+    {
+        auto out = ctx.out();
+
+        if (diff.same) {
+            return std::format_to(out, "Files match.\n");
+        }
+
+        for (const auto &e : diff.edits) {
+            switch (e.type) {
+            case bld::test::Edit_type::keep:
+                out = std::format_to(out, "  {}\n", e.content);
+                break;
+            case bld::test::Edit_type::insert:
+                if (use_color) {
+                    out = std::format_to(out, "\033[32m+ {}\033[0m\n", e.content);
+                } else {
+                    out = std::format_to(out, "+ {}\n", e.content);
+                }
+                break;
+            case bld::test::Edit_type::remove:
+                if (use_color) {
+                    out = std::format_to(out, "\033[31m- {}\033[0m\n", e.content);
+                } else {
+                    out = std::format_to(out, "- {}\n", e.content);
+                }
+                break;
             }
         }
         return out;
@@ -1524,7 +1622,6 @@ auto bld::rebuild_this_when_needed_ext(int argc, char **argv, std::string_view c
 
     bld::log::i("Successfully rebuilt! Restarting...");
 
-    // 5. The Restart
     std::vector<char *> c_argv(args_span.begin(), args_span.end());
     c_argv.push_back(nullptr);
 
@@ -1654,7 +1751,8 @@ auto bld::run(std::span<bld::Task> tasks, std::size_t max_jobs) -> std::expected
     return {};
 }
 
-auto bld::Config::add_option(std::string_view flag, val_t type, std::string_view desc, value_type def, std::vector<std::string> valid_choices) -> Config &
+auto bld::Config::add_option(std::string_view flag, val_t type, std::string_view desc, value_type def, std::vector<std::string> valid_choices)
+    -> Config &
 {
     options[flag] = Option{type, std::string(desc), std::move(def), std::move(valid_choices)};
     return *this;
@@ -1898,6 +1996,143 @@ bld::Config::Proxy::operator std::vector<std::string>() const
     } else {
         throw std::runtime_error(std::format("Config error: {}", res.error().msg));
     }
+}
+
+bld::test::Frontier::Frontier(std::ptrdiff_t max_d) : data(2 * max_d + 1, 0), offset(max_d)
+{}
+auto bld::test::Frontier::operator[](std::ptrdiff_t k) -> std::ptrdiff_t &
+{
+    return data[k + offset];
+}
+auto bld::test::Frontier::operator[](std::ptrdiff_t k) const -> std::ptrdiff_t
+{
+    return data[k + offset];
+}
+
+auto bld::test::compute_diff(std::span<const std::string_view> original, std::span<const std::string_view> updated) -> compute_diff_op
+{
+    const std::ptrdiff_t n = original.size();
+    const std::ptrdiff_t m = updated.size();
+    const std::ptrdiff_t max_edits = n + m;
+
+    if (max_edits == 0) {
+        return compute_diff_op{.same = true, .edits = {}};
+    }
+
+    std::vector<Frontier> history;
+    history.reserve(max_edits);
+
+    Frontier current_frontier{max_edits};
+    bool reached_end = false;
+    std::ptrdiff_t end_x = 0;
+    std::ptrdiff_t end_y = 0;
+
+    // 1. Forward Pathfinding
+    for (std::ptrdiff_t d = 0; d <= max_edits; ++d) {
+        history.push_back(current_frontier);
+
+        for (std::ptrdiff_t k = -d; k <= d; k += 2) {
+            std::ptrdiff_t x = 0;
+
+            bool moving_down = (k == -d) || (k != d && current_frontier[k - 1] <= current_frontier[k + 1]);
+
+            if (moving_down) {
+                x = current_frontier[k + 1];
+            } else {
+                x = current_frontier[k - 1] + 1;
+            }
+
+            std::ptrdiff_t y = x - k;
+
+            while (x < n && y < m && original[x] == updated[y]) {
+                x++;
+                y++;
+            }
+
+            current_frontier[k] = x;
+
+            if (x >= n && y >= m) {
+                reached_end = true;
+                end_x = x;
+                end_y = y;
+                break;
+            }
+        }
+        if (reached_end) {
+            break;
+        }
+    }
+
+    // 2. Backtrack to extract the shortest path
+    std::vector<Edit> script;
+    std::ptrdiff_t x = end_x;
+    std::ptrdiff_t y = end_y;
+
+    for (std::ptrdiff_t d = history.size() - 1; d > 0; --d) {
+        const Frontier &past = history[d];
+        std::ptrdiff_t k = x - y;
+
+        bool moving_down = (k == -d) || (k != d && past[k - 1] <= past[k + 1]);
+        std::ptrdiff_t prev_k = moving_down ? k + 1 : k - 1;
+
+        std::ptrdiff_t prev_x = past[prev_k];
+        if (!moving_down) {
+            prev_x++;
+        }
+        std::ptrdiff_t prev_y = prev_x - k;
+
+        while (x > prev_x && y > prev_y) {
+            script.push_back({Edit_type::keep, original[x - 1]});
+            x--;
+            y--;
+        }
+
+        if (moving_down) {
+            script.push_back({Edit_type::insert, updated[y - 1]});
+            y--;
+        } else {
+            script.push_back({Edit_type::remove, original[x - 1]});
+            x--;
+        }
+    }
+
+    while (x > 0 && y > 0) {
+        script.push_back({Edit_type::keep, original[x - 1]});
+        x--;
+        y--;
+    }
+
+    std::ranges::reverse(script);
+
+    bool is_same = (script.size() == static_cast<std::size_t>(n)) && (n == m);
+
+    return compute_diff_op{.same = is_same, .edits = script};
+}
+
+auto bld::test::split_lines(std::string_view text) -> std::vector<std::string_view>
+{
+    std::vector<std::string_view> lines;
+    std::size_t start = 0;
+    while (start < text.size()) {
+        auto end = text.find('\n', start);
+        if (end == std::string_view::npos) {
+            lines.push_back(text.substr(start));
+            break;
+        }
+        lines.push_back(text.substr(start, end - start));
+        start = end + 1;
+    }
+    return lines;
+}
+
+auto bld::test::compute_diff(std::initializer_list<std::string_view> original, std::initializer_list<std::string_view> updated) -> compute_diff_op
+{
+    return compute_diff(std::vector<std::string_view>{original}, std::vector<std::string_view>{updated});
+}
+
+auto bld::test::compute_diff(std::string_view original, std::string_view updated) -> compute_diff_op
+{
+    return compute_diff(split_lines(original), split_lines(updated));
 }
 
 #endif // B_LDR_IMPLEMENTATION
