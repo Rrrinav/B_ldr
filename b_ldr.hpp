@@ -1,4 +1,5 @@
 /*
+  MIT
   Copyright Dec 2025, Rinav (github: rrrinav)
 
   Permission is hereby granted, free of charge,
@@ -19,9 +20,15 @@
 */
 
 /*
-  HEAVILY INSPIRED BY nob.h by rexim/alexey/tsoding.
+  inspired by nob.h by rexim/alexey/tsoding.
   github.com/tsoding/nob.h
 */
+
+/*
+Usage:
+#define B_LDR_IMPLEMENTATION
+#include "b_ldr.hpp"
+ */
 
 #include <any>
 #include <atomic>
@@ -139,6 +146,7 @@ namespace bld {
 // with very simple API.
 //
 // Mostly configuration and not actually the "real" logger
+using namespace std::string_view_literals;
 struct Logger
 {
     enum class Level { dbg = 0, inf = 1, wrn = 2, err = 3, ftl = 4 };
@@ -156,22 +164,41 @@ struct Logger
     struct Default_logger_fn
     {
         inline static Level min_lvl = Level::dbg;
+        inline static bool use_color = false;
+        inline static constexpr std::string_view reset = "\x1b[0m";
 
-        auto operator()(std::ostream &stream, const Log_record &record) const -> void
+        struct Style
         {
-            if (record.lvl < this->min_lvl) {
+            std::string_view label;
+            std::string_view color;
+        };
+
+        [[nodiscard]]
+        static constexpr auto style(Level lvl) noexcept -> Style
+        {
+            using namespace std::string_view_literals;
+            switch (lvl) {
+            case Level::dbg: return {"[DEBUG]", "\x1b[38;2;120;170;255m"sv};
+            case Level::inf: return {"[INFO] ", "\x1b[38;2;0;200;120m"sv};
+            case Level::wrn: return {"[WARN] ", "\x1b[38;2;255;180;0m"sv};
+            case Level::err: return {"[ERROR]", "\x1b[38;2;255;64;64m"sv};
+            case Level::ftl: return {"[FATAL]", "\x1b[38;2;200;0;0m"sv};
+            }
+            std::unreachable();
+        }
+
+        auto operator()(std::ostream& stream, const Log_record& record) const -> void
+        {
+            if (record.lvl < min_lvl) {
                 return;
             }
-            std::string_view prefix;
-            switch (record.lvl) {
-            case Level::dbg: prefix = "[DEBUG]"; break;
-            case Level::inf: prefix = "[INFO]"; break;
-            case Level::wrn: prefix = "[WARN]"; break;
-            case Level::err: prefix = "[ERROR]"; break;
-            case Level::ftl: prefix = "[FATAL]"; break;
+            const auto s = style(record.lvl);
+            if (use_color) {
+                std::println(stream, "{}{}{}: {}", s.color, s.label, reset, record.str);
+            } else {
+                std::println(stream, "{}: {}", s.label, record.str);
             }
-            std::println(stream, "{}: {}", prefix, record.str);
-        };
+        }
     };
     // clang-format on
 
@@ -645,7 +672,6 @@ struct std::formatter<bld::Proc::Status>
         return out;
     }
 };
-
 template <>
 struct std::formatter<bld::Proc>
 {
@@ -1010,8 +1036,14 @@ auto get_current_cxx_compiler() -> std::string_view;
 auto rebuild_this_when_needed(int argc, char **argv, std::string_view compiler = "", std::source_location loc = std::source_location::current())
     -> void;
 // Also considers changes in this header file.
-auto rebuild_this_when_needed_ext(int argc, char **argv, std::string_view compiler = "", std::source_location loc = std::source_location::current())
-    -> void;
+auto rebuild_this_when_needed_ext(
+    int argc,
+    char **argv,
+    std::vector<std::string> flags = {},
+    std::string_view compiler = "",
+    std::source_location loc = std::source_location::current()
+) -> void;
+
 }; // namespace bld
 
 namespace bld {
@@ -1210,6 +1242,13 @@ struct std::formatter<bld::test::compute_diff_op>
         }
         return out;
     }
+};
+
+namespace bld {
+
+auto make_dir_if_not_exists(std::string_view path, bool create_parents = true, std::source_location loc = std::source_location::current()) noexcept
+    -> bool;
+
 };
 
 #ifdef B_LDR_IMPLEMENTATION
@@ -1577,7 +1616,7 @@ auto bld::rebuild_this_when_needed(int argc, char **argv, std::string_view compi
     std::exit(1);
 }
 
-auto bld::rebuild_this_when_needed_ext(int argc, char **argv, std::string_view compiler, std::source_location loc) -> void
+auto bld::rebuild_this_when_needed_ext(int argc, char **argv, std::vector<std::string> flags, std::string_view compiler, std::source_location loc) -> void
 {
     if (argv == nullptr || argc <= 0) {
         return;
@@ -1612,6 +1651,10 @@ auto bld::rebuild_this_when_needed_ext(int argc, char **argv, std::string_view c
     }
 
     bld::Cmd build_cmd{cxx, "-o", target, source, "-std=c++23", "-O3", "-Wall", "-Wextra"};
+
+    for (const auto &f : flags) {
+        build_cmd.push(f);
+    }
 
     auto proc = bld::run(build_cmd);
     if (!proc || proc->status_.code != 0) {
@@ -2133,6 +2176,30 @@ auto bld::test::compute_diff(std::initializer_list<std::string_view> original, s
 auto bld::test::compute_diff(std::string_view original, std::string_view updated) -> compute_diff_op
 {
     return compute_diff(split_lines(original), split_lines(updated));
+}
+
+auto bld::make_dir_if_not_exists(std::string_view path, bool create_parents, std::source_location loc) noexcept -> bool
+{
+    namespace fs = std::filesystem;
+
+    if (path.empty()) {
+        bld::log::w("({}:{}) No directory was created because of empty path.", loc.file_name(), loc.line());
+        return false;
+    }
+
+    std::error_code ec;
+    const bool created = create_parents ? fs::create_directories(fs::path{path}, ec) : fs::create_directory(fs::path{path}, ec);
+
+    if (ec) {
+        bld::log::w("Error while creating the dir: {}", ec.message());
+        return false;
+    }
+
+    if (created) {
+        bld::log::i("Created new dir: {}", path);
+    }
+
+    return created;
 }
 
 #endif // B_LDR_IMPLEMENTATION

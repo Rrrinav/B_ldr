@@ -191,7 +191,6 @@ auto run_tests() -> int
     fs::create_directories("./test_sandbox");
 
     std::vector<bld::test::Test_case> suite = {
-        // 1. BLD::CMD TESTING
         {"cmd_empty_initialization",
          []() -> std::expected<void, std::string> {
              bld::Cmd cmd{};
@@ -262,7 +261,6 @@ auto run_tests() -> int
              return {};
          }},
 
-        // 2. BLD::CONFIG (SINGLETON & PROXY) TESTING
         {"config_defaults_and_strict_parsing",
          []() -> std::expected<void, std::string> {
              auto &c = bld::Config::get();
@@ -305,7 +303,6 @@ auto run_tests() -> int
              }
          }},
 
-        // 3. DIFF ENGINE & FORMATTER TESTING
         {"diff_engine_exact_matches",
          []() -> std::expected<void, std::string> {
              std::string_view text = "Line 1\nLine 2\nLine 3";
@@ -329,7 +326,6 @@ auto run_tests() -> int
              return {};
          }},
 
-        // 4. FILESYSTEM IS_OUTDATED TESTING
         {"fs_is_outdated_lifecycle",
          []() -> std::expected<void, std::string> {
              auto target = fs::path("./test_sandbox/target.o");
@@ -363,7 +359,7 @@ auto run_tests() -> int
              make_sandbox_file(src1, "src1", std::chrono::seconds(0));
              make_sandbox_file(src2, "src2", std::chrono::seconds(20)); // src2 is newer than target
 
-             std::array<std::string_view, 2> sources = {src1.string(), src2.string()};
+             std::array<std::string_view, 2> sources{src1.string(), src2.string()};
 
              if (!bld::is_outdated(target.string(), sources)) {
                  return std::unexpected("failed to detect that the second source file triggered an outdated state");
@@ -371,7 +367,11 @@ auto run_tests() -> int
              return {};
          }},
 
-        // 5. PROCESS EXECUTION & PIPES TESTING
+        {"fs_make_dir_if_not_exists",
+         []() -> std::expected<void, std::string> {
+             return {};
+         }},
+
         {"process_sync_and_async_execution",
          []() -> std::expected<void, std::string> {
              bld::Cmd cmd_sync{"true"};
@@ -427,7 +427,6 @@ auto run_tests() -> int
              return {};
          }},
 
-        // 6. TASK BATCH SCHEDULER TESTING
         {"task_batch_staggered_scheduler",
          []() -> std::expected<void, std::string> {
              std::vector<bld::Task> execution_list;
