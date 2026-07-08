@@ -5,3 +5,5 @@ bld
 **/main
 **/main.old
 *.old
+test
+test_fs

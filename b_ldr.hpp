@@ -3,7 +3,7 @@
   Copyright Dec 2025, Rinav (github: rrrinav)
 
   Permission is hereby granted, free of charge,
-  to any person obtaining a copy of this software and associated documentation files(the “Software”),
+  to any person obtaining a copy of this software and associated documentation files(the "Software"),
   to deal in the Software without restriction, including without limitation the rights to use, copy, modify, merge, publish, distribute,
   sublicense, and / or sell copies of the Software, and to permit persons to whom the Software is furnished to do so,
   subject to the following conditions :
@@ -12,7 +12,7 @@
   or
   substantial portions of the Software.
 
-  THE SOFTWARE IS PROVIDED “AS IS”,
+  THE SOFTWARE IS PROVIDED "AS IS",
   WITHOUT WARRANTY OF ANY KIND, EXPRESS OR IMPLIED, INCLUDING BUT NOT LIMITED TO THE WARRANTIES OF MERCHANTABILITY,
   FITNESS FOR A PARTICULAR PURPOSE AND NONINFRINGEMENT.IN NO EVENT SHALL THE AUTHORS OR COPYRIGHT HOLDERS BE LIABLE FOR ANY CLAIM,
   DAMAGES OR OTHER LIABILITY, WHETHER IN AN ACTION OF CONTRACT, TORT OR OTHERWISE, ARISING FROM,
@@ -58,20 +58,24 @@
 #include <string>
 #include <string_view>
 #include <system_error>
+#include <type_traits>
 #include <unordered_map>
 #include <utility>
 #include <variant>
 #include <vector>
 
-// Linux
+// POSIX / Linux
 #include <fcntl.h>
 #include <poll.h>
 #include <sched.h>
 #include <signal.h>
 #include <sys/types.h>
 #include <sys/wait.h>
-#include <type_traits>
 #include <unistd.h>
+
+// =============================================================================
+// DECLARATIONS
+// =============================================================================
 
 // Public API map
 //   1. Errors and formatters         bld::Err
@@ -94,16 +98,14 @@ struct Err
 
     static auto erc(std::errc code, std::string message = "") -> Err;
     static auto erno(int code, std::string message = "") -> Err;
+
     template <typename T>
-    auto with_payload(T &&data) && -> Err
-    {
-        payload = std::forward<T>(data);
-        return std::move(*this);
-    }
+    auto with_payload(T &&data) && -> Err;
+
     auto with_cause(Err root_cause) && -> Err;
     auto with_cause(Error_pt root_cause_ptr) && -> Err;
 };
-}; // namespace bld
+} // namespace bld
 
 // clang-format off
 template <>
@@ -111,19 +113,7 @@ struct std::formatter<bld::Err>
 {
     enum class mode { plain, debug };
     mode fmt = mode::plain;
-    constexpr auto parse(std::format_parse_context &ctx)
-    {
-        auto it = ctx.begin();
-        if (it != ctx.end() && *it != '}') {
-            switch (*it) {
-            case '?': fmt = mode::debug; break;
-            case 'p': fmt = mode::plain; break;
-            default: throw std::format_error("invalid Cmd format");
-            }
-            ++it;
-        }
-        return it;
-    }
+    constexpr auto parse(std::format_parse_context &ctx) -> std::format_parse_context::iterator;
     auto format(const bld::Err &err, std::format_context &ctx) const -> std::format_context::iterator;
 };
 // clang-format on
@@ -141,14 +131,12 @@ struct Stream_proxy
 } // namespace bld::log::detail
 
 namespace bld {
-// We dont need much performance here in this logging, so this is a simple design
-// with very simple API.
-//
-// Mostly configuration and not actually the "real" logger
 using namespace std::string_view_literals;
+
 struct Logger
 {
     enum class Level { dbg = 0, inf = 1, wrn = 2, err = 3, ftl = 4 };
+
     struct Log_record
     {
         Level lvl;
@@ -173,18 +161,7 @@ struct Logger
         };
 
         [[nodiscard]]
-        static constexpr auto style(Level lvl) noexcept -> Style
-        {
-            using namespace std::string_view_literals;
-            switch (lvl) {
-            case Level::dbg: return {"[DEBUG]", "\x1b[38;2;120;170;255m"sv};
-            case Level::inf: return {"[INFO] ", "\x1b[38;2;0;200;120m"sv};
-            case Level::wrn: return {"[WARN] ", "\x1b[38;2;255;180;0m"sv};
-            case Level::err: return {"[ERROR]", "\x1b[38;2;255;64;64m"sv};
-            case Level::ftl: return {"[FATAL]", "\x1b[38;2;200;0;0m"sv};
-            }
-            std::unreachable();
-        }
+        static constexpr auto style(Level lvl) noexcept -> Style;
 
         auto operator()(std::ostream& stream, const Log_record& record) const -> void;
     };
@@ -192,133 +169,86 @@ struct Logger
 
     inline static std::atomic<Level> min_lvl{Level::inf};
 
-    // Throws
     static auto set_logger_fn(Logger_fn_t fn, std::source_location loc = std::source_location::current()) -> void;
 
-    // Changing this thing is not thread safe because a function maybe being used to log, in another thread.
-    // So, I am enforcing that you can only set it once before execution starts.
-    // Use the function 'set_logger_fn' to set the logger, please.
-    //
-    // If you know what you are doing and want to set it again, you can still use these public members
     inline static std::atomic<bool> logger_locked{false};
     inline static Logger_fn_t logger_fn = Default_logger_fn{};
     inline static std::mutex config_mtx;
 };
 } // namespace bld
 
-// Real logging functions
-// Instead of passing aroung enums, you can just:
-// bld::log::i(fmt, args); for info and so on for error, debug, warn and fatal using: e, d, f respectively
 namespace bld::log {
 
 template <typename... Args>
-inline void invoke_logger(bld::Logger::Level level, std::ostream &str, std::format_string<Args...> fmt, Args &&...args)
-{
-    if (level < bld::Logger::min_lvl.load(std::memory_order_relaxed)) {
-        return;
-    }
-    std::string formatted_str = std::format(fmt, std::forward<Args>(args)...);
-    bld::Logger::Log_record record{.lvl = level, .timestamp = std::chrono::system_clock::now(), .str = formatted_str};
-    std::invoke(bld::Logger::logger_fn, str, record);
-}
+inline void invoke_logger(bld::Logger::Level level, std::ostream &str, std::format_string<Args...> fmt, Args &&...args);
 
 template <typename... Args>
-void i(std::format_string<Args...> fmt, Args &&...args)
-{
-    invoke_logger(bld::Logger::Level::inf, bld::Logger::ostream.get(), fmt, std::forward<Args>(args)...);
-}
+void i(std::format_string<Args...> fmt, Args &&...args);
 
 template <typename... Args>
-void w(std::format_string<Args...> fmt, Args &&...args)
-{
-    invoke_logger(bld::Logger::Level::wrn, bld::Logger::ostream.get(), fmt, std::forward<Args>(args)...);
-}
+void w(std::format_string<Args...> fmt, Args &&...args);
 
 template <typename... Args>
-void e(std::format_string<Args...> fmt, Args &&...args)
-{
-    invoke_logger(bld::Logger::Level::err, bld::Logger::ostream.get(), fmt, std::forward<Args>(args)...);
-}
+void e(std::format_string<Args...> fmt, Args &&...args);
 
 template <typename... Args>
-void d(std::format_string<Args...> fmt, Args &&...args)
-{
-    invoke_logger(bld::Logger::Level::dbg, bld::Logger::ostream.get(), fmt, std::forward<Args>(args)...);
-}
+void d(std::format_string<Args...> fmt, Args &&...args);
 
 template <typename... Args>
-void f(std::format_string<Args...> fmt, Args &&...args)
-{
-    invoke_logger(bld::Logger::Level::ftl, bld::Logger::ostream.get(), fmt, std::forward<Args>(args)...);
-}
-
-// explicit stream overloads
-template <typename Os, typename... Args>
-    requires std::derived_from<std::remove_reference_t<Os>, std::ostream>
-void i(Os &str, std::format_string<Args...> fmt, Args &&...args)
-{
-    invoke_logger(bld::Logger::Level::inf, str, fmt, std::forward<Args>(args)...);
-}
+void f(std::format_string<Args...> fmt, Args &&...args);
 
 template <typename Os, typename... Args>
     requires std::derived_from<std::remove_reference_t<Os>, std::ostream>
-void w(Os &str, std::format_string<Args...> fmt, Args &&...args)
-{
-    invoke_logger(bld::Logger::Level::wrn, str, fmt, std::forward<Args>(args)...);
-}
+void i(Os &str, std::format_string<Args...> fmt, Args &&...args);
 
 template <typename Os, typename... Args>
     requires std::derived_from<std::remove_reference_t<Os>, std::ostream>
-void e(Os &str, std::format_string<Args...> fmt, Args &&...args)
-{
-    invoke_logger(bld::Logger::Level::err, str, fmt, std::forward<Args>(args)...);
-}
+void w(Os &str, std::format_string<Args...> fmt, Args &&...args);
 
 template <typename Os, typename... Args>
     requires std::derived_from<std::remove_reference_t<Os>, std::ostream>
-void d(Os &str, std::format_string<Args...> fmt, Args &&...args)
-{
-    invoke_logger(bld::Logger::Level::dbg, str, fmt, std::forward<Args>(args)...);
-}
+void e(Os &str, std::format_string<Args...> fmt, Args &&...args);
 
 template <typename Os, typename... Args>
     requires std::derived_from<std::remove_reference_t<Os>, std::ostream>
-void f(Os &str, std::format_string<Args...> fmt, Args &&...args)
-{
-    invoke_logger(bld::Logger::Level::ftl, str, fmt, std::forward<Args>(args)...);
-}
+void d(Os &str, std::format_string<Args...> fmt, Args &&...args);
+
+template <typename Os, typename... Args>
+    requires std::derived_from<std::remove_reference_t<Os>, std::ostream>
+void f(Os &str, std::format_string<Args...> fmt, Args &&...args);
 
 } // namespace bld::log
 
 namespace bld {
-// I would have used std::string but then exposing args_ means
-// everyone has to keep track of spaces " ", which is tedious.
 struct Cmd
 {
     using value_type = std::vector<std::string>;
     using const_iterator = std::vector<std::string>::const_iterator;
     using iterator = std::vector<std::string>::iterator;
     using span_type = std::span<std::string>;
+
     // clang-format off
     std::vector<std::string> args_;
 
     Cmd() = default;
+    
     template <typename... Ts> requires(std::convertible_to<Ts, std::string_view> && ...)
-    explicit Cmd(Ts &&...ts)
-    {
-        args_.reserve(sizeof...(Ts));
-        (args_.emplace_back(std::forward<Ts>(ts)), ...);
-    }
+    explicit Cmd(Ts &&...ts);
+    
     auto push(std::string_view s) -> void;
+    
     template <typename... Ts>
-    auto emplace_b(Ts &&...ts) -> std::string & { return args_.emplace_back(std::forward<Ts>(ts)...); }
+    auto emplace_b(Ts &&...ts) -> std::string &;
+    
     template <typename... Ts>
-    auto emplace(const_iterator it, Ts &&...ts) -> std::string & { return args_.emplace(it, std::forward<Ts>(ts)...); }
-    auto begin(this auto &self) noexcept { return self.args_.begin(); }
-    auto end(this auto &self) noexcept { return self.args_.end(); }
-    auto size(this auto const &self) noexcept -> std::size_t { return self.args_.size(); }
-    auto empty(this auto const &self) noexcept -> bool { return self.args_.empty(); }
-    auto span(this auto &self) noexcept { return std::span{self.args_}; }
+    auto emplace(const_iterator it, Ts &&...ts) -> std::string &;
+    
+    auto begin(this auto &self) noexcept;
+    auto end(this auto &self) noexcept;
+    auto size(this auto const &self) noexcept -> std::size_t;
+    auto empty(this auto const &self) noexcept -> bool;
+    auto span(this auto &self) noexcept;
+    
     [[nodiscard]] auto argv() const -> std::vector<char*>;
     [[nodiscard]] auto str() const -> std::string;
     auto reset() -> void;
@@ -332,20 +262,7 @@ struct std::formatter<bld::Cmd>
 {
     enum class mode { plain, unquoted, debug };
     mode fmt = mode::plain;
-    constexpr auto parse(std::format_parse_context &ctx)
-    {
-        auto it = ctx.begin();
-        if (it != ctx.end() && *it != '}') {
-            switch (*it) {
-            case 'q': fmt = mode::unquoted; break;
-            case '?': fmt = mode::debug;    break;
-            case 'p': fmt = mode::plain;    break;
-            default: throw std::format_error("invalid Cmd format");
-            }
-            ++it;
-        }
-        return it;
-    }
+    constexpr auto parse(std::format_parse_context &ctx) -> std::format_parse_context::iterator;
     auto format(const bld::Cmd &cmd, std::format_context &ctx) const -> std::format_context::iterator;
 };
 // clang-format on
@@ -380,10 +297,8 @@ struct Proc
     explicit Proc() = default;
     explicit Proc(P_id id, const std::string &label_ = "");
 
-    // Absolute zero-leak guarantee
     ~Proc();
 
-    // Rule of 5: Prevent accidental zombie clones
     Proc(const Proc &) = delete;
     Proc &operator=(const Proc &) = delete;
 
@@ -419,7 +334,7 @@ struct Proc
 private:
     auto update_status(int wstatus) -> void;
 };
-}; // namespace bld
+} // namespace bld
 
 // clang-format off
 template <>
@@ -428,41 +343,17 @@ struct std::formatter<bld::Proc::Status>
     enum class mode { plain, debug };
     mode fmt = mode::plain;
 
-    constexpr auto parse(std::format_parse_context& ctx)
-    {
-        auto it = ctx.begin();
-
-        if (it != ctx.end() && *it != '}') {
-            switch (*it) {
-            case 'p': fmt = mode::plain; break;
-            case '?': fmt = mode::debug; break;
-            default: throw std::format_error("invalid Proc::Status format specifier");
-            }
-            ++it;
-        }
-        return it;
-    }
+    constexpr auto parse(std::format_parse_context& ctx) -> std::format_parse_context::iterator;
     auto format(const bld::Proc::Status& s, std::format_context& ctx) const -> std::format_context::iterator;
 };
+
 template <>
 struct std::formatter<bld::Proc>
 {
     bool show_pid   = false;
     bool show_debug = false;
-    constexpr auto parse(std::format_parse_context& ctx)
-    {
-        auto it = ctx.begin();
-
-        while (it != ctx.end() && *it != '}') {
-            switch (*it) {
-            case 'p': show_pid = true; break;
-            case '?': show_debug = true; break;
-            default: throw std::format_error("invalid Proc format specifier");
-            }
-            ++it;
-        }
-        return it;
-    }
+    
+    constexpr auto parse(std::format_parse_context& ctx) -> std::format_parse_context::iterator;
     auto format(const bld::Proc& p, std::format_context& ctx) const -> std::format_context::iterator;
 };
 // clang-format on
@@ -481,13 +372,9 @@ struct Fd_view
     Native_t val{INVALID};
 
     constexpr Fd_view() = default;
-    explicit constexpr Fd_view(Native_t v) : val(v)
-    {}
+    explicit constexpr Fd_view(Native_t v);
 
-    [[nodiscard]] constexpr auto is_valid() const noexcept -> bool
-    {
-        return val != INVALID;
-    }
+    [[nodiscard]] constexpr auto is_valid() const noexcept -> bool;
 };
 
 struct Owned_Fd
@@ -495,13 +382,10 @@ struct Owned_Fd
     Fd_view::Native_t handle_{Fd_view::INVALID};
 
     constexpr Owned_Fd() = default;
-    explicit constexpr Owned_Fd(Fd_view::Native_t v) : handle_(v)
-    {}
+    explicit constexpr Owned_Fd(Fd_view::Native_t v);
 
-    // RAII Guarantee
     ~Owned_Fd();
 
-    // Rule of 5: Move-only semantics prevent double-closing!
     Owned_Fd(const Owned_Fd &) = delete;
     Owned_Fd &operator=(const Owned_Fd &) = delete;
 
@@ -524,7 +408,6 @@ struct Proc_config
     Fd_view out{Fd_view::INVALID};
     Fd_view err{Fd_view::INVALID};
     Fd_view in{Fd_view::INVALID};
-
     bool merge_err_and_out{false};
 };
 
@@ -543,10 +426,9 @@ namespace details {
 auto execute(const bld::Cmd &cmd, const Proc_config &cfg, std::source_location loc = std::source_location::current())
     -> std::expected<bld::Proc, bld::Err>;
 
-// DECLARE THE HEAVY CAPTURE BACKEND
 auto capture_execute(const bld::Cmd &cmd, bld::Capture_config &cap_cfg, std::source_location loc = std::source_location::current())
     -> std::expected<bld::Proc::Status, bld::Err>;
-}; // namespace details
+} // namespace details
 
 // clang-format off
 struct async
@@ -581,12 +463,6 @@ struct in_s
     auto operator()(bld::Proc_config& cfg) const -> void;
     auto operator()(bld::Capture_config& cfg) const -> void;
 };
-// When you do bld::run(....., bld::out_f{"file"});
-// The fork() will happen and Fd ref-count will go up in the OS and hence
-// the Fd will always stay active even when the function is finished in the parent and
-// and destructor of Owned_Fd will only reduce the ref-count and not totally close the Fd.
-//
-// So as long as you are using these functions with fork, we are fine.
 struct out_f
 {
     bld::Owned_Fd fd{};
@@ -652,69 +528,28 @@ template <typename T>
 concept Config_modifier_c = requires(T &&modifier, Proc_config &cfg) { modifier(cfg); };
 
 template <typename... Configs>
-constexpr auto validate_run_configs() -> void
-{
-    constexpr int out_count = (bld::is_out_mod_v<Configs> + ... + 0);
-    constexpr int err_count = (bld::is_err_mod_v<Configs> + ... + 0);
-    constexpr int in_count = (bld::is_in_mod_v<Configs> + ... + 0);
-    constexpr int batch_count = (bld::is_batch_mod_v<Configs> + ... + 0);
-    static_assert(out_count <= 1, "API ERROR: Duplicate 'out pipe' modifiers. You passed multiple `bld::out_f` / `bld::out_s`.");
-    static_assert(err_count <= 1, "API ERROR: Duplicate 'err pipe' modifiers. You passed multiple `bld::err_f` / `bld::err_s`.");
-    static_assert(in_count <= 1, "API ERROR: Duplicate 'in pipe' modifiers. You passed multiple `bld::in_f` / `bld::in_s`.");
-    static_assert(batch_count <= 1, "API ERROR: Duplicate `bld::pipe` batch modifiers passed.");
-    static_assert(
-        batch_count == 0 || (out_count == 0 && err_count == 0 && in_count == 0),
-        "FATAL API ERROR: Cannot mix monolithic `bld::pipe` with granular `bld::out_f`, `bld::err_s`, etc.");
-}
+constexpr auto validate_run_configs() -> void;
 
 struct Cmd_loc
 {
     const Cmd &cmd;
     std::source_location loc;
-
-    Cmd_loc(const Cmd &c, std::source_location l = std::source_location::current()) : cmd(c), loc(l)
-    {}
+    Cmd_loc(const Cmd &c, std::source_location l = std::source_location::current());
 };
 
 template <typename... Configs>
     requires(Config_modifier_c<Configs> && ...)
-auto run(Cmd_loc cl, Configs &&...confs) -> std::expected<bld::Proc, bld::Err>
-{
-    bld::validate_run_configs<Configs...>();
-
-    Proc_config cfg{};
-    (confs(cfg), ...);
-    if (cfg.loc.line() == std::source_location::current().line()) {
-        cfg.loc = cl.loc;
-    }
-    return bld::details::execute(cl.cmd, cfg, cl.loc);
-}
+auto run(Cmd_loc cl, Configs &&...confs) -> std::expected<bld::Proc, bld::Err>;
 
 template <typename T>
 concept Capture_modifier_c = requires(T &&modifier, Capture_config &cfg) { modifier(cfg); };
 
 template <typename... Configs>
-constexpr auto validate_capture_configs() -> void
-{
-    constexpr int out_count = (bld::is_cap_out_mod_v<Configs> + ... + 0);
-    constexpr int err_count = (bld::is_cap_err_mod_v<Configs> + ... + 0);
-    static_assert(out_count <= 1 && err_count <= 1, "FATAL: Conflicting capture modifiers passed.");
-}
+constexpr auto validate_capture_configs() -> void;
 
 template <typename... Configs>
     requires(Capture_modifier_c<Configs> && ...)
-auto capture(Cmd_loc cl, Configs &&...confs) -> std::expected<bld::Proc::Status, bld::Err>
-{
-    bld::validate_capture_configs<Configs...>();
-
-    Capture_config cap_cfg{};
-    (confs(cap_cfg), ...);
-    if (cap_cfg.loc.line() == std::source_location::current().line()) {
-        cap_cfg.loc = cl.loc;
-    }
-
-    return bld::details::capture_execute(cl.cmd, cap_cfg, cl.loc);
-}
+auto capture(Cmd_loc cl, Configs &&...confs) -> std::expected<bld::Proc::Status, bld::Err>;
 
 auto wait_all(std::span<bld::Proc> procs) -> std::expected<std::size_t, bld::Err>;
 
@@ -725,16 +560,11 @@ struct Task
 
     template <typename... Configs>
         requires(Config_modifier_c<Configs> && ...)
-    explicit Task(Cmd_loc cl, Configs &&...confs) : cmd(cl.cmd)
-    {
-        bld::validate_run_configs<Configs...>();
-        (confs(cfg), ...);
-        cfg.loc = cl.loc;
-        cfg.async = true;
-    }
+    explicit Task(Cmd_loc cl, Configs &&...confs);
 };
+
 auto run(std::span<bld::Task> tasks, std::size_t max_jobs = 0) -> std::expected<void, bld::Err>;
-}; // namespace bld
+} // namespace bld
 
 namespace bld {
 [[nodiscard]]
@@ -742,41 +572,13 @@ auto is_outdated(std::string_view target, std::string_view source) -> bool;
 
 template <std::ranges::range Range>
     requires std::convertible_to<std::ranges::range_value_t<Range>, std::string_view>
-[[nodiscard]] auto is_outdated(std::string_view target, const Range &sources) -> bool
-{
-    namespace fs = std::filesystem;
-    std::error_code ec;
-    if (!fs::exists(target, ec)) {
-        bld::log::w("Target '{}' does not exist. Rebuild required.", target);
-        return true;
-    }
-    auto target_time = fs::last_write_time(target, ec);
-    if (ec) {
-        bld::log::w("Failed to read timestamp for target '{}': {}. Defaulting to rebuild.", target, ec.message());
-        return true;
-    }
-    for (const auto &src : sources) {
-        std::string_view source{src};
-        if (!fs::exists(source, ec)) {
-            bld::log::w("Source file missing: '{}'. Forcing rebuild.", source);
-            return true;
-        }
-        auto source_time = fs::last_write_time(source, ec);
-        if (ec) {
-            bld::log::w("Failed to read timestamp for source '{}': {}. Defaulting to rebuild.", source, ec.message());
-            return true;
-        }
-        if (target_time < source_time) {
-            return true;
-        }
-    }
-    return false;
-}
+[[nodiscard]] auto is_outdated(std::string_view target, const Range &sources) -> bool;
 
 auto get_current_cxx_compiler() -> std::string_view;
+
 auto rebuild_this_when_needed(int argc, char **argv, std::string_view compiler = "", std::source_location loc = std::source_location::current())
     -> void;
-// Also considers changes in this header file.
+
 auto rebuild_this_when_needed_ext(
     int argc,
     char **argv,
@@ -784,7 +586,7 @@ auto rebuild_this_when_needed_ext(
     std::string_view compiler = "",
     std::source_location loc = std::source_location::current()) -> void;
 
-}; // namespace bld
+} // namespace bld
 
 namespace bld {
 class Config
@@ -805,7 +607,6 @@ public:
     std::flat_map<std::string_view, Option> options{};
 
     static auto get() -> Config &;
-
     Config(const Config &) = delete;
     Config &operator=(const Config &) = delete;
     Config(Config &&) = delete;
@@ -825,43 +626,21 @@ public:
         operator double() const;
         operator std::vector<std::string>() const;
     };
-
     auto operator[](std::string_view key) const -> Proxy;
-
     auto print_help(std::string_view prog_name, std::string_view specific_opt = "") const -> void;
-
     auto parse(int argc, char *argv[]) -> void;
-
     template <typename T>
     auto get_val(std::string_view key) const -> std::expected<T, bld::Err>;
 
 private:
     Config() = default;
 };
-
-template <typename T>
-inline auto Config::get_val(std::string_view key) const -> std::expected<T, bld::Err>
-{
-    auto it = data.find(key);
-    if (it == data.end()) {
-        return std::unexpected(bld::Err::erc(std::errc::invalid_argument, std::format("Configuration key '{}' not found", key)));
-    }
-    if (auto *p = std::get_if<T>(&it->second)) {
-        return *p;
-    }
-    return std::unexpected(bld::Err::erc(std::errc::invalid_argument, std::format("Configuration key '{}' has mismatched type", key)));
-}
-
 } // namespace bld
 
 template <>
 struct std::formatter<std::unordered_map<std::string_view, bld::Config::value_type>>
 {
-    constexpr auto parse(std::format_parse_context &ctx)
-    {
-        auto it = ctx.begin();
-        return it;
-    }
+    constexpr auto parse(std::format_parse_context &ctx) -> std::format_parse_context::iterator;
     auto format(const std::unordered_map<std::string_view, bld::Config::value_type> &m, std::format_context &ctx) const
         -> std::format_context::iterator;
 };
@@ -902,46 +681,11 @@ struct std::formatter<bld::test::compute_diff_op>
 {
     bool use_color = true;
 
-    constexpr auto parse(std::format_parse_context &ctx)
-    {
-        auto it = ctx.begin();
-        auto end = ctx.end();
-        if (it != end && *it != '}') {
-            if (*it == 'n') {
-                use_color = false;
-                ++it;
-            } else if (*it == 'c') {
-                use_color = true;
-                ++it;
-            } else {
-                throw std::format_error("invalid format specifier for compute_diff_op");
-            }
-        }
-
-        if (it != end && *it != '}') {
-            throw std::format_error("invalid format specifier for compute_diff_op");
-        }
-
-        return it;
-    }
-
+    constexpr auto parse(std::format_parse_context &ctx) -> std::format_parse_context::iterator;
     auto format(const bld::test::compute_diff_op &diff, std::format_context &ctx) const -> std::format_context::iterator;
 };
 
-// =============================================================================
-// 8. Filesystem
-// =============================================================================
-
-namespace bld {
-
-[[nodiscard]] auto
-make_dir_if_not_exists(std::string_view path, bool create_parents = true, std::source_location loc = std::source_location::current()) noexcept
-    -> bool;
-
-} // namespace bld
-
 namespace bld::fs {
-
 auto make_dir_if_not_exists(std::string_view path, bool create_parents = true, std::source_location loc = std::source_location::current()) noexcept
     -> bool;
 
@@ -963,16 +707,15 @@ struct Dir_entry
 };
 
 enum class Walk_action { next, skip_dir, stop };
+
 struct Walk_result
 {
     Walk_action action = Walk_action::next;
     std::error_code error = {};
 
     constexpr Walk_result() = default;
-    constexpr Walk_result(Walk_action a) noexcept : action{a}
-    {}
-    constexpr Walk_result(std::error_code ec) noexcept : action{ec ? Walk_action::stop : Walk_action::next}, error{ec}
-    {}
+    constexpr Walk_result(Walk_action a) noexcept;
+    constexpr Walk_result(std::error_code ec) noexcept;
 };
 
 struct Walk_error
@@ -985,7 +728,6 @@ struct Walk_error
     [[nodiscard]] std::string message() const;
 };
 
-// Convenience alias — everything returns this
 template <typename T>
 using Walk_result_t = std::expected<T, Walk_error>;
 
@@ -996,17 +738,9 @@ template <typename V>
 concept Result_visitor = std::invocable<V, const Dir_entry &> && std::convertible_to<std::invoke_result_t<V, const Dir_entry &>, Walk_result>;
 template <typename V>
 concept Valid_visitor = Void_visitor<V> || Result_visitor<V>;
-template <Valid_visitor V>
-auto invoke_visitor(V &&v, const Dir_entry &e) -> Walk_result
-{
-    if constexpr (Void_visitor<V>) {
-        std::invoke(std::forward<V>(v), e);
-        return {};
-    } else {
-        return std::invoke(std::forward<V>(v), e);
-    }
-}
 
+template <Valid_visitor V>
+auto invoke_visitor(V &&v, const Dir_entry &e) -> Walk_result;
 } // namespace detail
 
 class Dir_walker
@@ -1023,114 +757,46 @@ public:
     [[nodiscard]] auto follow_symlinks(bool v = true) noexcept -> Dir_walker &;
     [[nodiscard]] auto max_depth(int v) noexcept -> Dir_walker &;
 
-    // built-in filters (all ANDed)
     [[nodiscard]] auto ext(std::string e) -> Dir_walker &;
-    // Multiple extensions: walker.ext({".cpp", ".cc", ".cxx"})
     [[nodiscard]] auto ext(std::initializer_list<std::string_view> exts) -> Dir_walker &;
     [[nodiscard]] auto named(std::string name) -> Dir_walker &;
-
-    // Skip directories by name — won't descend into them
     [[nodiscard]] auto skip(std::string dir_name) -> Dir_walker &;
-
     [[nodiscard]] auto skip(std::initializer_list<std::string_view> dir_names) -> Dir_walker &;
 
-    // Arbitrary predicate
-    [[nodiscard]] auto where(std::predicate<const Dir_entry &> auto pred) -> Dir_walker &
-    {
-        filters_.emplace_back(std::move(pred));
-        return *this;
-    }
-
-    // Walk with a visitor callback
+    template <typename Pred>
+        requires std::predicate<Pred, const Dir_entry &>
+    [[nodiscard]] auto where(Pred pred) -> Dir_walker &;
     template <detail::Valid_visitor V>
-    [[nodiscard]]
-    auto walk(V &&visitor, std::source_location caller = std::source_location::current()) const noexcept -> Walk_result_t<void>
-    {
-        return run([&](const Dir_entry &e) { return detail::invoke_visitor(std::forward<V>(visitor), e); }, caller);
-    }
-
-    // Collect all matching entries
-    [[nodiscard]]
-    auto collect(std::source_location caller = std::source_location::current()) const noexcept -> Walk_result_t<std::vector<Dir_entry>>;
-
-    // Collect only paths
+    [[nodiscard]] auto walk(V &&visitor, std::source_location caller = std::source_location::current()) const noexcept -> Walk_result_t<void>;
+    [[nodiscard]] auto collect(std::source_location caller = std::source_location::current()) const noexcept -> Walk_result_t<std::vector<Dir_entry>>;
     [[nodiscard]]
     auto collect_paths(std::source_location caller = std::source_location::current()) const noexcept
         -> Walk_result_t<std::vector<std::filesystem::path>>;
-
-    // Count matching entries (short-circuits nothing, full scan)
     [[nodiscard]]
     auto count(std::source_location caller = std::source_location::current()) const noexcept -> Walk_result_t<std::size_t>;
-
-    // True if any entry matches (short-circuits on first hit)
     [[nodiscard]]
     auto any(std::source_location caller = std::source_location::current()) const noexcept -> Walk_result_t<bool>;
-
-    // True if no entry matches
     [[nodiscard]]
     auto none(std::source_location caller = std::source_location::current()) const noexcept -> Walk_result_t<bool>;
-
-    // First matching entry, if any
     [[nodiscard]]
     auto first(std::source_location caller = std::source_location::current()) const noexcept -> Walk_result_t<std::optional<Dir_entry>>;
-
-    // Last matching entry (full scan)
     [[nodiscard]]
     auto last(std::source_location caller = std::source_location::current()) const noexcept -> Walk_result_t<std::optional<Dir_entry>>;
-
-    // For each — alias for walk() with void visitor, reads more naturally
-    // in non-control-flow contexts
     template <std::invocable<const Dir_entry &> F>
     [[nodiscard]]
-    auto for_each(F &&fn, std::source_location caller = std::source_location::current()) const noexcept -> Walk_result_t<void>
-    {
-        return run(
-            [&](const Dir_entry &e) -> Walk_result {
-                std::invoke(std::forward<F>(fn), e);
-                return Walk_action::next;
-            },
-            caller);
-    }
-
-    // Partition into {matching, non-matching}
+    auto for_each(F &&fn, std::source_location caller = std::source_location::current()) const noexcept -> Walk_result_t<void>;
+    template <typename Pred>
+        requires std::predicate<Pred, const Dir_entry &>
     [[nodiscard]]
-    auto partition(std::predicate<const Dir_entry &> auto pred, std::source_location caller = std::source_location::current()) const noexcept
-        -> Walk_result_t<std::pair<std::vector<Dir_entry>, std::vector<Dir_entry>>>
-    {
-        std::vector<Dir_entry> yes, no;
-        return run(
-                   [&](const Dir_entry &e) -> Walk_result {
-                       (std::invoke(pred, e) ? yes : no).push_back(e);
-                       return Walk_action::next;
-                   },
-                   caller)
-            .transform([&] { return std::pair{std::move(yes), std::move(no)}; });
-    }
-
-    // Fold/reduce over entries
+    auto partition(Pred pred, std::source_location caller = std::source_location::current()) const noexcept
+        -> Walk_result_t<std::pair<std::vector<Dir_entry>, std::vector<Dir_entry>>>;
     template <typename T, std::invocable<T, const Dir_entry &> F>
     [[nodiscard]]
-    auto fold(T init, F &&fn, std::source_location caller = std::source_location::current()) const noexcept -> Walk_result_t<T>
-    {
-        T acc = std::move(init);
-        return run(
-                   [&](const Dir_entry &e) -> Walk_result {
-                       acc = std::invoke(std::forward<F>(fn), std::move(acc), e);
-                       return Walk_action::next;
-                   },
-                   caller)
-            .transform([&] { return std::move(acc); });
-    }
-
+    auto fold(T init, F &&fn, std::source_location caller = std::source_location::current()) const noexcept -> Walk_result_t<T>;
     [[nodiscard]]
     auto subdir(std::string_view sub) const -> Dir_walker;
-
     template <std::invocable<Dir_walker &> F>
-    [[nodiscard]] auto apply(F &&fn) -> Dir_walker &
-    {
-        std::invoke(std::forward<F>(fn), *this);
-        return *this;
-    }
+    [[nodiscard]] auto apply(F &&fn) -> Dir_walker &;
 
 private:
     std::filesystem::path root_;
@@ -1149,94 +815,617 @@ private:
 
     template <std::invocable<const Dir_entry &> F>
     [[nodiscard]]
-    auto run(F &&fn, std::source_location caller) const noexcept -> Walk_result_t<void>
-    {
-        namespace fs = std::filesystem;
+    auto run(F &&fn, std::source_location caller) const noexcept -> Walk_result_t<void>;
+};
 
-        if (root_.empty()) {
-            bld::log::w("Dir_walker: empty root ({})", caller.function_name());
-            return std::unexpected{Walk_error{.kind = Walk_error::Kind::fs, .code = std::make_error_code(std::errc::invalid_argument)}};
+template <detail::Valid_visitor V>
+[[nodiscard]] inline auto walk(std::string_view root, V &&visitor, std::source_location caller = std::source_location::current()) noexcept;
+
+[[nodiscard]] auto collect(std::string_view root, std::source_location caller = std::source_location::current()) noexcept
+    -> Walk_result_t<std::vector<Dir_entry>>;
+
+// "src/main.cpp" -> "main"
+[[nodiscard]] auto stem(std::string_view path) noexcept -> std::string;
+// "src/main.cpp" -> "main.cpp"
+[[nodiscard]] auto name(std::string_view path) noexcept -> std::string;
+// "src/main.cpp" -> ".cpp"
+[[nodiscard]] auto extension(std::string_view path) noexcept -> std::string;
+// "src/main.cpp" -> "src"
+[[nodiscard]] auto parent_dir(std::string_view path) noexcept -> std::string;
+[[nodiscard]] auto is_absolute(std::string_view path) noexcept -> bool;
+[[nodiscard]] auto is_relative(std::string_view path) noexcept -> bool;
+
+[[nodiscard]] auto exists(std::string_view path) noexcept -> bool;
+[[nodiscard]] auto is_dir(std::string_view path) noexcept -> bool;
+[[nodiscard]] auto is_file(std::string_view path) noexcept -> bool;
+[[nodiscard]] auto is_symlink(std::string_view path) noexcept -> bool;
+[[nodiscard]] auto is_empty(std::string_view path) noexcept -> std::expected<bool, bld::Err>;
+
+template <typename... Paths>
+requires(std::convertible_to<Paths, std::string_view> && ...)
+[[nodiscard]] auto join(Paths &&...paths) -> std::string;
+
+auto file_size(std::string_view path) noexcept -> std::expected<std::uintmax_t, bld::Err>;
+auto last_write_time(std::string_view path) noexcept -> std::expected<std::filesystem::file_time_type, bld::Err>;
+
+auto copy_file(std::string_view from, std::string_view to, bool overwrite = false) noexcept -> std::expected<void, bld::Err>;
+auto rename(std::string_view from, std::string_view to) noexcept -> std::expected<void, bld::Err>;
+
+auto create_symlink(std::string_view target, std::string_view link) noexcept -> std::expected<void, bld::Err>;
+auto create_hard_link(std::string_view target, std::string_view link) noexcept -> std::expected<void, bld::Err>;
+auto read_symlink(std::string_view path) noexcept -> std::expected<std::string, bld::Err>;
+
+auto current_path() noexcept -> std::expected<std::string, bld::Err>;
+auto set_current_path(std::string_view path) noexcept -> std::expected<void, bld::Err>;
+auto absolute(std::string_view path) noexcept -> std::expected<std::string, bld::Err>;
+auto canonical(std::string_view path) noexcept -> std::expected<std::string, bld::Err>;
+auto relative(std::string_view path, std::string_view base) noexcept -> std::expected<std::string, bld::Err>;
+
+auto read_file(std::string_view path) noexcept -> std::expected<std::string, bld::Err>;
+auto write_file(std::string_view path, std::string_view content) noexcept -> std::expected<void, bld::Err>;
+auto append_file(std::string_view path, std::string_view content) noexcept -> std::expected<void, bld::Err>;
+
+template <typename... Paths>
+    requires(std::convertible_to<Paths, std::string_view> && ...)
+auto remove(Paths &&...paths) noexcept -> std::expected<void, bld::Err>;
+
+template <typename... Paths>
+    requires(std::convertible_to<Paths, std::string_view> && ...)
+auto make_dirs(Paths &&...paths) noexcept -> std::expected<void, bld::Err>;
+
+inline auto find_all_files(std::string_view root) noexcept -> Walk_result_t<std::vector<std::string>>;
+
+template <typename... Exts>
+    requires(std::convertible_to<Exts, std::string_view> && ...)
+auto find_by_ext(std::string_view root, Exts &&...exts) noexcept -> Walk_result_t<std::vector<std::string>>;
+
+template <typename... Names>
+    requires(std::convertible_to<Names, std::string_view> && ...)
+auto find_by_name(std::string_view root, Names &&...names) noexcept -> Walk_result_t<std::vector<std::string>>;
+
+} // namespace bld::fs
+
+namespace std {
+constexpr auto formatter<bld::Err>::parse(format_parse_context &ctx) -> format_parse_context::iterator
+{
+    auto it = ctx.begin();
+    if (it != ctx.end() && *it != '}') {
+        switch (*it) {
+        case '?':
+            fmt = mode::debug;
+            break;
+        case 'p':
+            fmt = mode::plain;
+            break;
+        default:
+            throw format_error("invalid Cmd format");
         }
+        ++it;
+    }
+    return it;
+}
 
-        std::error_code ec;
-
-        const auto iter_opts = follow_symlinks_ ? fs::directory_options::skip_permission_denied | fs::directory_options::follow_directory_symlink
-                                                : fs::directory_options::skip_permission_denied;
-
-        auto handle = [&](const Dir_entry &e) -> Walk_result {
-            if (is_skipped(e)) {
-                return Walk_action::skip_dir;
-            }
-            if (!is_visible(e)) {
-                return Walk_action::next;
-            }
-            if (!passes_filters(e)) {
-                return Walk_action::next;
-            }
-            return std::invoke(fn, e);
-        };
-
-        if (!recursive_) {
-            fs::directory_iterator it{root_, iter_opts, ec};
-            if (ec) {
-                return std::unexpected{Walk_error{.kind = Walk_error::Kind::fs, .code = ec}};
-            }
-
-            for (const auto &raw : it) {
-                const auto [action, err] = handle(make_entry(raw, 0));
-                if (err) {
-                    return std::unexpected{Walk_error{.kind = Walk_error::Kind::visitor, .code = err}};
-                }
-                if (action == Walk_action::stop) {
-                    return {};
-                }
-            }
-            return {};
+constexpr auto formatter<bld::Cmd>::parse(format_parse_context &ctx) -> format_parse_context::iterator
+{
+    auto it = ctx.begin();
+    if (it != ctx.end() && *it != '}') {
+        switch (*it) {
+        case 'q':
+            fmt = mode::unquoted;
+            break;
+        case '?':
+            fmt = mode::debug;
+            break;
+        case 'p':
+            fmt = mode::plain;
+            break;
+        default:
+            throw format_error("invalid Cmd format");
         }
+        ++it;
+    }
+    return it;
+}
 
-        fs::recursive_directory_iterator it{root_, iter_opts, ec};
+constexpr auto formatter<bld::Proc::Status>::parse(format_parse_context &ctx) -> format_parse_context::iterator
+{
+    auto it = ctx.begin();
+    if (it != ctx.end() && *it != '}') {
+        switch (*it) {
+        case 'p':
+            fmt = mode::plain;
+            break;
+        case '?':
+            fmt = mode::debug;
+            break;
+        default:
+            throw format_error("invalid Proc::Status format specifier");
+        }
+        ++it;
+    }
+    return it;
+}
+
+constexpr auto formatter<bld::Proc>::parse(format_parse_context &ctx) -> format_parse_context::iterator
+{
+    auto it = ctx.begin();
+    while (it != ctx.end() && *it != '}') {
+        switch (*it) {
+        case 'p':
+            show_pid = true;
+            break;
+        case '?':
+            show_debug = true;
+            break;
+        default:
+            throw format_error("invalid Proc format specifier");
+        }
+        ++it;
+    }
+    return it;
+}
+
+constexpr auto formatter<unordered_map<string_view, bld::Config::value_type>>::parse(format_parse_context &ctx) -> format_parse_context::iterator
+{
+    auto it = ctx.begin();
+    return it;
+}
+
+constexpr auto formatter<bld::test::compute_diff_op>::parse(format_parse_context &ctx) -> format_parse_context::iterator
+{
+    auto it = ctx.begin();
+    auto end = ctx.end();
+    if (it != end && *it != '}') {
+        if (*it == 'n') {
+            use_color = false;
+            ++it;
+        } else if (*it == 'c') {
+            use_color = true;
+            ++it;
+        } else {
+            throw format_error("invalid format specifier for compute_diff_op");
+        }
+    }
+    if (it != end && *it != '}') {
+        throw format_error("invalid format specifier for compute_diff_op");
+    }
+    return it;
+}
+
+} // namespace std
+
+namespace bld {
+
+template <typename T>
+auto Err::with_payload(T &&data) && -> Err
+{
+    payload = std::forward<T>(data);
+    return std::move(*this);
+}
+
+constexpr auto Logger::Default_logger_fn::style(Level lvl) noexcept -> Style
+{
+    using namespace std::string_view_literals;
+    switch (lvl) {
+    case Level::dbg:
+        return {"[DEBUG]", "\x1b[38;2;120;170;255m"sv};
+    case Level::inf:
+        return {"[INFO] ", "\x1b[38;2;0;200;120m"sv};
+    case Level::wrn:
+        return {"[WARN] ", "\x1b[38;2;255;180;0m"sv};
+    case Level::err:
+        return {"[ERROR]", "\x1b[38;2;255;64;64m"sv};
+    case Level::ftl:
+        return {"[FATAL]", "\x1b[38;2;200;0;0m"sv};
+    }
+    std::unreachable();
+}
+
+template <typename... Ts>
+    requires(std::convertible_to<Ts, std::string_view> && ...)
+Cmd::Cmd(Ts &&...ts)
+{
+    args_.reserve(sizeof...(Ts));
+    (args_.emplace_back(std::forward<Ts>(ts)), ...);
+}
+
+template <typename... Ts>
+auto Cmd::emplace_b(Ts &&...ts) -> std::string &
+{
+    return args_.emplace_back(std::forward<Ts>(ts)...);
+}
+
+template <typename... Ts>
+auto Cmd::emplace(const_iterator it, Ts &&...ts) -> std::string &
+{
+    return args_.emplace(it, std::forward<Ts>(ts)...);
+}
+
+auto Cmd::begin(this auto &self) noexcept
+{
+    return self.args_.begin();
+}
+auto Cmd::end(this auto &self) noexcept
+{
+    return self.args_.end();
+}
+auto Cmd::size(this auto const &self) noexcept -> std::size_t
+{
+    return self.args_.size();
+}
+auto Cmd::empty(this auto const &self) noexcept -> bool
+{
+    return self.args_.empty();
+}
+auto Cmd::span(this auto &self) noexcept
+{
+    return std::span{self.args_};
+}
+
+constexpr Fd_view::Fd_view(Native_t v) : val(v)
+{}
+constexpr auto Fd_view::is_valid() const noexcept -> bool
+{
+    return val != INVALID;
+}
+
+constexpr Owned_Fd::Owned_Fd(Fd_view::Native_t v) : handle_(v)
+{}
+
+template <typename... Configs>
+constexpr auto validate_run_configs() -> void
+{
+    constexpr int out_count = (bld::is_out_mod_v<Configs> + ... + 0);
+    constexpr int err_count = (bld::is_err_mod_v<Configs> + ... + 0);
+    constexpr int in_count = (bld::is_in_mod_v<Configs> + ... + 0);
+    constexpr int batch_count = (bld::is_batch_mod_v<Configs> + ... + 0);
+    static_assert(out_count <= 1, "API ERROR: Duplicate 'out pipe' modifiers. You passed multiple `bld::out_f` / `bld::out_s`.");
+    static_assert(err_count <= 1, "API ERROR: Duplicate 'err pipe' modifiers. You passed multiple `bld::err_f` / `bld::err_s`.");
+    static_assert(in_count <= 1, "API ERROR: Duplicate 'in pipe' modifiers. You passed multiple `bld::in_f` / `bld::in_s`.");
+    static_assert(batch_count <= 1, "API ERROR: Duplicate `bld::pipe` batch modifiers passed.");
+    static_assert(
+        batch_count == 0 || (out_count == 0 && err_count == 0 && in_count == 0),
+        "FATAL API ERROR: Cannot mix monolithic `bld::pipe` with granular `bld::out_f`, `bld::err_s`, etc.");
+}
+
+template <typename... Configs>
+    requires(Config_modifier_c<Configs> && ...)
+auto run(Cmd_loc cl, Configs &&...confs) -> std::expected<bld::Proc, bld::Err>
+{
+    bld::validate_run_configs<Configs...>();
+
+    Proc_config cfg{};
+    (confs(cfg), ...);
+    if (cfg.loc.line() == std::source_location::current().line()) {
+        cfg.loc = cl.loc;
+    }
+    return bld::details::execute(cl.cmd, cfg, cl.loc);
+}
+
+template <typename... Configs>
+constexpr auto validate_capture_configs() -> void
+{
+    constexpr int out_count = (bld::is_cap_out_mod_v<Configs> + ... + 0);
+    constexpr int err_count = (bld::is_cap_err_mod_v<Configs> + ... + 0);
+    static_assert(out_count <= 1 && err_count <= 1, "FATAL: Conflicting capture modifiers passed.");
+}
+
+template <typename... Configs>
+    requires(Capture_modifier_c<Configs> && ...)
+auto capture(Cmd_loc cl, Configs &&...confs) -> std::expected<bld::Proc::Status, bld::Err>
+{
+    bld::validate_capture_configs<Configs...>();
+
+    Capture_config cap_cfg{};
+    (confs(cap_cfg), ...);
+    if (cap_cfg.loc.line() == std::source_location::current().line()) {
+        cap_cfg.loc = cl.loc;
+    }
+
+    return bld::details::capture_execute(cl.cmd, cap_cfg, cl.loc);
+}
+
+template <typename... Configs>
+    requires(Config_modifier_c<Configs> && ...)
+Task::Task(Cmd_loc cl, Configs &&...confs) : cmd(cl.cmd)
+{
+    bld::validate_run_configs<Configs...>();
+    (confs(cfg), ...);
+    cfg.loc = cl.loc;
+    cfg.async = true;
+}
+
+template <std::ranges::range Range>
+    requires std::convertible_to<std::ranges::range_value_t<Range>, std::string_view>
+auto is_outdated(std::string_view target, const Range &sources) -> bool
+{
+    namespace fs = std::filesystem;
+    std::error_code ec;
+    if (!fs::exists(target, ec)) {
+        bld::log::w("Target '{}' does not exist. Rebuild required.", target);
+        return true;
+    }
+    auto target_time = fs::last_write_time(target, ec);
+    if (ec) {
+        bld::log::w("Failed to read timestamp for target '{}': {}. Defaulting to rebuild.", target, ec.message());
+        return true;
+    }
+    for (const auto &src : sources) {
+        std::string_view source{src};
+        if (!fs::exists(source, ec)) {
+            bld::log::w("Source file missing: '{}'. Forcing rebuild.", source);
+            return true;
+        }
+        auto source_time = fs::last_write_time(source, ec);
+        if (ec) {
+            bld::log::w("Failed to read timestamp for source '{}': {}. Defaulting to rebuild.", source, ec.message());
+            return true;
+        }
+        if (target_time < source_time) {
+            return true;
+        }
+    }
+    return false;
+}
+
+template <typename T>
+auto Config::get_val(std::string_view key) const -> std::expected<T, bld::Err>
+{
+    auto it = data.find(key);
+    if (it == data.end()) {
+        return std::unexpected(bld::Err::erc(std::errc::invalid_argument, std::format("Configuration key '{}' not found", key)));
+    }
+    if (auto *p = std::get_if<T>(&it->second)) {
+        return *p;
+    }
+    return std::unexpected(bld::Err::erc(std::errc::invalid_argument, std::format("Configuration key '{}' has mismatched type", key)));
+}
+
+} // namespace bld
+
+namespace bld::log {
+
+template <typename... Args>
+inline void invoke_logger(bld::Logger::Level level, std::ostream &str, std::format_string<Args...> fmt, Args &&...args)
+{
+    if (level < bld::Logger::min_lvl.load(std::memory_order_relaxed)) {
+        return;
+    }
+    std::string formatted_str = std::format(fmt, std::forward<Args>(args)...);
+    bld::Logger::Log_record record{.lvl = level, .timestamp = std::chrono::system_clock::now(), .str = formatted_str};
+    std::invoke(bld::Logger::logger_fn, str, record);
+}
+
+template <typename... Args>
+void i(std::format_string<Args...> fmt, Args &&...args)
+{
+    invoke_logger(bld::Logger::Level::inf, bld::Logger::ostream.get(), fmt, std::forward<Args>(args)...);
+}
+
+template <typename... Args>
+void w(std::format_string<Args...> fmt, Args &&...args)
+{
+    invoke_logger(bld::Logger::Level::wrn, bld::Logger::ostream.get(), fmt, std::forward<Args>(args)...);
+}
+
+template <typename... Args>
+void e(std::format_string<Args...> fmt, Args &&...args)
+{
+    invoke_logger(bld::Logger::Level::err, bld::Logger::ostream.get(), fmt, std::forward<Args>(args)...);
+}
+
+template <typename... Args>
+void d(std::format_string<Args...> fmt, Args &&...args)
+{
+    invoke_logger(bld::Logger::Level::dbg, bld::Logger::ostream.get(), fmt, std::forward<Args>(args)...);
+}
+
+template <typename... Args>
+void f(std::format_string<Args...> fmt, Args &&...args)
+{
+    invoke_logger(bld::Logger::Level::ftl, bld::Logger::ostream.get(), fmt, std::forward<Args>(args)...);
+}
+
+template <typename Os, typename... Args>
+    requires std::derived_from<std::remove_reference_t<Os>, std::ostream>
+void i(Os &str, std::format_string<Args...> fmt, Args &&...args)
+{
+    invoke_logger(bld::Logger::Level::inf, str, fmt, std::forward<Args>(args)...);
+}
+
+template <typename Os, typename... Args>
+    requires std::derived_from<std::remove_reference_t<Os>, std::ostream>
+void w(Os &str, std::format_string<Args...> fmt, Args &&...args)
+{
+    invoke_logger(bld::Logger::Level::wrn, str, fmt, std::forward<Args>(args)...);
+}
+
+template <typename Os, typename... Args>
+    requires std::derived_from<std::remove_reference_t<Os>, std::ostream>
+void e(Os &str, std::format_string<Args...> fmt, Args &&...args)
+{
+    invoke_logger(bld::Logger::Level::err, str, fmt, std::forward<Args>(args)...);
+}
+
+template <typename Os, typename... Args>
+    requires std::derived_from<std::remove_reference_t<Os>, std::ostream>
+void d(Os &str, std::format_string<Args...> fmt, Args &&...args)
+{
+    invoke_logger(bld::Logger::Level::dbg, str, fmt, std::forward<Args>(args)...);
+}
+
+template <typename Os, typename... Args>
+    requires std::derived_from<std::remove_reference_t<Os>, std::ostream>
+void f(Os &str, std::format_string<Args...> fmt, Args &&...args)
+{
+    invoke_logger(bld::Logger::Level::ftl, str, fmt, std::forward<Args>(args)...);
+}
+
+} // namespace bld::log
+
+namespace bld::fs {
+
+constexpr Walk_result::Walk_result(Walk_action a) noexcept : action{a}
+{}
+constexpr Walk_result::Walk_result(std::error_code ec) noexcept : action{ec ? Walk_action::stop : Walk_action::next}, error{ec}
+{}
+
+namespace detail {
+template <Valid_visitor V>
+auto invoke_visitor(V &&v, const Dir_entry &e) -> Walk_result
+{
+    if constexpr (Void_visitor<V>) {
+        std::invoke(std::forward<V>(v), e);
+        return {};
+    } else {
+        return std::invoke(std::forward<V>(v), e);
+    }
+}
+} // namespace detail
+
+template <typename Pred>
+    requires std::predicate<Pred, const Dir_entry &>
+auto Dir_walker::where(Pred pred) -> Dir_walker &
+{
+    filters_.emplace_back(std::move(pred));
+    return *this;
+}
+
+template <detail::Valid_visitor V>
+auto Dir_walker::walk(V &&visitor, std::source_location caller) const noexcept -> Walk_result_t<void>
+{
+    return run([&](const Dir_entry &e) { return detail::invoke_visitor(std::forward<V>(visitor), e); }, caller);
+}
+
+template <std::invocable<const Dir_entry &> F>
+auto Dir_walker::for_each(F &&fn, std::source_location caller) const noexcept -> Walk_result_t<void>
+{
+    return run(
+        [&](const Dir_entry &e) -> Walk_result {
+            std::invoke(std::forward<F>(fn), e);
+            return Walk_action::next;
+        },
+        caller);
+}
+
+template <typename Pred>
+    requires std::predicate<Pred, const Dir_entry &>
+auto Dir_walker::partition(Pred pred, std::source_location caller) const noexcept
+    -> Walk_result_t<std::pair<std::vector<Dir_entry>, std::vector<Dir_entry>>>
+{
+    std::vector<Dir_entry> yes, no;
+    return run(
+               [&](const Dir_entry &e) -> Walk_result {
+                   (std::invoke(pred, e) ? yes : no).push_back(e);
+                   return Walk_action::next;
+               },
+               caller)
+        .transform([&] { return std::pair{std::move(yes), std::move(no)}; });
+}
+
+template <typename T, std::invocable<T, const Dir_entry &> F>
+auto Dir_walker::fold(T init, F &&fn, std::source_location caller) const noexcept -> Walk_result_t<T>
+{
+    T acc = std::move(init);
+    return run(
+               [&](const Dir_entry &e) -> Walk_result {
+                   acc = std::invoke(std::forward<F>(fn), std::move(acc), e);
+                   return Walk_action::next;
+               },
+               caller)
+        .transform([&] { return std::move(acc); });
+}
+
+template <std::invocable<Dir_walker &> F>
+auto Dir_walker::apply(F &&fn) -> Dir_walker &
+{
+    std::invoke(std::forward<F>(fn), *this);
+    return *this;
+}
+
+template <std::invocable<const Dir_entry &> F>
+auto Dir_walker::run(F &&fn, std::source_location caller) const noexcept -> Walk_result_t<void>
+{
+    namespace fs = std::filesystem;
+
+    if (root_.empty()) {
+        bld::log::w("Dir_walker: empty root ({})", caller.function_name());
+        return std::unexpected{Walk_error{.kind = Walk_error::Kind::fs, .code = std::make_error_code(std::errc::invalid_argument)}};
+    }
+
+    std::error_code ec;
+    const auto iter_opts = follow_symlinks_ ? fs::directory_options::skip_permission_denied | fs::directory_options::follow_directory_symlink
+                                            : fs::directory_options::skip_permission_denied;
+
+    auto handle = [&](const Dir_entry &e) -> Walk_result {
+        if (is_skipped(e)) {
+            return Walk_action::skip_dir;
+        }
+        if (!is_visible(e)) {
+            return Walk_action::next;
+        }
+        if (!passes_filters(e)) {
+            return Walk_action::next;
+        }
+        return std::invoke(fn, e);
+    };
+
+    if (!recursive_) {
+        fs::directory_iterator it{root_, iter_opts, ec};
         if (ec) {
             return std::unexpected{Walk_error{.kind = Walk_error::Kind::fs, .code = ec}};
         }
 
         for (const auto &raw : it) {
-            const int d = it.depth();
-            if (d >= max_depth_) {
-                it.disable_recursion_pending();
-            }
-
-            const auto [action, err] = handle(make_entry(raw, d));
-
+            const auto [action, err] = handle(make_entry(raw, 0));
             if (err) {
                 return std::unexpected{Walk_error{.kind = Walk_error::Kind::visitor, .code = err}};
             }
-
-            switch (action) {
-            case Walk_action::stop:
-                it = {};
+            if (action == Walk_action::stop) {
                 return {};
-            case Walk_action::skip_dir:
-                it.disable_recursion_pending();
-                break;
-            case Walk_action::next:
-                break;
             }
         }
-
         return {};
     }
-};
 
-[[nodiscard]] inline auto
-walk(std::string_view root, detail::Valid_visitor auto &&visitor, std::source_location caller = std::source_location::current()) noexcept
-{
-    return Dir_walker{root}.walk(std::forward<decltype(visitor)>(visitor), caller);
+    fs::recursive_directory_iterator it{root_, iter_opts, ec};
+    if (ec) {
+        return std::unexpected{Walk_error{.kind = Walk_error::Kind::fs, .code = ec}};
+    }
+
+    for (const auto &raw : it) {
+        const int d = it.depth();
+        if (d >= max_depth_) {
+            it.disable_recursion_pending();
+        }
+
+        const auto [action, err] = handle(make_entry(raw, d));
+
+        if (err) {
+            return std::unexpected{Walk_error{.kind = Walk_error::Kind::visitor, .code = err}};
+        }
+
+        switch (action) {
+        case Walk_action::stop:
+            it = {};
+            return {};
+        case Walk_action::skip_dir:
+            it.disable_recursion_pending();
+            break;
+        case Walk_action::next:
+            break;
+        }
+    }
+
+    return {};
 }
 
-[[nodiscard]] inline auto collect(std::string_view root, std::source_location caller = std::source_location::current()) noexcept
+template <detail::Valid_visitor V>
+inline auto walk(std::string_view root, V &&visitor, std::source_location caller) noexcept
 {
-    return Dir_walker{root}.collect(caller);
+    return Dir_walker{root}.walk(std::forward<V>(visitor), caller);
 }
+
 } // namespace bld::fs
 
 #endif // B_LDR_HPP
@@ -1245,8 +1434,11 @@ walk(std::string_view root, detail::Valid_visitor auto &&visitor, std::source_lo
 #ifndef B_LDR_IMPLEMENTATION_ONCE
 #define B_LDR_IMPLEMENTATION_ONCE
 
+// Implementation
+
 #include <cstring>
 #include <filesystem>
+#include <fstream>
 #include <thread>
 
 auto bld::Err::erc(std::errc code, std::string message) -> Err
@@ -1296,10 +1488,6 @@ auto std::formatter<bld::Err>::format(const bld::Err &err, std::format_context &
     return out;
 }
 
-// =============================================================================
-// 2. Logging
-// =============================================================================
-
 void bld::log::detail::Stream_proxy::operator=(std::ostream &os)
 {
     ptr = &os;
@@ -1333,10 +1521,6 @@ auto bld::Logger::set_logger_fn(Logger_fn_t fn, std::source_location loc) -> voi
     logger_locked = true;
     logger_fn = std::move(fn);
 }
-
-// =============================================================================
-// 3. Commands and processes
-// =============================================================================
 
 auto bld::Cmd::push(std::string_view s) -> void
 {
@@ -1376,6 +1560,9 @@ auto std::formatter<bld::Cmd>::format(const bld::Cmd &cmd, std::format_context &
     }
     return out;
 }
+
+bld::Cmd_loc::Cmd_loc(const Cmd &c, std::source_location l) : cmd(c), loc(l)
+{}
 
 bld::Proc::Proc(P_id id, const std::string &label_) : id_(id)
 {
@@ -1633,10 +1820,6 @@ auto std::formatter<bld::Proc>::format(const bld::Proc &p, std::format_context &
     return out;
 }
 
-// =============================================================================
-// 4. Execution
-// =============================================================================
-
 bld::Owned_Fd::~Owned_Fd()
 {
     close();
@@ -1734,14 +1917,63 @@ auto bld::in_s::operator()(bld::Capture_config &cfg) const -> void
     cfg.in = fd;
 }
 
+bld::out_f::out_f(std::string_view path, bld::Open_mode mode)
+{
+    std::filesystem::path p{path};
+    if (p.has_parent_path() && !std::filesystem::exists(p.parent_path())) {
+        bld::log::f("Fatal: Parent directory for output file '{}' does not exist.", path);
+        std::exit(EXIT_FAILURE);
+    }
+    auto res = bld::Owned_Fd::open(path, mode);
+    if (!res) {
+        bld::log::f("Fatal: Could not open output file '{}': {}", path, res.error().msg);
+        std::exit(EXIT_FAILURE);
+    }
+    bld::log::i("Opened out fd: {} (file: '{}')", res->handle_, path);
+    fd = std::move(*res);
+}
+
 auto bld::out_f::operator()(bld::Proc_config &cfg) const -> void
 {
     cfg.out = fd;
 }
 
+bld::err_f::err_f(std::string_view path, bld::Open_mode mode)
+{
+    std::filesystem::path p{path};
+
+    if (p.has_parent_path() && !std::filesystem::exists(p.parent_path())) {
+        bld::log::f("Parent directory for error log '{}' does not exist.", path);
+        std::exit(EXIT_FAILURE);
+    }
+    auto res = bld::Owned_Fd::open(path, mode);
+    if (!res) {
+        bld::log::f("Could not open error file '{}': {}", path, res.error().msg);
+        std::exit(EXIT_FAILURE);
+    }
+    bld::log::i("Opened err fd: {}: (file: '{}')", res->handle_, path);
+    fd = std::move(*res);
+}
+
 auto bld::err_f::operator()(bld::Proc_config &cfg) const -> void
 {
     cfg.err = fd;
+}
+
+bld::in_f::in_f(std::string_view path)
+{
+    std::filesystem::path p{path};
+    if (!std::filesystem::exists(p)) {
+        bld::log::f("Fatal: Path '{}' for reading input doesn't exist.", path);
+        std::exit(EXIT_FAILURE);
+    }
+    auto res = bld::Owned_Fd::open(path, bld::Open_mode::read);
+    if (!res) {
+        bld::log::f("Fatal: Could not open input file '{}': {}", path, res.error().msg);
+        std::exit(EXIT_FAILURE);
+    }
+    bld::log::i("Opened in fd: {}: (file: '{}')", res->handle_, path);
+    fd = std::move(*res);
 }
 
 auto bld::in_f::operator()(bld::Proc_config &cfg) const -> void
@@ -1958,57 +2190,6 @@ auto bld::details::capture_execute(const bld::Cmd &cmd, bld::Capture_config &cap
     return proc.wait();
 }
 
-bld::out_f::out_f(std::string_view path, bld::Open_mode mode)
-{
-    std::filesystem::path p{path};
-    if (p.has_parent_path() && !std::filesystem::exists(p.parent_path())) {
-        bld::log::f("Fatal: Parent directory for output file '{}' does not exist.", path);
-        std::exit(EXIT_FAILURE);
-    }
-    auto res = bld::Owned_Fd::open(path, mode);
-    if (!res) {
-        bld::log::f("Fatal: Could not open output file '{}': {}", path, res.error().msg);
-        std::exit(EXIT_FAILURE);
-    }
-    bld::log::i("Opened out fd: {} (file: '{}')", res->handle_, path);
-    fd = std::move(*res);
-}
-bld::err_f::err_f(std::string_view path, bld::Open_mode mode)
-{
-    std::filesystem::path p{path};
-
-    if (p.has_parent_path() && !std::filesystem::exists(p.parent_path())) {
-        bld::log::f("Parent directory for error log '{}' does not exist.", path);
-        std::exit(EXIT_FAILURE);
-    }
-    auto res = bld::Owned_Fd::open(path, mode);
-    if (!res) {
-        bld::log::f("Could not open error file '{}': {}", path, res.error().msg);
-        std::exit(EXIT_FAILURE);
-    }
-    bld::log::i("Opened err fd: {}: (file: '{}')", res->handle_, path);
-    fd = std::move(*res);
-}
-bld::in_f::in_f(std::string_view path)
-{
-    std::filesystem::path p{path};
-    if (!std::filesystem::exists(p)) {
-        bld::log::f("Fatal: Path '{}' for reading input doesn't exist.", path);
-        std::exit(EXIT_FAILURE);
-    }
-    auto res = bld::Owned_Fd::open(path, bld::Open_mode::read);
-    if (!res) {
-        bld::log::f("Fatal: Could not open input file '{}': {}", path, res.error().msg);
-        std::exit(EXIT_FAILURE);
-    }
-    bld::log::i("Opened in fd: {}: (file: '{}')", res->handle_, path);
-    fd = std::move(*res);
-}
-
-// =============================================================================
-// 5. Rebuild helpers
-// =============================================================================
-
 auto bld::is_outdated(std::string_view target, std::string_view source) -> bool
 {
     namespace fs = std::filesystem;
@@ -2108,7 +2289,6 @@ auto bld::rebuild_this_when_needed(int argc, char **argv, std::string_view compi
 
     bld::log::i("Successfully rebuilt! Restarting...");
 
-    // 5. The Restart
     std::vector<char *> c_argv(args_span.begin(), args_span.end());
     c_argv.push_back(nullptr);
 
@@ -2196,7 +2376,6 @@ auto bld::wait_all(std::span<bld::Proc> procs) -> std::expected<std::size_t, bld
     bld::log::i("Waiting for {} processes, asynchronously", total);
     while (remaining > 0) {
         int wstatus = 0;
-        // -1 to block this thread until any child process exits
         pid_t pid = ::waitpid(-1, &wstatus, 0);
 
         if (pid > 0) {
@@ -2222,10 +2401,10 @@ auto bld::wait_all(std::span<bld::Proc> procs) -> std::expected<std::size_t, bld
             }
         } else if (pid == -1) {
             if (errno == EINTR) {
-                continue; // Interrupted by signal, just retry
+                continue;
             }
             if (errno == ECHILD) {
-                break; // No more child processes exist
+                break;
             }
             bld::log::e("Error in waiting for procs.");
             return std::unexpected(bld::Err::erno(errno, "waitpid failed in wait_all").with_payload(completed));
@@ -2257,15 +2436,12 @@ auto bld::run(std::span<bld::Task> tasks, std::size_t max_jobs) -> std::expected
 
     bld::log::i("Scheduling batch number: {}", batch_n);
     for (const auto &t : tasks) {
-        // Wait until we have a free CPU core!
         if (active_procs.size() >= max_jobs) {
             auto wait_res = bld::wait_all(active_procs);
             if (!wait_res) {
-                // FIX 1: Added std::any_cast
                 completed += std::any_cast<std::size_t>(wait_res.error().payload);
                 bld::log::i("Waiting failed; total completed tasks: {}", completed);
 
-                // FIX 3: Update the payload to reflect the TOTAL completed across all batches
                 auto err = wait_res.error();
                 err.payload = completed;
                 return std::unexpected(std::move(err));
@@ -2296,10 +2472,6 @@ auto bld::run(std::span<bld::Task> tasks, std::size_t max_jobs) -> std::expected
     bld::log::i("Done; total completed tasks: {}", completed);
     return {};
 }
-
-// =============================================================================
-// 6. Config
-// =============================================================================
 
 auto bld::Config::get() -> Config &
 {
@@ -2582,10 +2754,6 @@ auto std::formatter<std::unordered_map<std::string_view, bld::Config::value_type
     return out;
 }
 
-// =============================================================================
-// 7. Test helpers
-// =============================================================================
-
 bld::test::Frontier::Frontier(std::ptrdiff_t max_d) : data(2 * max_d + 1, 0), offset(max_d)
 {}
 
@@ -2598,6 +2766,7 @@ auto bld::test::Frontier::operator[](std::ptrdiff_t k) -> std::ptrdiff_t &
 {
     return data[k + offset];
 }
+
 auto bld::test::Frontier::operator[](std::ptrdiff_t k) const -> std::ptrdiff_t
 {
     return data[k + offset];
@@ -2621,7 +2790,6 @@ auto bld::test::compute_diff(std::span<const std::string_view> original, std::sp
     std::ptrdiff_t end_x = 0;
     std::ptrdiff_t end_y = 0;
 
-    // 1. Forward Pathfinding
     for (std::ptrdiff_t d = 0; d <= max_edits; ++d) {
         history.push_back(current_frontier);
 
@@ -2657,7 +2825,6 @@ auto bld::test::compute_diff(std::span<const std::string_view> original, std::sp
         }
     }
 
-    // 2. Backtrack to extract the shortest path
     std::vector<Edit> script;
     std::ptrdiff_t x = end_x;
     std::ptrdiff_t y = end_y;
@@ -2760,15 +2927,6 @@ auto std::formatter<bld::test::compute_diff_op>::format(const bld::test::compute
         }
     }
     return out;
-}
-
-// =============================================================================
-// 8. Filesystem
-// =============================================================================
-
-auto bld::make_dir_if_not_exists(std::string_view path, bool create_parents, std::source_location loc) noexcept -> bool
-{
-    return bld::fs::make_dir_if_not_exists(path, create_parents, loc);
 }
 
 auto bld::fs::make_dir_if_not_exists(std::string_view path, bool create_parents, std::source_location loc) noexcept -> bool
@@ -2900,7 +3058,6 @@ auto Dir_walker::max_depth(int v) noexcept -> Dir_walker &
 
 auto Dir_walker::ext(std::string e) -> Dir_walker &
 {
-    // normalize: ensure leading dot
     if (!e.empty() && e.front() != '.') {
         e = '.' + e;
     }
@@ -3046,6 +3203,333 @@ auto Dir_walker::make_entry(const std::filesystem::directory_entry &raw, int d) 
         .type = raw.symlink_status(ignored).type(),
         .depth = d,
     };
+}
+
+auto collect(std::string_view root, std::source_location caller) noexcept -> Walk_result_t<std::vector<Dir_entry>>
+{
+    return Dir_walker{root}.collect(caller);
+}
+
+auto stem(std::string_view path) noexcept -> std::string
+{
+    return std::filesystem::path{path}.stem().string();
+}
+
+auto name(std::string_view path) noexcept -> std::string
+{
+    return std::filesystem::path{path}.filename().string();
+}
+
+auto extension(std::string_view path) noexcept -> std::string
+{
+    return std::filesystem::path{path}.extension().string();
+}
+
+auto parent_dir(std::string_view path) noexcept -> std::string
+{
+    return std::filesystem::path{path}.parent_path().string();
+}
+
+auto is_absolute(std::string_view path) noexcept -> bool
+{
+    return std::filesystem::path{path}.is_absolute();
+}
+
+auto is_relative(std::string_view path) noexcept -> bool
+{
+    return std::filesystem::path{path}.is_relative();
+}
+
+auto exists(std::string_view path) noexcept -> bool
+{
+    std::error_code ec;
+    return std::filesystem::exists(std::filesystem::path{path}, ec);
+}
+
+auto is_dir(std::string_view path) noexcept -> bool
+{
+    std::error_code ec;
+    return std::filesystem::is_directory(std::filesystem::path{path}, ec);
+}
+
+auto is_file(std::string_view path) noexcept -> bool
+{
+    std::error_code ec;
+    return std::filesystem::is_regular_file(std::filesystem::path{path}, ec);
+}
+
+auto is_symlink(std::string_view path) noexcept -> bool
+{
+    std::error_code ec;
+    return std::filesystem::is_symlink(std::filesystem::path{path}, ec);
+}
+
+auto is_empty(std::string_view path) noexcept -> std::expected<bool, bld::Err>
+{
+    std::error_code ec;
+    bool empty = std::filesystem::is_empty(std::filesystem::path{path}, ec);
+    if (ec) {
+        return std::unexpected(bld::Err{.err = ec, .msg = std::format("Failed to check if '{}' is empty", path)});
+    }
+    return empty;
+}
+
+auto file_size(std::string_view path) noexcept -> std::expected<std::uintmax_t, bld::Err>
+{
+    std::error_code ec;
+    auto size = std::filesystem::file_size(std::filesystem::path{path}, ec);
+    if (ec) {
+        return std::unexpected(bld::Err{.err = ec, .msg = std::format("Failed to get size of '{}'", path)});
+    }
+    return size;
+}
+
+auto last_write_time(std::string_view path) noexcept -> std::expected<std::filesystem::file_time_type, bld::Err>
+{
+    std::error_code ec;
+    auto time = std::filesystem::last_write_time(std::filesystem::path{path}, ec);
+    if (ec) {
+        return std::unexpected(bld::Err{.err = ec, .msg = std::format("Failed to get last write time of '{}'", path)});
+    }
+    return time;
+}
+
+auto copy_file(std::string_view from, std::string_view to, bool overwrite) noexcept -> std::expected<void, bld::Err>
+{
+    std::error_code ec;
+    auto options = overwrite ? std::filesystem::copy_options::overwrite_existing : std::filesystem::copy_options::none;
+
+    std::filesystem::copy_file(std::filesystem::path{from}, std::filesystem::path{to}, options, ec);
+
+    if (ec) {
+        return std::unexpected(bld::Err{.err = ec, .msg = std::format("Failed to copy file from '{}' to '{}'", from, to)});
+    }
+    return {};
+}
+
+auto rename(std::string_view from, std::string_view to) noexcept -> std::expected<void, bld::Err>
+{
+    std::error_code ec;
+    std::filesystem::rename(std::filesystem::path{from}, std::filesystem::path{to}, ec);
+
+    if (ec) {
+        return std::unexpected(bld::Err{.err = ec, .msg = std::format("Failed to rename '{}' to '{}'", from, to)});
+    }
+    return {};
+}
+
+auto create_symlink(std::string_view target, std::string_view link) noexcept -> std::expected<void, bld::Err>
+{
+    std::error_code ec;
+    std::filesystem::create_symlink(std::filesystem::path{target}, std::filesystem::path{link}, ec);
+    if (ec) {
+        return std::unexpected(bld::Err{.err = ec, .msg = std::format("Failed to create symlink at '{}'", link)});
+    }
+    return {};
+}
+
+auto create_hard_link(std::string_view target, std::string_view link) noexcept -> std::expected<void, bld::Err>
+{
+    std::error_code ec;
+    std::filesystem::create_hard_link(std::filesystem::path{target}, std::filesystem::path{link}, ec);
+    if (ec) {
+        return std::unexpected(bld::Err{.err = ec, .msg = std::format("Failed to create hard link at '{}'", link)});
+    }
+    return {};
+}
+
+auto read_symlink(std::string_view path) noexcept -> std::expected<std::string, bld::Err>
+{
+    std::error_code ec;
+    auto target = std::filesystem::read_symlink(std::filesystem::path{path}, ec);
+    if (ec) {
+        return std::unexpected(bld::Err{.err = ec, .msg = std::format("Failed to read symlink '{}'", path)});
+    }
+    return target.string();
+}
+
+auto current_path() noexcept -> std::expected<std::string, bld::Err>
+{
+    std::error_code ec;
+    auto p = std::filesystem::current_path(ec);
+    if (ec) {
+        return std::unexpected(bld::Err{.err = ec, .msg = "Failed to get current working directory"});
+    }
+    return p.string();
+}
+
+auto set_current_path(std::string_view path) noexcept -> std::expected<void, bld::Err>
+{
+    std::error_code ec;
+    std::filesystem::current_path(std::filesystem::path{path}, ec);
+    if (ec) {
+        return std::unexpected(bld::Err{.err = ec, .msg = std::format("Failed to set current path to '{}'", path)});
+    }
+    return {};
+}
+
+auto absolute(std::string_view path) noexcept -> std::expected<std::string, bld::Err>
+{
+    std::error_code ec;
+    auto p = std::filesystem::absolute(std::filesystem::path{path}, ec);
+    if (ec) {
+        return std::unexpected(bld::Err{.err = ec, .msg = std::format("Failed to get absolute path for '{}'", path)});
+    }
+    return p.string();
+}
+
+auto canonical(std::string_view path) noexcept -> std::expected<std::string, bld::Err>
+{
+    std::error_code ec;
+    auto p = std::filesystem::canonical(std::filesystem::path{path}, ec);
+    if (ec) {
+        return std::unexpected(bld::Err{.err = ec, .msg = std::format("Failed to resolve canonical path for '{}'", path)});
+    }
+    return p.string();
+}
+
+auto relative(std::string_view path, std::string_view base) noexcept -> std::expected<std::string, bld::Err>
+{
+    std::error_code ec;
+    auto p = std::filesystem::relative(std::filesystem::path{path}, std::filesystem::path{base}, ec);
+    if (ec) {
+        return std::unexpected(bld::Err{.err = ec, .msg = std::format("Failed to resolve relative path for '{}'", path)});
+    }
+    return p.string();
+}
+
+auto read_file(std::string_view path) noexcept -> std::expected<std::string, bld::Err>
+{
+    try {
+        std::ifstream file(std::filesystem::path(path), std::ios::in | std::ios::binary | std::ios::ate);
+        if (!file) {
+            return std::unexpected(bld::Err::erc(std::errc::io_error, std::format("Failed to open file for reading: '{}'", path)));
+        }
+
+        auto size = file.tellg();
+        file.seekg(0, std::ios::beg);
+
+        std::string buffer;
+        if (size > 0) {
+            buffer.resize(static_cast<std::size_t>(size));
+            file.read(buffer.data(), size);
+        }
+        return buffer;
+    } catch (const std::exception &e) {
+        return std::unexpected(bld::Err::erc(std::errc::io_error, e.what()));
+    }
+}
+
+auto write_file(std::string_view path, std::string_view content) noexcept -> std::expected<void, bld::Err>
+{
+    try {
+        std::ofstream file(std::filesystem::path(path), std::ios::out | std::ios::binary | std::ios::trunc);
+        if (!file) {
+            return std::unexpected(bld::Err::erc(std::errc::io_error, std::format("Failed to open file for writing: '{}'", path)));
+        }
+        file.write(content.data(), static_cast<std::streamsize>(content.size()));
+        return {};
+    } catch (const std::exception &e) {
+        return std::unexpected(bld::Err::erc(std::errc::io_error, e.what()));
+    }
+}
+
+auto append_file(std::string_view path, std::string_view content) noexcept -> std::expected<void, bld::Err>
+{
+    try {
+        std::ofstream file(std::filesystem::path(path), std::ios::out | std::ios::binary | std::ios::app);
+        if (!file) {
+            return std::unexpected(bld::Err::erc(std::errc::io_error, std::format("Failed to open file for appending: '{}'", path)));
+        }
+        file.write(content.data(), static_cast<std::streamsize>(content.size()));
+        return {};
+    } catch (const std::exception &e) {
+        return std::unexpected(bld::Err::erc(std::errc::io_error, e.what()));
+    }
+}
+
+template <typename... Paths>
+requires(std::convertible_to<Paths, std::string_view> && ...)
+[[nodiscard]] auto join(Paths &&...paths) -> std::string
+{
+    std::filesystem::path result;
+    (..., (result /= std::filesystem::path{std::forward<Paths>(paths)}));
+    return result.string();
+}
+
+
+template <typename... Paths>
+    requires(std::convertible_to<Paths, std::string_view> && ...)
+auto remove(Paths &&...paths) noexcept -> std::expected<void, bld::Err>
+{
+    std::error_code ec;
+    auto try_remove = [&ec](std::string_view p) -> bool {
+        std::filesystem::remove_all(std::filesystem::path{p}, ec);
+        return !ec;
+    };
+    if (!(try_remove(std::forward<Paths>(paths)) && ...)) {
+        return std::unexpected(bld::Err{.err = ec, .msg = "Failed to remove one or more paths"});
+    }
+    return {};
+}
+
+template <typename... Paths>
+    requires(std::convertible_to<Paths, std::string_view> && ...)
+auto make_dirs(Paths &&...paths) noexcept -> std::expected<void, bld::Err>
+{
+    std::error_code ec;
+    auto try_mkdir = [&ec](std::string_view p) -> bool {
+        std::filesystem::create_directories(std::filesystem::path{p}, ec);
+        return !ec;
+    };
+    if (!(try_mkdir(std::forward<Paths>(paths)) && ...)) {
+        return std::unexpected(bld::Err{.err = ec, .msg = "Failed to create one or more directories"});
+    }
+    return {};
+}
+
+inline auto find_all_files(std::string_view root) noexcept -> Walk_result_t<std::vector<std::string>>
+{
+    return Dir_walker{root}.collect_paths().transform([](const auto &paths) {
+        std::vector<std::string> res;
+        res.reserve(paths.size());
+        for (const auto &p : paths) {
+            res.push_back(p.string());
+        }
+        return res;
+    });
+}
+
+template <typename... Exts>
+    requires(std::convertible_to<Exts, std::string_view> && ...)
+auto find_by_ext(std::string_view root, Exts &&...exts) noexcept -> Walk_result_t<std::vector<std::string>>
+{
+    return Dir_walker{root}.ext({std::string_view(exts)...}).collect_paths().transform([](const auto &paths) {
+        std::vector<std::string> res;
+        res.reserve(paths.size());
+        for (const auto &p : paths) {
+            res.push_back(p.string());
+        }
+        return res;
+    });
+}
+
+template <typename... Names>
+    requires(std::convertible_to<Names, std::string_view> && ...)
+auto find_by_name(std::string_view root, Names &&...names) noexcept -> Walk_result_t<std::vector<std::string>>
+{
+    std::vector<std::string_view> targets{std::forward<Names>(names)...};
+    return Dir_walker{root}
+        .where([targets](const Dir_entry &e) { return std::ranges::find(targets, e.filename()) != targets.end(); })
+        .collect_paths()
+        .transform([](const auto &paths) {
+            std::vector<std::string> res;
+            res.reserve(paths.size());
+            for (const auto &p : paths) {
+                res.push_back(p.string());
+            }
+            return res;
+        });
 }
 
 } // namespace bld::fs

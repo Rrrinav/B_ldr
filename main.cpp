@@ -1,6 +1,8 @@
 #define B_LDR_IMPLEMENTATION
 #include "b_ldr.hpp"
 
+#include <print>
+
 auto &cfg = bld::Config::get();
 
 using namespace std::string_view_literals;
