@@ -23,6 +23,117 @@ auto expect_eq(std::string_view expected, std::string_view actual) -> std::expec
 auto expect_file_match(std::string_view expected_path, std::string_view actual_path) -> std::expected<void, std::string>;
 auto expect_cmd_success(const bld::Cmd &cmd) -> std::expected<void, std::string>;
 auto run_suite(std::span<Test_case> tests) -> int;
+
+struct Test_file_res
+{
+    std::string function;
+    int total{};
+    int failed{};
+
+    std::vector<int> failed_indices;
+    std::vector<std::string> failed_messages;
+};
+
+auto parse_results(std::istream &in) -> std::expected<std::vector<Test_file_res>, std::string>
+{
+    std::vector<Test_file_res> results;
+    std::string line;
+
+    auto expect_line = [&](std::string_view expected) -> std::expected<void, std::string> {
+        if (!std::getline(in, line)) {
+            return std::unexpected(std::format("Expected '{}', reached EOF.", expected));
+        }
+
+        if (line != expected) {
+            return std::unexpected(std::format("Expected '{}', got '{}'.", expected, line));
+        }
+
+        return {};
+    };
+
+    while (true) {
+        if (!std::getline(in, line)) {
+            break;
+        }
+
+        if (line.empty()) {
+            continue;
+        }
+
+        if (line != "FUNCTION") {
+            return std::unexpected(std::format("Expected 'FUNCTION', got '{}'.", line));
+        }
+
+        Test_file_res r{};
+
+        if (!std::getline(in, r.function)) {
+            return std::unexpected("Missing function name.");
+        }
+
+        if (auto e = expect_line("TOTAL"); !e) {
+            return std::unexpected(e.error());
+        }
+
+        if (!std::getline(in, line)) {
+            return std::unexpected("Missing total.");
+        }
+        r.total = std::stoi(line);
+
+        if (auto e = expect_line("FAILED"); !e) {
+            return std::unexpected(e.error());
+        }
+
+        if (!std::getline(in, line)) {
+            return std::unexpected("Missing failed count.");
+        }
+        r.failed = std::stoi(line);
+
+        if (auto e = expect_line("FAILED_INDICES"); !e) {
+            return std::unexpected(e.error());
+        }
+
+        if (!std::getline(in, line)) {
+            return std::unexpected("Missing failed indices.");
+        }
+
+        if (!line.empty()) {
+            std::stringstream ss(line);
+            std::string tok;
+
+            while (std::getline(ss, tok, ',')) {
+                r.failed_indices.push_back(std::stoi(tok));
+            }
+        }
+
+        if (auto e = expect_line("FAILED_MESSAGES"); !e) {
+            return std::unexpected(e.error());
+        }
+
+        while (true) {
+            if (!std::getline(in, line)) {
+                return std::unexpected("Unexpected EOF while reading failure messages.");
+            }
+
+            if (line == "END") {
+                break;
+            }
+
+            r.failed_messages.push_back(line);
+        }
+
+        if (r.failed != static_cast<int>(r.failed_indices.size())) {
+            return std::unexpected(std::format("{}: failed count ({}) != indices ({})", r.function, r.failed, r.failed_indices.size()));
+        }
+
+        if (r.failed != static_cast<int>(r.failed_messages.size())) {
+            return std::unexpected(std::format("{}: failed count ({}) != messages ({})", r.function, r.failed, r.failed_messages.size()));
+        }
+
+        results.push_back(std::move(r));
+    }
+
+    return results;
+}
 }; // namespace bld::test
 
 static auto internal_test_read_file(std::string_view path) -> std::expected<std::string, std::string>
@@ -367,8 +478,40 @@ auto run_tests() -> int
              return {};
          }},
 
-        {"fs_make_dir_if_not_exists",
+        {"test_fs_functions",
          []() -> std::expected<void, std::string> {
+             std::string cap{};
+             if (bld::run(bld::Cmd{"g++", "-o", "./test_fs", "tests/fs/main.cpp", "-std=c++23", "-O3", "-Wall", "-Wextra", "-I."})) {
+                 if (bld::capture(bld::Cmd{"./test_fs"}, bld::cap_merge{cap})) {
+                     std::ifstream f("./tests/fs/out");
+                     auto parsed = bld::test::parse_results(f);
+                     std::filesystem::remove_all("./tests/fs/out");
+                     std::filesystem::remove_all("./tests_fs");
+                     if (!parsed) {
+                         return std::unexpected(parsed.error());
+                     }
+
+                     std::string err{};
+                     bool failed{false};
+
+                     for (const auto &suite : *parsed) {
+                         if (suite.failed != 0) {
+                             failed = true;
+                             err += std::format("{} failed ({}/{})\n", suite.function, suite.failed, suite.total);
+
+                             for (std::size_t i = 0; i < suite.failed_messages.size(); ++i) {
+                                 err += std::format("  [{}] {}\n", suite.failed_indices[i], suite.failed_messages[i]);
+                             }
+                         }
+                     }
+
+                     if (failed) {
+                         return std::unexpected(err);
+                     } else {
+                         return {};
+                     }
+                 }
+             }
              return {};
          }},
 

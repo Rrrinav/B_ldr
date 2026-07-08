@@ -62,34 +62,20 @@ auto test_make_dir_if_not_exists() -> TestSuite
     TestSuite suite{.function = "make_dir_if_not_exists"};
 
     suite.expect(bld::make_dir_if_not_exists("") == false, "Empty path should return false");
-
     suite.expect(bld::make_dir_if_not_exists(SANDBOX + "test") == true, "Failed to create a directory");
-
     suite.expect(bld::make_dir_if_not_exists(SANDBOX + "test") == false, "Returned true when the directory already existed");
-
     suite.expect(bld::make_dir_if_not_exists(SANDBOX + "test_par/test", true) == true, "Failed to create nested directories");
-
     suite.expect(bld::make_dir_if_not_exists(SANDBOX + "test_par2/test", false) == false, "Created directory despite missing parent");
-
     std::ofstream(SANDBOX + "existing_file").close();
-
     suite.expect(bld::make_dir_if_not_exists(SANDBOX + "existing_file") == false, "Created directory where a file already exists");
-
     std::ofstream(SANDBOX + "file_parent").close();
-
     suite.expect(bld::make_dir_if_not_exists(SANDBOX + "file_parent/child", true) == false, "Created directory through a file parent");
-
     suite.expect(bld::make_dir_if_not_exists(SANDBOX + "trailing/") == true, "Failed with trailing separator");
-
     std::ofstream(SANDBOX + "temp").close();
     std::filesystem::remove(SANDBOX + "temp");
-
     suite.expect(bld::make_dir_if_not_exists(SANDBOX + "temp") == true, "Failed after file removal");
-
     bld::make_dir_if_not_exists(SANDBOX + "idempotent");
-
     suite.expect(bld::make_dir_if_not_exists(SANDBOX + "idempotent") == false, "Function is not idempotent");
-
     return suite;
 }
 
