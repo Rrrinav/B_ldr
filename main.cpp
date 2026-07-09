@@ -10,13 +10,26 @@ const std::string TEST_DIR{"./tests/"};
 auto run_tests() -> bool
 {
     bld::log::i("Building test executable");
-    if (auto res = bld::run(bld::Cmd{"g++", "-o", "test", TEST_DIR + "main.cpp", "-std=c++23", "-I."}); !res) {
+    bld::Cmd cmd{"g++", "-o", "test", TEST_DIR + "main.cpp", "-std=c++23", "-I."};
+#ifdef _WIN32
+#ifdef __GNUC__
+    cmd.push("-lstdc++exp");
+#endif
+#endif
+    if (auto res = bld::run(cmd); !res) {
         return false;
     } else {
+#ifdef _WIN32
+        if (auto res_run = bld::run(bld::Cmd{"./test.exe"}); !res_run) {
+            bld::log::e("Test script run failed.");
+            return false;
+        }
+#else
         if (auto res_run = bld::run(bld::Cmd{"./test"}); !res_run) {
             bld::log::e("Test script run failed.");
             return false;
         }
+#endif
     }
 
     bld::log::i("Test script ran successfully.");

@@ -481,9 +481,19 @@ auto run_tests() -> int
         {"test_fs_functions",
          []() -> std::expected<void, std::string> {
              std::string cap{};
-             if (bld::run(bld::Cmd{"g++", "-o", "./test_fs", "tests/fs/main.cpp", "-std=c++23", "-O3", "-Wall", "-Wextra", "-I."})) {
+             bld::Cmd cmd{"g++", "-o", "./test_fs", "tests/fs/main.cpp", "-std=c++23", "-O3", "-Wall", "-Wextra", "-I."};
+#ifdef _WIN32
+#ifdef __GNUC__
+             cmd.push("-lstdc++exp");
+#endif
+#endif
+             if (bld::run(cmd)) {
                  // Just becuase I wanted to supress the output
+#ifdef _WIN32
+                 if (bld::capture(bld::Cmd{"./test_fs.exe"}, bld::cap_merge{cap})) {
+#else
                  if (bld::capture(bld::Cmd{"./test_fs"}, bld::cap_merge{cap})) {
+#endif
                      std::ifstream f("./tests/fs/out");
                      auto parsed = bld::test::parse_results(f);
                      std::filesystem::remove_all("./tests/fs/out");
@@ -518,9 +528,20 @@ auto run_tests() -> int
         {"test_str_functions",
          []() -> std::expected<void, std::string> {
              std::string cap{};
-             if (bld::run(bld::Cmd{"g++", "-o", "./test_str", "tests/str/main.cpp", "-std=c++23", "-O3", "-Wall", "-Wextra", "-I."})) {
-                 // Just becuase I wanted to supress the output
+             bld::Cmd cmd{"g++", "-o", "./test_str", "tests/str/main.cpp", "-std=c++23", "-O3", "-Wall", "-Wextra", "-I."};
+
+#ifdef _WIN32
+#ifdef __GNUC__
+             cmd.push("-lstdc++exp");
+#endif
+#endif
+             if (bld::run(cmd))
+             {
+#ifdef _WIN32
+                 if (bld::capture(bld::Cmd{"./test_str.exe"}, bld::cap_merge{cap})) {
+#else
                  if (bld::capture(bld::Cmd{"./test_str"}, bld::cap_merge{cap})) {
+#endif
                      std::ifstream f("./tests/str/out");
                      auto parsed = bld::test::parse_results(f);
                      std::filesystem::remove_all("./tests/str/out");

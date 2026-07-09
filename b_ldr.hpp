@@ -1616,10 +1616,15 @@ bld::Cmd_loc::Cmd_loc(const Cmd &c, std::source_location l) : cmd(c), loc(l)
 
 bld::Proc::Proc(P_id id, const std::string &label_) : id_(id)
 {
+#ifdef _WIN32
+    auto val = reinterpret_cast<std::uintptr_t>(id);
+#else
+    auto val = id;
+#endif
     if (label_.empty()) {
         constexpr ::std::size_t size{12};
         char buf[size];
-        if (auto [end, ec] = std::to_chars(buf, buf + size, id); ec == std::errc{}) {
+        if (auto [end, ec] = std::to_chars(buf, buf + size, val); ec == std::errc{}) {
             label = std::string{buf, end};
         }
     } else {
@@ -1630,23 +1635,43 @@ bld::Proc::Proc(P_id id, const std::string &label_) : id_(id)
 
 bld::Proc::~Proc()
 {
+#ifdef _WIN32
+    if (id_ != nullptr && status_.state == State::running) {
+        this->kill(9);
+        std::ignore = this->wait();
+    }
+#else
     if (id_ > 0 && status_.state == State::running) {
         this->kill(SIGKILL);
         std::ignore = this->wait();
     }
+#endif
 }
 
+#ifdef _WIN32
+bld::Proc::Proc(Proc &&other) noexcept : id_(std::exchange(other.id_, nullptr)), status_(other.status_), label(std::move(other.label))
+{}
+#else
 bld::Proc::Proc(Proc &&other) noexcept : id_(std::exchange(other.id_, -1)), status_(other.status_), label(std::move(other.label))
 {}
+#endif
 
 auto bld::Proc::operator=(Proc &&other) noexcept -> Proc &
 {
     if (this != &other) {
+#ifdef _WIN32
+        if (id_ != nullptr && status_.state == State::running) {
+            kill(9);
+            std::ignore = wait();
+        }
+        id_ = std::exchange(other.id_, nullptr);
+#else
         if (id_ > 0 && status_.state == State::running) {
             kill(SIGKILL);
             std::ignore = wait();
         }
         id_ = std::exchange(other.id_, -1);
+#endif
         status_ = other.status_;
         label = std::move(other.label);
     }
@@ -1849,31 +1874,57 @@ auto bld::Proc::spawn(const Cmd &cmd, const std::string &label_, const Io_routin
 
 auto bld::Proc::wait_pid(P_id pid, int options) -> std::expected<Status, bld::Err>
 {
+#ifdef _WIN32
+    (void)options;
+    if (!pid) return Status{.state = State::exited, .code = 255};
+    if (::WaitForSingleObject(static_cast<HANDLE>(pid), INFINITE) == WAIT_FAILED) {
+        return std::unexpected(bld::Err::erno(GetLastError(), "wait_pid failed"));
+    }
+    DWORD exit_code = 0;
+    GetExitCodeProcess(static_cast<HANDLE>(pid), &exit_code);
+    return Status{.state = State::exited, .code = static_cast<uint8_t>(exit_code)};
+#else
     int wstatus = 0;
     P_id res = ::waitpid(pid, &wstatus, options);
-
     if (res == -1) {
-        if (errno == ECHILD) {
-            return Status{.state = State::exited, .code = 255};
-        }
+        if (errno == ECHILD) return Status{.state = State::exited, .code = 255};
         return std::unexpected(bld::Err::erno(errno, "waitpid failed"));
     }
-
-    if (res == 0) {
-        return Status{.state = State::running, .code = 0};
-    }
-
+    if (res == 0) return Status{.state = State::running, .code = 0};
     return parse_status(wstatus);
+#endif
 }
 
 auto bld::Proc::try_wait_pid(P_id pid) -> std::expected<Status, bld::Err>
 {
+#ifdef _WIN32
+    if (!pid) return Status{.state = State::exited, .code = 255};
+    DWORD res = ::WaitForSingleObject(static_cast<HANDLE>(pid), 0);
+    if (res == WAIT_OBJECT_0) {
+        DWORD exit_code = 0;
+        GetExitCodeProcess(static_cast<HANDLE>(pid), &exit_code);
+        return Status{.state = State::exited, .code = static_cast<uint8_t>(exit_code)};
+    }
+    return Status{.state = State::running, .code = 0};
+#else
     return wait_pid(pid, WNOHANG);
+#endif
 }
 
 auto bld::Proc::parse_status(int wstatus) -> Status
 {
     Status s{};
+
+#ifdef _WIN32
+    // Windows process exit code
+    if (wstatus == 0) {
+        s.state = State::exited;
+        s.code = 0;
+    } else {
+        s.state = State::exited;
+        s.code = static_cast<std::uint8_t>(wstatus);
+    }
+#else
     if (WIFEXITED(wstatus)) {
         s.state = State::exited;
         s.code = static_cast<::std::uint8_t>(WEXITSTATUS(wstatus));
@@ -1887,6 +1938,8 @@ auto bld::Proc::parse_status(int wstatus) -> Status
         s.state = State::continued;
         s.code = 0;
     }
+#endif
+
     return s;
 }
 
@@ -2006,7 +2059,7 @@ auto bld::Owned_Fd::open(std::string_view path, Open_mode mode) -> std::expected
         flags = _O_WRONLY | _O_CREAT | _O_APPEND | _O_BINARY;
         break;
     }
-    int fd = ::_open(std::string{path}.c_str(), flags, _S_IREAD | _S_IWRITE);
+    int fd = ::_open(std::string{path}.c_str(), flags, 0666);
 #else
     switch (mode) {
     case Open_mode::read:
@@ -2208,35 +2261,62 @@ auto bld::details::execute(const bld::Cmd &cmd, const Proc_config &cfg, std::sou
         });
 }
 
-auto bld::details::capture_execute(const bld::Cmd &cmd, bld::Capture_config &cap_cfg, std::source_location loc)
-    -> std::expected<bld::Proc::Status, bld::Err>
+auto bld::details::capture_execute(const bld::Cmd &cmd, bld::Capture_config &cap_cfg, std::source_location loc) -> std::expected<bld::Proc::Status, bld::Err>
 {
     bld::log::i("Setting up capture for cmd: {:?}", cmd);
 
     auto make_pipe = [](int p[2], const char *name) -> std::expected<void, bld::Err> {
+#ifdef _WIN32
+        if (::_pipe(p, 4096, _O_BINARY) == -1) {
+            return std::unexpected(bld::Err::erno(errno, std::format("{} pipe failed", name)));
+        }
+#else
         if (::pipe(p) == -1) {
             return std::unexpected(bld::Err::erno(errno, std::format("{} pipe failed", name)));
         }
         ::fcntl(p[0], F_SETFD, FD_CLOEXEC);
         ::fcntl(p[1], F_SETFD, FD_CLOEXEC);
+#endif
         return {};
+    };
+
+    auto close_fd = [](int fd) {
+        if (fd >= 0) {
+#ifdef _WIN32
+            ::_close(fd);
+#else
+            ::close(fd);
+#endif
+        }
+    };
+
+    auto read_fd = [](int fd, void* buf, unsigned int count) -> int {
+#ifdef _WIN32
+        return ::_read(fd, buf, count);
+#else
+        return static_cast<int>(::read(fd, buf, count));
+#endif
+    };
+
+    auto write_fd = [](int fd, const void* buf, unsigned int count) -> int {
+#ifdef _WIN32
+        return ::_write(fd, buf, count);
+#else
+        return static_cast<int>(::write(fd, buf, count));
+#endif
     };
 
     int pipe_out[2]{-1, -1}, pipe_err[2]{-1, -1}, pipe_in[2]{-1, -1};
     Proc_config run_cfg{.label = cap_cfg.label, .async = true, .loc = cap_cfg.loc, .in = cap_cfg.in};
 
     if (!cap_cfg.in_str.empty()) {
-        if (auto res = make_pipe(pipe_in, "stdin"); !res) {
-            return std::unexpected(res.error());
-        }
+        if (auto res = make_pipe(pipe_in, "stdin"); !res) return std::unexpected(res.error());
         run_cfg.in = Fd_view{pipe_in[0]};
         bld::log::i("Created stdin pipe (read: {}, write: {})", pipe_in[0], pipe_in[1]);
     }
 
     if (cap_cfg.out) {
-        if (auto res = make_pipe(pipe_out, "stdout"); !res) {
-            return std::unexpected(res.error());
-        }
+        if (auto res = make_pipe(pipe_out, "stdout"); !res) return std::unexpected(res.error());
         run_cfg.out = Fd_view{pipe_out[1]};
         bld::log::i("Created stdout pipe (read: {}, write: {})", pipe_out[0], pipe_out[1]);
     }
@@ -2245,98 +2325,73 @@ auto bld::details::capture_execute(const bld::Cmd &cmd, bld::Capture_config &cap
         run_cfg.merge_err_and_out = true;
         bld::log::i("Merging stderr into stdout pipe");
     } else if (cap_cfg.err) {
-        if (auto res = make_pipe(pipe_err, "stderr"); !res) {
-            return std::unexpected(res.error());
-        }
+        if (auto res = make_pipe(pipe_err, "stderr"); !res) return std::unexpected(res.error());
         run_cfg.err = Fd_view{pipe_err[1]};
         bld::log::i("Created stderr pipe (read: {}, write: {})", pipe_err[0], pipe_err[1]);
     }
 
     auto proc_res = bld::details::execute(cmd, run_cfg, loc);
 
-    if (cap_cfg.out) {
-        ::close(pipe_out[1]);
-    }
-    if (cap_cfg.err && !cap_cfg.merge_out_err) {
-        ::close(pipe_err[1]);
-    }
-    if (!cap_cfg.in_str.empty()) {
-        ::close(pipe_in[0]);
-    }
+    // The parent must immediately close the child's ends of the pipes, 
+    // otherwise the read loops below will block forever waiting for EOF.
+    if (cap_cfg.out) close_fd(pipe_out[1]);
+    if (cap_cfg.err && !cap_cfg.merge_out_err) close_fd(pipe_err[1]);
+    if (!cap_cfg.in_str.empty()) close_fd(pipe_in[0]);
 
     if (!proc_res) {
+        // Clean up our remaining ends if spawn completely failed
+        if (cap_cfg.out) close_fd(pipe_out[0]);
+        if (cap_cfg.err && !cap_cfg.merge_out_err) close_fd(pipe_err[0]);
+        if (!cap_cfg.in_str.empty()) close_fd(pipe_in[1]);
         return std::unexpected(proc_res.error());
     }
-    auto &proc = *proc_res;
 
-    struct ::pollfd fds[3];
-    int nfds = 0;
+    auto &proc = *proc_res;
+    std::vector<std::thread> io_threads;
 
     if (cap_cfg.out) {
-        fds[nfds++] = {.fd = pipe_out[0], .events = POLLIN, .revents = 0};
+        io_threads.emplace_back([fd = pipe_out[0], ptr = cap_cfg.out, read_fd, close_fd]() {
+            char buf[4096];
+            while (true) {
+                int bytes = read_fd(fd, buf, sizeof(buf));
+                if (bytes > 0) ptr->append(buf, static_cast<std::size_t>(bytes));
+                else break;
+            }
+            close_fd(fd);
+        });
     }
+
     if (cap_cfg.err && !cap_cfg.merge_out_err) {
-        fds[nfds++] = {.fd = pipe_err[0], .events = POLLIN, .revents = 0};
+        io_threads.emplace_back([fd = pipe_err[0], ptr = cap_cfg.err, read_fd, close_fd]() {
+            char buf[4096];
+            while (true) {
+                int bytes = read_fd(fd, buf, sizeof(buf));
+                if (bytes > 0) ptr->append(buf, static_cast<std::size_t>(bytes));
+                else break;
+            }
+            close_fd(fd);
+        });
     }
+
     if (!cap_cfg.in_str.empty()) {
-        fds[nfds++] = {.fd = pipe_in[1], .events = POLLOUT, .revents = 0};
+        io_threads.emplace_back([fd = pipe_in[1], str = cap_cfg.in_str, write_fd, close_fd]() {
+            std::size_t written = 0;
+            while (written < str.size()) {
+                int bytes = write_fd(fd, str.data() + written, static_cast<unsigned int>(str.size() - written));
+                if (bytes > 0) {
+                    written += static_cast<std::size_t>(bytes);
+                } else if (bytes == -1 && errno != EINTR && errno != EAGAIN) {
+                    break;
+                }
+            }
+            close_fd(fd);
+        });
     }
 
-    std::size_t written = 0;
-
-    while (nfds > 0) {
-        if (::poll(fds, static_cast<::nfds_t>(nfds), -1) == -1) {
-            if (errno == EINTR) {
-                continue;
-            }
-            return std::unexpected(bld::Err::erno(errno, "poll failed"));
-        }
-
-        for (int i = 0; i < nfds; ++i) {
-            if (fds[i].revents & (POLLIN | POLLHUP)) {
-                if (fds[i].fd == pipe_out[0] || fds[i].fd == pipe_err[0]) {
-                    char buf[4096];
-                    ssize_t bytes = ::read(fds[i].fd, buf, sizeof(buf));
-
-                    if (bytes > 0) {
-                        if (fds[i].fd == pipe_out[0]) {
-                            cap_cfg.out->append(buf, static_cast<std::size_t>(bytes));
-                        } else {
-                            cap_cfg.err->append(buf, static_cast<std::size_t>(bytes));
-                        }
-                    } else if (bytes == 0) {
-                        ::close(fds[i].fd);
-                        fds[i] = fds[nfds - 1];
-                        nfds--;
-                        i--;
-                        continue;
-                    }
-                }
-            }
-
-            if (fds[i].revents & POLLOUT) {
-                if (fds[i].fd == pipe_in[1]) {
-                    ssize_t bytes = ::write(fds[i].fd, cap_cfg.in_str.data() + written, cap_cfg.in_str.size() - written);
-
-                    if (bytes > 0) {
-                        written += static_cast<std::size_t>(bytes);
-                        if (written == cap_cfg.in_str.size()) {
-                            bld::log::i("Finished writing input to child, sending EOF");
-                            ::close(fds[i].fd);
-                            fds[i] = fds[nfds - 1];
-                            nfds--;
-                            i--;
-                            continue;
-                        }
-                    } else if (bytes == -1 && errno != EINTR && errno != EAGAIN) {
-                        ::close(fds[i].fd);
-                        fds[i] = fds[nfds - 1];
-                        nfds--;
-                        i--;
-                        continue;
-                    }
-                }
-            }
+    // Join threads to ensure all I/O is perfectly drained before waiting on PID
+    for (auto &t : io_threads) {
+        if (t.joinable()) {
+            t.join();
         }
     }
 
@@ -2432,6 +2487,11 @@ auto bld::rebuild_this_when_needed(int argc, char **argv, std::string_view compi
     }
 
     bld::Cmd build_cmd{cxx, "-o", target, source, "-std=c++23", "-O3", "-Wall", "-Wextra"};
+    #ifdef _WIN32
+    #ifdef __GNUC__
+        build_cmd.push("-lstdc++exp");
+    #endif
+    #endif
 
     auto proc = bld::run(build_cmd);
     if (!proc || proc->status_.code != 0) {
@@ -2487,6 +2547,12 @@ auto bld::rebuild_this_when_needed_ext(int argc, char **argv, std::vector<std::s
     }
 
     bld::Cmd build_cmd{cxx, "-o", target, source, "-std=c++23", "-O3", "-Wall", "-Wextra"};
+
+#ifdef _WIN32
+#ifdef __GNUC__
+    build_cmd.push("-lstdc++exp");
+#endif
+#endif
 
     for (const auto &f : flags) {
         build_cmd.push(f);
@@ -3203,22 +3269,22 @@ bool Dir_entry::is_hidden() const noexcept
 
 std::string_view Dir_entry::extension() const noexcept
 {
-    return path.extension().native();
+    return path.extension().string();
 }
 
 std::string_view Dir_entry::stem() const noexcept
 {
-    return path.stem().native();
+    return path.stem().string();
 }
 
 std::string_view Dir_entry::filename() const noexcept
 {
-    return path.filename().native();
+    return path.filename().string();
 }
 
 std::string_view Dir_entry::parent() const noexcept
 {
-    return path.parent_path().native();
+    return path.parent_path().string();
 }
 
 bool Walk_error::is_fs_error() const noexcept
