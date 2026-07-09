@@ -482,11 +482,49 @@ auto run_tests() -> int
          []() -> std::expected<void, std::string> {
              std::string cap{};
              if (bld::run(bld::Cmd{"g++", "-o", "./test_fs", "tests/fs/main.cpp", "-std=c++23", "-O3", "-Wall", "-Wextra", "-I."})) {
+                 // Just becuase I wanted to supress the output
                  if (bld::capture(bld::Cmd{"./test_fs"}, bld::cap_merge{cap})) {
                      std::ifstream f("./tests/fs/out");
                      auto parsed = bld::test::parse_results(f);
                      std::filesystem::remove_all("./tests/fs/out");
                      std::filesystem::remove_all("./tests_fs");
+                     if (!parsed) {
+                         return std::unexpected(parsed.error());
+                     }
+
+                     std::string err{};
+                     bool failed{false};
+
+                     for (const auto &suite : *parsed) {
+                         if (suite.failed != 0) {
+                             failed = true;
+                             err += std::format("{} failed ({}/{})\n", suite.function, suite.failed, suite.total);
+
+                             for (std::size_t i = 0; i < suite.failed_messages.size(); ++i) {
+                                 err += std::format("  [{}] {}\n", suite.failed_indices[i], suite.failed_messages[i]);
+                             }
+                         }
+                     }
+
+                     if (failed) {
+                         return std::unexpected(err);
+                     } else {
+                         return {};
+                     }
+                 }
+             }
+             return {};
+         }},
+        {"test_str_functions",
+         []() -> std::expected<void, std::string> {
+             std::string cap{};
+             if (bld::run(bld::Cmd{"g++", "-o", "./test_str", "tests/str/main.cpp", "-std=c++23", "-O3", "-Wall", "-Wextra", "-I."})) {
+                 // Just becuase I wanted to supress the output
+                 if (bld::capture(bld::Cmd{"./test_str"}, bld::cap_merge{cap})) {
+                     std::ifstream f("./tests/str/out");
+                     auto parsed = bld::test::parse_results(f);
+                     std::filesystem::remove_all("./tests/str/out");
+                     std::filesystem::remove_all("./tests_str");
                      if (!parsed) {
                          return std::unexpected(parsed.error());
                      }

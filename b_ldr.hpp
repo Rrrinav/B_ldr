@@ -842,7 +842,7 @@ template <detail::Valid_visitor V>
 [[nodiscard]] auto is_empty(std::string_view path) noexcept -> std::expected<bool, bld::Err>;
 
 template <typename... Paths>
-requires(std::convertible_to<Paths, std::string_view> && ...)
+    requires(std::convertible_to<Paths, std::string_view> && ...)
 [[nodiscard]] auto join(Paths &&...paths) -> std::string;
 
 auto file_size(std::string_view path) noexcept -> std::expected<std::uintmax_t, bld::Err>;
@@ -884,6 +884,40 @@ template <typename... Names>
 auto find_by_name(std::string_view root, Names &&...names) noexcept -> Walk_result_t<std::vector<std::string>>;
 
 } // namespace bld::fs
+
+namespace bld::str {
+[[nodiscard]] auto trim_left(std::string_view s) noexcept -> std::string_view;
+[[nodiscard]] auto trim_right(std::string_view s) noexcept -> std::string_view;
+[[nodiscard]] auto trim(std::string_view s) noexcept -> std::string_view;
+[[nodiscard]] auto split(std::string_view s, char delimiter) -> std::vector<std::string_view>;
+[[nodiscard]] auto split(std::string_view s, std::string_view delimiter) -> std::vector<std::string_view>;
+[[nodiscard]] auto to_lower(std::string_view s) -> std::string;
+[[nodiscard]] auto to_upper(std::string_view s) -> std::string;
+[[nodiscard]] auto replace_all(std::string_view s, std::string_view from, std::string_view to) -> std::string;
+[[nodiscard]] auto parse_int(std::string_view s, int base = 10) noexcept -> std::expected<int, bld::Err>;
+[[nodiscard]] auto parse_double(std::string_view s) noexcept -> std::expected<double, bld::Err>;
+[[nodiscard]] auto parse_bool(std::string_view s) noexcept -> std::expected<bool, bld::Err>;
+template <std::ranges::range Range>
+    requires std::convertible_to<std::ranges::range_value_t<Range>, std::string_view>
+[[nodiscard]] auto join(const Range &range, std::string_view delimiter) -> std::string;
+} // namespace bld::str
+
+namespace bld::time {
+struct stamp
+{
+    using clock_t = std::chrono::steady_clock;
+    using time_point_t = clock_t::time_point;
+    time_point_t tp_{clock_t::now()};
+    stamp() = default;
+    auto reset() noexcept -> std::chrono::nanoseconds;
+    [[nodiscard]] auto elapsed() const noexcept -> std::chrono::nanoseconds;
+    [[nodiscard]] auto since(const stamp &baseline) const noexcept -> std::chrono::nanoseconds;
+};
+
+[[nodiscard]] auto now() noexcept -> stamp;
+[[nodiscard]] auto since(const stamp &baseline) noexcept -> std::chrono::nanoseconds;
+[[nodiscard]] auto format(std::chrono::nanoseconds ns) -> std::string;
+}; // namespace bld::time
 
 namespace std {
 constexpr auto formatter<bld::Err>::parse(format_parse_context &ctx) -> format_parse_context::iterator
@@ -3401,6 +3435,11 @@ auto relative(std::string_view path, std::string_view base) noexcept -> std::exp
 auto read_file(std::string_view path) noexcept -> std::expected<std::string, bld::Err>
 {
     try {
+
+        if (!std::filesystem::is_regular_file(path)) {
+            bld::log::e("Cannot read becuase '{}' is a directory.", path);
+            return std::unexpected(bld::Err::erc(std::errc::io_error, std::format("'{}' is a directory", path)));
+        }
         std::ifstream file(std::filesystem::path(path), std::ios::in | std::ios::binary | std::ios::ate);
         if (!file) {
             return std::unexpected(bld::Err::erc(std::errc::io_error, std::format("Failed to open file for reading: '{}'", path)));
@@ -3449,14 +3488,13 @@ auto append_file(std::string_view path, std::string_view content) noexcept -> st
 }
 
 template <typename... Paths>
-requires(std::convertible_to<Paths, std::string_view> && ...)
+    requires(std::convertible_to<Paths, std::string_view> && ...)
 [[nodiscard]] auto join(Paths &&...paths) -> std::string
 {
     std::filesystem::path result;
     (..., (result /= std::filesystem::path{std::forward<Paths>(paths)}));
     return result.string();
 }
-
 
 template <typename... Paths>
     requires(std::convertible_to<Paths, std::string_view> && ...)
@@ -3533,6 +3571,195 @@ auto find_by_name(std::string_view root, Names &&...names) noexcept -> Walk_resu
 }
 
 } // namespace bld::fs
+
+namespace bld::str {
+
+auto trim_left(std::string_view s) noexcept -> std::string_view
+{
+    auto it = std::ranges::find_if_not(s, [](unsigned char c) { return std::isspace(c); });
+    return s.substr(static_cast<std::size_t>(std::distance(s.begin(), it)));
+}
+
+auto trim_right(std::string_view s) noexcept -> std::string_view
+{
+    auto it = std::ranges::find_if_not(s | std::views::reverse, [](unsigned char c) { return std::isspace(c); });
+    return s.substr(0, s.size() - static_cast<std::size_t>(std::distance(s.rbegin(), it)));
+}
+
+auto trim(std::string_view s) noexcept -> std::string_view
+{
+    return trim_right(trim_left(s));
+}
+
+auto split(std::string_view s, char delimiter) -> std::vector<std::string_view>
+{
+    std::vector<std::string_view> result;
+    std::size_t start = 0;
+    std::size_t end = s.find(delimiter);
+
+    while (end != std::string_view::npos) {
+        result.push_back(s.substr(start, end - start));
+        start = end + 1;
+        end = s.find(delimiter, start);
+    }
+    result.push_back(s.substr(start));
+    return result;
+}
+
+auto split(std::string_view s, std::string_view delimiter) -> std::vector<std::string_view>
+{
+    std::vector<std::string_view> result;
+    if (delimiter.empty()) {
+        result.push_back(s);
+        return result;
+    }
+
+    std::size_t start = 0;
+    std::size_t end = s.find(delimiter);
+
+    while (end != std::string_view::npos) {
+        result.push_back(s.substr(start, end - start));
+        start = end + delimiter.size();
+        end = s.find(delimiter, start);
+    }
+    result.push_back(s.substr(start));
+    return result;
+}
+
+auto to_lower(std::string_view s) -> std::string
+{
+    std::string result(s);
+    std::ranges::transform(result, result.begin(), [](unsigned char c) { return static_cast<char>(std::tolower(c)); });
+    return result;
+}
+
+auto to_upper(std::string_view s) -> std::string
+{
+    std::string result(s);
+    std::ranges::transform(result, result.begin(), [](unsigned char c) { return static_cast<char>(std::toupper(c)); });
+    return result;
+}
+
+auto replace_all(std::string_view s, std::string_view from, std::string_view to) -> std::string
+{
+    if (from.empty()) {
+        return std::string(s);
+    }
+
+    std::string result;
+    std::size_t pos = 0;
+    std::size_t last = 0;
+
+    while ((pos = s.find(from, last)) != std::string_view::npos) {
+        result.append(s.data() + last, pos - last);
+        result.append(to);
+        last = pos + from.size();
+    }
+    result.append(s.data() + last, s.size() - last);
+    return result;
+}
+
+auto parse_int(std::string_view s, int base) noexcept -> std::expected<int, bld::Err>
+{
+    int value = 0;
+    auto trimmed = trim(s);
+    auto [ptr, ec] = std::from_chars(trimmed.data(), trimmed.data() + trimmed.size(), value, base);
+
+    if (ec == std::errc() && ptr == trimmed.data() + trimmed.size()) {
+        return value;
+    }
+    return std::unexpected(bld::Err::erc(std::errc::invalid_argument, std::format("Failed to parse int from '{}'", s)));
+}
+
+auto parse_double(std::string_view s) noexcept -> std::expected<double, bld::Err>
+{
+    double value = 0.0;
+    auto trimmed = trim(s);
+    auto [ptr, ec] = std::from_chars(trimmed.data(), trimmed.data() + trimmed.size(), value);
+
+    if (ec == std::errc() && ptr == trimmed.data() + trimmed.size()) {
+        return value;
+    }
+    return std::unexpected(bld::Err::erc(std::errc::invalid_argument, std::format("Failed to parse double from '{}'", s)));
+}
+
+auto parse_bool(std::string_view s) noexcept -> std::expected<bool, bld::Err>
+{
+    auto t = to_lower(trim(s));
+    if (t == "true" || t == "1" || t == "yes" || t == "y") {
+        return true;
+    }
+    if (t == "false" || t == "0" || t == "no" || t == "n") {
+        return false;
+    }
+    return std::unexpected(bld::Err::erc(std::errc::invalid_argument, std::format("Failed to parse bool from '{}'", s)));
+}
+
+template <std::ranges::range Range>
+    requires std::convertible_to<std::ranges::range_value_t<Range>, std::string_view>
+[[nodiscard]] auto join(const Range &range, std::string_view delimiter) -> std::string
+{
+    std::string result;
+    bool first = true;
+    for (const auto &item : range) {
+        if (!first) {
+            result.append(delimiter);
+        }
+        first = false;
+        result.append(std::string_view{item});
+    }
+    return result;
+}
+
+} // namespace bld::str
+namespace bld::time {
+
+auto stamp::reset() noexcept -> std::chrono::nanoseconds
+{
+    auto now = clock_t::now();
+    auto diff = now - tp_;
+    tp_ = now;
+    return std::chrono::duration_cast<std::chrono::nanoseconds>(diff);
+}
+
+auto stamp::elapsed() const noexcept -> std::chrono::nanoseconds
+{
+    return std::chrono::duration_cast<std::chrono::nanoseconds>(clock_t::now() - tp_);
+}
+
+auto stamp::since(const stamp &baseline) const noexcept -> std::chrono::nanoseconds
+{
+    return std::chrono::duration_cast<std::chrono::nanoseconds>(tp_ - baseline.tp_);
+}
+
+auto now() noexcept -> stamp
+{
+    return stamp{};
+}
+
+auto since(const stamp &baseline) noexcept -> std::chrono::nanoseconds
+{
+    return baseline.elapsed();
+}
+
+auto format(std::chrono::nanoseconds ns) -> std::string
+{
+    if (ns.count() >= 1'000'000'000) {
+        double s = static_cast<double>(ns.count()) / 1'000'000'000.0;
+        return std::format("{:.3f}s", s);
+    }
+    if (ns.count() >= 1'000'000) {
+        double ms = static_cast<double>(ns.count()) / 1'000'000.0;
+        return std::format("{:.2f}ms", ms);
+    }
+    if (ns.count() >= 1'000) {
+        double us = static_cast<double>(ns.count()) / 1'000.0;
+        return std::format("{:.1f}us", us);
+    }
+    return std::format("{}ns", ns.count());
+}
+
+} // namespace bld::time
 
 #endif // B_LDR_IMPLEMENTATION_ONCE
 #endif // B_LDR_IMPLEMENTATION

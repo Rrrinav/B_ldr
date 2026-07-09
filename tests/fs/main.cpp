@@ -201,6 +201,10 @@ int main(int argc, char *argv[])
 
     auto suite = test_make_dir_if_not_exists();
     suite.serialize(out);
+    suite = test_read_write_append_remove();
+    suite.serialize(out);
+    suite = test_dir_walker();
+    suite.serialize(out);
 
     std::filesystem::remove_all(SANDBOX);
 

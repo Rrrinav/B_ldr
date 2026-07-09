@@ -1,8 +1,6 @@
 #define B_LDR_IMPLEMENTATION
 #include "b_ldr.hpp"
 
-#include <print>
-
 auto &cfg = bld::Config::get();
 
 using namespace std::string_view_literals;
@@ -25,17 +23,25 @@ auto run_tests() -> bool
     return true;
 }
 
-auto main(int argc, char *argv[]) -> int
+int main(int argc, char *argv[])
 {
     bld::rebuild_this_when_needed_ext(argc, argv);
     cfg.parse(argc, argv);
 
+    bld::time::stamp t1{};
+
     if (cfg["test"]) {
         if (run_tests()) {
+            bld::log::i("Tests executed in {}", bld::time::format(t1.elapsed()));
             return EXIT_SUCCESS;
         } else {
             return EXIT_FAILURE;
         }
     }
+
+    bld::time::stamp t2{};
+
+    auto d1 = bld::time::since(t1);
+    bld::log::i("Bootstrap sequence took: {}", bld::time::format(d1));
     return 0;
 }
