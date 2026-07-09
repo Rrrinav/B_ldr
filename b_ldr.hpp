@@ -64,6 +64,20 @@
 #include <variant>
 #include <vector>
 
+#ifdef _WIN32
+#ifndef WIN32_LEAN_AND_MEAN
+#define WIN32_LEAN_AND_MEAN
+#endif
+#include <fcntl.h>
+#include <io.h>
+#include <process.h>
+#include <windows.h>
+#ifndef STDIN_FILENO
+#define STDIN_FILENO 0
+#define STDOUT_FILENO 1
+#define STDERR_FILENO 2
+#endif
+#else
 // POSIX / Linux
 #include <fcntl.h>
 #include <poll.h>
@@ -72,10 +86,7 @@
 #include <sys/types.h>
 #include <sys/wait.h>
 #include <unistd.h>
-
-// =============================================================================
-// DECLARATIONS
-// =============================================================================
+#endif
 
 // Public API map
 //   1. Errors and formatters         bld::Err
@@ -271,7 +282,6 @@ namespace bld {
 
 struct Proc
 {
-    using P_id = pid_t;
     enum class State : ::std::uint8_t { running, exited, signaled, stopped, continued };
 
     struct Status
@@ -280,7 +290,13 @@ struct Proc
         ::std::uint8_t code{EXIT_SUCCESS};
     };
 
+#ifdef _WIN32
+    using P_id = void *;
+    P_id id_{nullptr};
+#else
+    using P_id = pid_t;
     P_id id_{-1};
+#endif
     Status status_{};
     std::string label{""};
 
@@ -352,7 +368,7 @@ struct std::formatter<bld::Proc>
 {
     bool show_pid   = false;
     bool show_debug = false;
-    
+
     constexpr auto parse(std::format_parse_context& ctx) -> std::format_parse_context::iterator;
     auto format(const bld::Proc& p, std::format_context& ctx) const -> std::format_context::iterator;
 };
@@ -1639,6 +1655,23 @@ auto bld::Proc::operator=(Proc &&other) noexcept -> Proc &
 
 auto bld::Proc::wait() -> std::expected<Status, bld::Err>
 {
+#ifdef _WIN32
+    if (!id_ || status_.state != State::running) {
+        return status_;
+    }
+
+    if (::WaitForSingleObject(static_cast<HANDLE>(id_), INFINITE) == WAIT_FAILED) {
+        return std::unexpected(bld::Err::erno(GetLastError(), "WaitForSingleObject failed"));
+    }
+
+    DWORD exit_code = 0;
+    if (::GetExitCodeProcess(static_cast<HANDLE>(id_), &exit_code)) {
+        status_ = {State::exited, static_cast<::std::uint8_t>(exit_code)};
+    }
+    ::CloseHandle(static_cast<HANDLE>(id_));
+    id_ = nullptr;
+    return status_;
+#else
     if (id_ <= 0 || status_.state != State::running) {
         return status_;
     }
@@ -1654,10 +1687,29 @@ auto bld::Proc::wait() -> std::expected<Status, bld::Err>
 
     update_status(wstatus);
     return status_;
+#endif
 }
 
 auto bld::Proc::try_wait() -> std::expected<Status, bld::Err>
 {
+#ifdef _WIN32
+    if (!id_ || status_.state != State::running) {
+        return status_;
+    }
+
+    DWORD res = ::WaitForSingleObject(static_cast<HANDLE>(id_), 0);
+    if (res == WAIT_OBJECT_0) {
+        DWORD exit_code = 0;
+        if (::GetExitCodeProcess(static_cast<HANDLE>(id_), &exit_code)) {
+            status_ = {State::exited, static_cast<::std::uint8_t>(exit_code)};
+        }
+        ::CloseHandle(static_cast<HANDLE>(id_));
+        id_ = nullptr;
+    } else if (res == WAIT_FAILED) {
+        return std::unexpected(bld::Err::erno(GetLastError(), "WaitForSingleObject failed"));
+    }
+    return status_;
+#else
     if (id_ <= 0 || status_.state != State::running) {
         return status_;
     }
@@ -1678,13 +1730,20 @@ auto bld::Proc::try_wait() -> std::expected<Status, bld::Err>
     }
 
     return status_;
+#endif
 }
 
 auto bld::Proc::kill(int sig) -> void
 {
+#ifdef _WIN32
+    if (id_ && status_.state == State::running) {
+        ::TerminateProcess(static_cast<HANDLE>(id_), static_cast<UINT>(sig));
+    }
+#else
     if (id_ > 0 && status_.state == State::running) {
         ::kill(id_, sig);
     }
+#endif
 }
 
 auto bld::Proc::pid() const -> P_id
@@ -1712,6 +1771,46 @@ auto bld::Proc::spawn(const Cmd &cmd, const std::string &label_, const Io_routin
     if (cmd.empty()) {
         return std::unexpected(bld::Err::erc(std::errc::invalid_argument, "Command cannot be empty"));
     }
+#ifdef _WIN32
+    std::string cmd_str = cmd.str(); // CreateProcess requires a mutable string
+
+    STARTUPINFOA si;
+    ZeroMemory(&si, sizeof(si));
+    si.cb = sizeof(si);
+    si.dwFlags = STARTF_USESTDHANDLES;
+
+    // Convert file descriptors to Win32 HANDLEs
+    si.hStdInput = (io.in == STDIN_FILENO) ? GetStdHandle(STD_INPUT_HANDLE) : reinterpret_cast<HANDLE>(_get_osfhandle(io.in));
+    si.hStdOutput = (io.out == STDOUT_FILENO) ? GetStdHandle(STD_OUTPUT_HANDLE) : reinterpret_cast<HANDLE>(_get_osfhandle(io.out));
+
+    if (io.merge_err_to_out) {
+        si.hStdError = si.hStdOutput;
+    } else {
+        si.hStdError = (io.err == STDERR_FILENO) ? GetStdHandle(STD_ERROR_HANDLE) : reinterpret_cast<HANDLE>(_get_osfhandle(io.err));
+    }
+
+    PROCESS_INFORMATION pi;
+    ZeroMemory(&pi, sizeof(pi));
+
+    if (!CreateProcessA(
+            nullptr,        // Application name
+            cmd_str.data(), // Command line
+            nullptr,        // Process attributes
+            nullptr,        // Thread attributes
+            TRUE,           // Inherit handles (Crucial for pipes!)
+            0,              // Creation flags
+            nullptr,        // Environment
+            nullptr,        // Current directory
+            &si,            // Startup info
+            &pi))           // Process info
+    {
+        return std::unexpected(bld::Err::erno(GetLastError(), "CreateProcess failed").with_payload(cmd));
+    }
+
+    // We don't need the thread handle, just the process handle
+    CloseHandle(pi.hThread);
+    return Proc{pi.hProcess, label_.empty() ? cmd_str : label_};
+#else
     P_id pid = ::fork();
     if (pid < 0) {
         return std::unexpected(bld::Err::erno(errno, "Fork failed").with_payload(cmd));
@@ -1745,6 +1844,7 @@ auto bld::Proc::spawn(const Cmd &cmd, const std::string &label_, const Io_routin
     }
 
     return Proc{pid, label_.empty() ? cmd.str() : label_};
+#endif
 }
 
 auto bld::Proc::wait_pid(P_id pid, int options) -> std::expected<Status, bld::Err>
@@ -1874,7 +1974,11 @@ auto bld::Owned_Fd::operator=(Owned_Fd &&other) noexcept -> Owned_Fd &
 auto bld::Owned_Fd::close() -> void
 {
     if (handle_ != Fd_view::INVALID && handle_ != Fd_view::DEFAULT_IN && handle_ != Fd_view::DEFAULT_OUT && handle_ != Fd_view::DEFAULT_ERR) {
+#ifdef _WIN32
+        ::_close(handle_);
+#else
         ::close(handle_);
+#endif
         handle_ = Fd_view::INVALID;
     }
 }
@@ -1890,6 +1994,20 @@ auto bld::Owned_Fd::open(std::string_view path, Open_mode mode) -> std::expected
         return std::unexpected(bld::Err::erc(std::errc::invalid_argument, "Cannot open an empty path"));
     }
     int flags = 0;
+#ifdef _WIN32
+    switch (mode) {
+    case Open_mode::read:
+        flags = _O_RDONLY | _O_BINARY;
+        break;
+    case Open_mode::write:
+        flags = _O_WRONLY | _O_CREAT | _O_TRUNC | _O_BINARY;
+        break;
+    case Open_mode::append:
+        flags = _O_WRONLY | _O_CREAT | _O_APPEND | _O_BINARY;
+        break;
+    }
+    int fd = ::_open(std::string{path}.c_str(), flags, _S_IREAD | _S_IWRITE);
+#else
     switch (mode) {
     case Open_mode::read:
         flags = O_RDONLY;
@@ -1902,6 +2020,7 @@ auto bld::Owned_Fd::open(std::string_view path, Open_mode mode) -> std::expected
         break;
     }
     int fd = ::open(std::string{path}.c_str(), flags, 0666);
+#endif
     if (fd == Fd_view::INVALID) {
         return std::unexpected(bld::Err::erno(errno, std::format("Failed to open file: '{}'", path)));
     }
@@ -2393,6 +2512,77 @@ auto bld::rebuild_this_when_needed_ext(int argc, char **argv, std::vector<std::s
 
 auto bld::wait_all(std::span<bld::Proc> procs) -> std::expected<std::size_t, bld::Err>
 {
+#ifdef _WIN32
+    std::vector<HANDLE> handles;
+    std::vector<bld::Proc *> proc_ptrs; // Keep a parallel array to know which Proc finished
+
+    for (auto &proc : procs) {
+        if (proc.is_running() && proc.pid() != nullptr) {
+            handles.push_back(static_cast<HANDLE>(proc.pid()));
+            proc_ptrs.push_back(&proc);
+        }
+    }
+
+    const std::size_t total = handles.size();
+    if (total == 0) {
+        return 0;
+    }
+
+    bld::log::i("Waiting for {} processes, asynchronously", total);
+    std::size_t completed = 0;
+    bool has_errors = false;
+
+    // Windows has a MAXIMUM_WAIT_OBJECTS limit of 64.
+    // Since we batch by hardware_concurrency, this is perfectly safe.
+    while (!handles.empty()) {
+        // Wait for ANY process to finish (bWaitAll = FALSE)
+        DWORD wait_res = ::WaitForMultipleObjects(static_cast<DWORD>(handles.size()), handles.data(), FALSE, INFINITE);
+
+        if (wait_res >= WAIT_OBJECT_0 && wait_res < WAIT_OBJECT_0 + handles.size()) {
+            DWORD idx = wait_res - WAIT_OBJECT_0;
+            bld::Proc *p = proc_ptrs[idx];
+            HANDLE h = handles[idx];
+
+            DWORD exit_code = 0;
+            ::GetExitCodeProcess(h, &exit_code);
+
+            p->status_ = bld::Proc::Status{bld::Proc::State::exited, static_cast<uint8_t>(exit_code)};
+            ::CloseHandle(h);
+            p->id_ = nullptr; // Clear the PID/Handle
+
+            completed++;
+            int percentage = static_cast<int>((completed * 100) / total);
+
+            if (exit_code != 0) {
+                bld::log::e("[{:>3}%] Process '{}' failed: exited with code {}", percentage, p->label, exit_code);
+                has_errors = true;
+            } else {
+                bld::log::i("[{:>3}%] Process '{}': completed.", percentage, p->label);
+            }
+
+            // Remove the finished handle by swapping with the last element and popping
+            handles[idx] = handles.back();
+            handles.pop_back();
+            proc_ptrs[idx] = proc_ptrs.back();
+            proc_ptrs.pop_back();
+
+        } else if (wait_res == WAIT_FAILED) {
+            bld::log::e("Error in waiting for procs.");
+            return std::unexpected(bld::Err::erno(GetLastError(), "WaitForMultipleObjects failed").with_payload(completed));
+        } else {
+            bld::log::e("Unexpected wait result.");
+            return std::unexpected(
+                bld::Err::erc(std::errc::operation_canceled, "WaitForMultipleObjects returned unexpected status").with_payload(completed));
+        }
+    }
+
+    if (has_errors) {
+        return std::unexpected(bld::Err::erc(std::errc::operation_canceled, "One or more async processes failed").with_payload(completed));
+    }
+
+    return completed;
+
+#else
     std::size_t remaining{0};
     std::size_t completed{0};
     bool has_errors = false;
@@ -2450,6 +2640,7 @@ auto bld::wait_all(std::span<bld::Proc> procs) -> std::expected<std::size_t, bld
     }
 
     return completed;
+#endif
 }
 
 auto bld::run(std::span<bld::Task> tasks, std::size_t max_jobs) -> std::expected<void, bld::Err>
