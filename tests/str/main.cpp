@@ -129,7 +129,10 @@ auto test_str_utils() -> TestSuite
 
 int main(int argc, char *argv[])
 {
-    bld::rebuild_this_when_needed_ext(argc, argv, {"-I."});
+    if (auto res = bld::rebuild_this_when_needed_ext(argc, argv, {"-I."}); !res) {
+        bld::log::e("{}", res.error());
+        return EXIT_FAILURE;
+    }
 
     std::ofstream out("tests/str/out");
 

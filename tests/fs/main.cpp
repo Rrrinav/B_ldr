@@ -192,7 +192,10 @@ auto test_dir_walker() -> TestSuite
 
 int main(int argc, char *argv[])
 {
-    bld::rebuild_this_when_needed_ext(argc, argv, {"-I."});
+    if (auto res = bld::rebuild_this_when_needed_ext(argc, argv, {"-I."}); !res) {
+        bld::log::e("{}", res.error());
+        return EXIT_FAILURE;
+    }
 
     std::filesystem::remove_all(SANDBOX);
     std::filesystem::create_directories(SANDBOX);

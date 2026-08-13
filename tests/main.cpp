@@ -138,27 +138,11 @@ auto parse_results(std::istream &in) -> std::expected<std::vector<Test_file_res>
 
 static auto internal_test_read_file(std::string_view path) -> std::expected<std::string, std::string>
 {
-    auto fd_res = bld::Owned_Fd::open(path, bld::Open_mode::read);
-    if (!fd_res) {
-        return std::unexpected(std::format("Could not open file '{}': {}", path, fd_res.error().msg));
+    auto res = bld::fs::read_file(path);
+    if (!res) {
+        return std::unexpected(std::format("Could not read file '{}': {}", path, res.error().msg));
     }
-
-    char buf[4096];
-    std::string content;
-    while (true) {
-        ssize_t bytes = ::read(fd_res->handle_, buf, sizeof(buf));
-        if (bytes > 0) {
-            content.append(buf, static_cast<std::size_t>(bytes));
-        } else if (bytes == 0) {
-            break;
-        } else {
-            if (errno == EINTR) {
-                continue;
-            }
-            return std::unexpected(std::format("Read error on '{}': {}", path, std::strerror(errno)));
-        }
-    }
-    return content;
+    return *res;
 }
 
 auto bld::test::expect_eq(std::string_view expected, std::string_view actual) -> std::expected<void, std::string>
@@ -273,27 +257,7 @@ static auto make_sandbox_file(const std::filesystem::path &path, std::string_vie
 
 [[maybe_unused]] static auto read_sandbox_file(std::string_view path) -> std::expected<std::string, std::string>
 {
-    auto fd_res = bld::Owned_Fd::open(path, bld::Open_mode::read);
-    if (!fd_res) {
-        return std::unexpected(std::format("Could not open file '{}': {}", path, fd_res.error().msg));
-    }
-
-    char buf[4096];
-    std::string content;
-    while (true) {
-        ssize_t bytes = ::read(fd_res->handle_, buf, sizeof(buf));
-        if (bytes > 0) {
-            content.append(buf, static_cast<std::size_t>(bytes));
-        } else if (bytes == 0) {
-            break;
-        } else {
-            if (errno == EINTR) {
-                continue;
-            }
-            return std::unexpected(std::format("Read error on '{}': {}", path, std::strerror(errno)));
-        }
-    }
-    return content;
+    return internal_test_read_file(path);
 }
 
 auto run_tests() -> int
@@ -670,6 +634,9 @@ auto run_tests() -> int
 
 auto main(int argc, char *argv[]) -> int
 {
-    bld::rebuild_this_when_needed_ext(argc, argv);
+    if (auto res = bld::rebuild_this_when_needed_ext(argc, argv); !res) {
+        bld::log::e("{}", res.error());
+        return EXIT_FAILURE;
+    }
     return run_tests();
 }

@@ -34,10 +34,12 @@
 #ifndef B_LDR_HPP
 #define B_LDR_HPP
 
-#include <algorithm>
 #include <any>
 #include <atomic>
+#include <cerrno>
+#include <charconv>
 #include <chrono>
+#include <condition_variable>
 #include <cstddef>
 #include <cstdint>
 #include <cstdlib>
@@ -48,11 +50,14 @@
 #include <format>
 #include <functional>
 #include <iostream>
+#include <iterator>
 #include <memory>
 #include <mutex>
 #include <optional>
 #include <ostream>
+#include <print>
 #include <ranges>
+#include <signal.h>
 #include <source_location>
 #include <span>
 #include <string>
@@ -65,27 +70,26 @@
 #include <vector>
 
 #ifdef _WIN32
-#ifndef WIN32_LEAN_AND_MEAN
-#define WIN32_LEAN_AND_MEAN
-#endif
-#include <fcntl.h>
-#include <io.h>
-#include <process.h>
-#include <windows.h>
-#ifndef STDIN_FILENO
-#define STDIN_FILENO 0
-#define STDOUT_FILENO 1
-#define STDERR_FILENO 2
-#endif
+    #ifndef WIN32_LEAN_AND_MEAN
+    #define WIN32_LEAN_AND_MEAN
+    #endif
+    #include <fcntl.h>
+    #include <io.h>
+    #include <process.h>
+    #include <windows.h>
+    #ifndef STDIN_FILENO
+    #define STDIN_FILENO 0
+    #define STDOUT_FILENO 1
+    #define STDERR_FILENO 2
+    #endif
 #else
 // POSIX / Linux
-#include <fcntl.h>
-#include <poll.h>
-#include <sched.h>
-#include <signal.h>
-#include <sys/types.h>
-#include <sys/wait.h>
-#include <unistd.h>
+    #include <fcntl.h>
+    #include <poll.h>
+    #include <sched.h>
+    #include <sys/types.h>
+    #include <sys/wait.h>
+    #include <unistd.h>
 #endif
 
 // Public API map
@@ -193,6 +197,12 @@ namespace bld::log {
 template <typename... Args>
 inline void invoke_logger(bld::Logger::Level level, std::ostream &str, std::format_string<Args...> fmt, Args &&...args);
 
+/// Sets the minimum severity that gets emitted (default: Level::inf).
+inline void set_min_level(bld::Logger::Level lvl)
+{
+    bld::Logger::min_lvl.store(lvl, std::memory_order_relaxed);
+}
+
 template <typename... Args>
 void i(std::format_string<Args...> fmt, Args &&...args);
 
@@ -231,6 +241,18 @@ void f(Os &str, std::format_string<Args...> fmt, Args &&...args);
 } // namespace bld::log
 
 namespace bld {
+[[maybe_unused]] inline std::function<bool (std::string)> panic_callback = [](std::string str) {
+    std::cout.flush();
+    std::cerr.flush();
+    std::println(std::cerr, "[B_LDR PANIC]: {}", str);
+    return true;
+};
+auto panic(std::string s) -> void;
+// Does nothing is ".exe" is already present
+auto add_exe_on_win32([[maybe_unused]]std::string exec) -> std::string;
+};
+
+namespace bld {
 struct Cmd
 {
     using value_type = std::vector<std::string>;
@@ -242,24 +264,24 @@ struct Cmd
     std::vector<std::string> args_;
 
     Cmd() = default;
-    
+
     template <typename... Ts> requires(std::convertible_to<Ts, std::string_view> && ...)
     explicit Cmd(Ts &&...ts);
-    
+
     auto push(std::string_view s) -> void;
-    
+
     template <typename... Ts>
     auto emplace_b(Ts &&...ts) -> std::string &;
-    
+
     template <typename... Ts>
     auto emplace(const_iterator it, Ts &&...ts) -> std::string &;
-    
+
     auto begin(this auto &self) noexcept;
     auto end(this auto &self) noexcept;
     auto size(this auto const &self) noexcept -> std::size_t;
     auto empty(this auto const &self) noexcept -> bool;
     auto span(this auto &self) noexcept;
-    
+
     [[nodiscard]] auto argv() const -> std::vector<char*>;
     [[nodiscard]] auto str() const -> std::string;
     auto reset() -> void;
@@ -287,7 +309,7 @@ struct Proc
     struct Status
     {
         State state{State::exited};
-        ::std::uint8_t code{EXIT_SUCCESS};
+        int code{EXIT_SUCCESS};
     };
 
 #ifdef _WIN32
@@ -436,6 +458,9 @@ struct Capture_config
     std::string *err{nullptr};
     bool merge_out_err{false};
     std::string_view in_str{""};
+    /// Captured output is normalized from CRLF to LF. Always on: Windows programs emit CRLF,
+    /// so captured text compares cleanly against "\n"-terminated strings (a no-op on Linux).
+    bool normalize_crlf{true};
 };
 
 namespace details {
@@ -482,19 +507,27 @@ struct in_s
 struct out_f
 {
     bld::Owned_Fd fd{};
+    out_f() = default;
     out_f(std::string_view path, bld::Open_mode mode = bld::Open_mode::write);
+    [[nodiscard]] static auto open(std::string_view path, bld::Open_mode mode = bld::Open_mode::write)
+        -> std::expected<bld::out_f, bld::Err>;
     auto operator()(bld::Proc_config& cfg) const -> void;
 };
 struct err_f
 {
     bld::Owned_Fd fd{};
+    err_f() = default;
     err_f(std::string_view path, bld::Open_mode mode = bld::Open_mode::write);
+    [[nodiscard]] static auto open(std::string_view path, bld::Open_mode mode = bld::Open_mode::write)
+        -> std::expected<bld::err_f, bld::Err>;
     auto operator()(bld::Proc_config& cfg) const -> void;
 };
 struct in_f
 {
     bld::Owned_Fd fd{};
+    in_f() = default;
     in_f(std::string_view path);
+    [[nodiscard]] static auto open(std::string_view path) -> std::expected<bld::in_f, bld::Err>;
     auto operator()(bld::Proc_config& cfg) const -> void;
     auto operator()(bld::Capture_config& cfg) const -> void;
 };
@@ -520,6 +553,11 @@ struct in_str
 {
     std::string_view val;
     explicit in_str(std::string_view s);
+    auto operator()(Capture_config& cfg) const -> void;
+};
+/// Opts out of the default CRLF -> LF normalization of captured output.
+struct raw_crlf
+{
     auto operator()(Capture_config& cfg) const -> void;
 };
 // clang-format on
@@ -580,6 +618,11 @@ struct Task
 };
 
 auto run(std::span<bld::Task> tasks, std::size_t max_jobs = 0) -> std::expected<void, bld::Err>;
+
+/// Like run(), but schedules the tasks on a pool of `threads` worker threads (default:
+/// hardware_concurrency) instead of running them in batches. Tasks already running when a
+/// failure occurs are allowed to finish; the remaining queued tasks are skipped.
+auto run_threaded(std::span<bld::Task> tasks, std::size_t threads = 0) -> std::expected<void, bld::Err>;
 } // namespace bld
 
 namespace bld {
@@ -592,15 +635,19 @@ template <std::ranges::range Range>
 
 auto get_current_cxx_compiler() -> std::string_view;
 
+/// If the build script's own source is newer than the running executable, recompiles it and
+/// re-executes it in its place (does not return on success). On failure, returns an Err so the
+/// caller can decide how to handle it instead of the library calling std::exit.
 auto rebuild_this_when_needed(int argc, char **argv, std::string_view compiler = "", std::source_location loc = std::source_location::current())
-    -> void;
+    -> std::expected<void, bld::Err>;
 
+/// Same as rebuild_this_when_needed, but also tracks b_ldr.hpp itself and accepts extra compiler flags.
 auto rebuild_this_when_needed_ext(
     int argc,
     char **argv,
     std::vector<std::string> flags = {},
     std::string_view compiler = "",
-    std::source_location loc = std::source_location::current()) -> void;
+    std::source_location loc = std::source_location::current()) -> std::expected<void, bld::Err>;
 
 } // namespace bld
 
@@ -643,8 +690,17 @@ public:
         operator std::vector<std::string>() const;
     };
     auto operator[](std::string_view key) const -> Proxy;
+
+    /// Result of parse(). When help_requested is true, the caller should exit with EXIT_SUCCESS.
+    struct Parse_outcome
+    {
+        bool help_requested{false};
+    };
+
     auto print_help(std::string_view prog_name, std::string_view specific_opt = "") const -> void;
-    auto parse(int argc, char *argv[]) -> void;
+    /// Parses command line arguments. Never exits; on --help prints help and returns help_requested,
+    /// on malformed input returns an Err and leaves the caller free to decide what to do.
+    auto parse(int argc, char *argv[]) -> std::expected<Parse_outcome, bld::Err>;
     template <typename T>
     auto get_val(std::string_view key) const -> std::expected<T, bld::Err>;
 
@@ -765,10 +821,12 @@ public:
     explicit Dir_walker(std::string_view root);
     explicit Dir_walker(std::filesystem::path root);
     explicit Dir_walker(const std::string &root);
+    explicit Dir_walker(const char *root);
 
     [[nodiscard]] auto recursive(bool v = true) noexcept -> Dir_walker &;
     [[nodiscard]] auto flat() noexcept -> Dir_walker &;
-    [[nodiscard]] auto include_dirs(bool v = true) noexcept -> Dir_walker &;
+    [[nodiscard]] auto files_only(bool v = true) noexcept -> Dir_walker &;
+    [[nodiscard]] auto exclude_dirs(bool v = true) noexcept -> Dir_walker &;
     [[nodiscard]] auto include_hidden(bool v = true) noexcept -> Dir_walker &;
     [[nodiscard]] auto follow_symlinks(bool v = true) noexcept -> Dir_walker &;
     [[nodiscard]] auto max_depth(int v) noexcept -> Dir_walker &;
@@ -899,6 +957,14 @@ template <typename... Names>
     requires(std::convertible_to<Names, std::string_view> && ...)
 auto find_by_name(std::string_view root, Names &&...names) noexcept -> Walk_result_t<std::vector<std::string>>;
 
+struct Cpp_module
+{
+    std::string name;
+    std::filesystem::path file;
+    std::vector<std::string> imports;
+};
+
+std::vector<Cpp_module> scan_modules(const std::string &path, std::vector<std::string> extensions = {"cppm", "ixx"});
 } // namespace bld::fs
 
 namespace bld::str {
@@ -928,6 +994,7 @@ struct stamp
     auto reset() noexcept -> std::chrono::nanoseconds;
     [[nodiscard]] auto elapsed() const noexcept -> std::chrono::nanoseconds;
     [[nodiscard]] auto since(const stamp &baseline) const noexcept -> std::chrono::nanoseconds;
+    operator time_point_t() const noexcept { return tp_; }
 };
 
 [[nodiscard]] auto now() noexcept -> stamp;
@@ -1313,171 +1380,6 @@ void f(Os &str, std::format_string<Args...> fmt, Args &&...args)
 
 } // namespace bld::log
 
-namespace bld::fs {
-
-constexpr Walk_result::Walk_result(Walk_action a) noexcept : action{a}
-{}
-constexpr Walk_result::Walk_result(std::error_code ec) noexcept : action{ec ? Walk_action::stop : Walk_action::next}, error{ec}
-{}
-
-namespace detail {
-template <Valid_visitor V>
-auto invoke_visitor(V &&v, const Dir_entry &e) -> Walk_result
-{
-    if constexpr (Void_visitor<V>) {
-        std::invoke(std::forward<V>(v), e);
-        return {};
-    } else {
-        return std::invoke(std::forward<V>(v), e);
-    }
-}
-} // namespace detail
-
-template <typename Pred>
-    requires std::predicate<Pred, const Dir_entry &>
-auto Dir_walker::where(Pred pred) -> Dir_walker &
-{
-    filters_.emplace_back(std::move(pred));
-    return *this;
-}
-
-template <detail::Valid_visitor V>
-auto Dir_walker::walk(V &&visitor, std::source_location caller) const noexcept -> Walk_result_t<void>
-{
-    return run([&](const Dir_entry &e) { return detail::invoke_visitor(std::forward<V>(visitor), e); }, caller);
-}
-
-template <std::invocable<const Dir_entry &> F>
-auto Dir_walker::for_each(F &&fn, std::source_location caller) const noexcept -> Walk_result_t<void>
-{
-    return run(
-        [&](const Dir_entry &e) -> Walk_result {
-            std::invoke(std::forward<F>(fn), e);
-            return Walk_action::next;
-        },
-        caller);
-}
-
-template <typename Pred>
-    requires std::predicate<Pred, const Dir_entry &>
-auto Dir_walker::partition(Pred pred, std::source_location caller) const noexcept
-    -> Walk_result_t<std::pair<std::vector<Dir_entry>, std::vector<Dir_entry>>>
-{
-    std::vector<Dir_entry> yes, no;
-    return run(
-               [&](const Dir_entry &e) -> Walk_result {
-                   (std::invoke(pred, e) ? yes : no).push_back(e);
-                   return Walk_action::next;
-               },
-               caller)
-        .transform([&] { return std::pair{std::move(yes), std::move(no)}; });
-}
-
-template <typename T, std::invocable<T, const Dir_entry &> F>
-auto Dir_walker::fold(T init, F &&fn, std::source_location caller) const noexcept -> Walk_result_t<T>
-{
-    T acc = std::move(init);
-    return run(
-               [&](const Dir_entry &e) -> Walk_result {
-                   acc = std::invoke(std::forward<F>(fn), std::move(acc), e);
-                   return Walk_action::next;
-               },
-               caller)
-        .transform([&] { return std::move(acc); });
-}
-
-template <std::invocable<Dir_walker &> F>
-auto Dir_walker::apply(F &&fn) -> Dir_walker &
-{
-    std::invoke(std::forward<F>(fn), *this);
-    return *this;
-}
-
-template <std::invocable<const Dir_entry &> F>
-auto Dir_walker::run(F &&fn, std::source_location caller) const noexcept -> Walk_result_t<void>
-{
-    namespace fs = std::filesystem;
-
-    if (root_.empty()) {
-        bld::log::w("Dir_walker: empty root ({})", caller.function_name());
-        return std::unexpected{Walk_error{.kind = Walk_error::Kind::fs, .code = std::make_error_code(std::errc::invalid_argument)}};
-    }
-
-    std::error_code ec;
-    const auto iter_opts = follow_symlinks_ ? fs::directory_options::skip_permission_denied | fs::directory_options::follow_directory_symlink
-                                            : fs::directory_options::skip_permission_denied;
-
-    auto handle = [&](const Dir_entry &e) -> Walk_result {
-        if (is_skipped(e)) {
-            return Walk_action::skip_dir;
-        }
-        if (!is_visible(e)) {
-            return Walk_action::next;
-        }
-        if (!passes_filters(e)) {
-            return Walk_action::next;
-        }
-        return std::invoke(fn, e);
-    };
-
-    if (!recursive_) {
-        fs::directory_iterator it{root_, iter_opts, ec};
-        if (ec) {
-            return std::unexpected{Walk_error{.kind = Walk_error::Kind::fs, .code = ec}};
-        }
-
-        for (const auto &raw : it) {
-            const auto [action, err] = handle(make_entry(raw, 0));
-            if (err) {
-                return std::unexpected{Walk_error{.kind = Walk_error::Kind::visitor, .code = err}};
-            }
-            if (action == Walk_action::stop) {
-                return {};
-            }
-        }
-        return {};
-    }
-
-    fs::recursive_directory_iterator it{root_, iter_opts, ec};
-    if (ec) {
-        return std::unexpected{Walk_error{.kind = Walk_error::Kind::fs, .code = ec}};
-    }
-
-    for (const auto &raw : it) {
-        const int d = it.depth();
-        if (d >= max_depth_) {
-            it.disable_recursion_pending();
-        }
-
-        const auto [action, err] = handle(make_entry(raw, d));
-
-        if (err) {
-            return std::unexpected{Walk_error{.kind = Walk_error::Kind::visitor, .code = err}};
-        }
-
-        switch (action) {
-        case Walk_action::stop:
-            it = {};
-            return {};
-        case Walk_action::skip_dir:
-            it.disable_recursion_pending();
-            break;
-        case Walk_action::next:
-            break;
-        }
-    }
-
-    return {};
-}
-
-template <detail::Valid_visitor V>
-inline auto walk(std::string_view root, V &&visitor, std::source_location caller) noexcept
-{
-    return Dir_walker{root}.walk(std::forward<V>(visitor), caller);
-}
-
-} // namespace bld::fs
-
 #endif // B_LDR_HPP
 
 #ifdef B_LDR_IMPLEMENTATION
@@ -1490,6 +1392,24 @@ inline auto walk(std::string_view root, V &&visitor, std::source_location caller
 #include <filesystem>
 #include <fstream>
 #include <thread>
+#include <unordered_set>
+
+auto bld::panic(std::string s) -> void
+{
+    if (bld::panic_callback(s)) {
+        std::exit(EXIT_FAILURE);
+    }
+}
+
+auto bld::add_exe_on_win32([[maybe_unused]]std::string exec) -> std::string
+{
+#ifdef _WIN32
+    if (!exec.ends_with(".exe")) {
+        exec.append(".exe");
+    }
+#endif
+    return exec;
+}
 
 auto bld::Err::erc(std::errc code, std::string message) -> Err
 {
@@ -1691,7 +1611,7 @@ auto bld::Proc::wait() -> std::expected<Status, bld::Err>
 
     DWORD exit_code = 0;
     if (::GetExitCodeProcess(static_cast<HANDLE>(id_), &exit_code)) {
-        status_ = {State::exited, static_cast<::std::uint8_t>(exit_code)};
+            status_ = {State::exited, static_cast<int>(exit_code)};
     }
     ::CloseHandle(static_cast<HANDLE>(id_));
     id_ = nullptr;
@@ -1726,7 +1646,7 @@ auto bld::Proc::try_wait() -> std::expected<Status, bld::Err>
     if (res == WAIT_OBJECT_0) {
         DWORD exit_code = 0;
         if (::GetExitCodeProcess(static_cast<HANDLE>(id_), &exit_code)) {
-            status_ = {State::exited, static_cast<::std::uint8_t>(exit_code)};
+        status_ = {State::exited, static_cast<int>(exit_code)};
         }
         ::CloseHandle(static_cast<HANDLE>(id_));
         id_ = nullptr;
@@ -1788,7 +1708,7 @@ auto bld::Proc::is_running() const -> bool
 
 auto bld::Proc::status_code() const -> int
 {
-    return +status_.code;
+    return status_.code;
 }
 
 auto bld::Proc::spawn(const Cmd &cmd, const std::string &label_, const Io_routing &io) -> std::expected<Proc, bld::Err>
@@ -1876,21 +1796,27 @@ auto bld::Proc::wait_pid(P_id pid, int options) -> std::expected<Status, bld::Er
 {
 #ifdef _WIN32
     (void)options;
-    if (!pid) return Status{.state = State::exited, .code = 255};
+    if (!pid) {
+        return Status{.state = State::exited, .code = 255};
+    }
     if (::WaitForSingleObject(static_cast<HANDLE>(pid), INFINITE) == WAIT_FAILED) {
         return std::unexpected(bld::Err::erno(GetLastError(), "wait_pid failed"));
     }
     DWORD exit_code = 0;
     GetExitCodeProcess(static_cast<HANDLE>(pid), &exit_code);
-    return Status{.state = State::exited, .code = static_cast<uint8_t>(exit_code)};
+    return Status{.state = State::exited, .code = static_cast<int>(exit_code)};
 #else
     int wstatus = 0;
     P_id res = ::waitpid(pid, &wstatus, options);
     if (res == -1) {
-        if (errno == ECHILD) return Status{.state = State::exited, .code = 255};
+        if (errno == ECHILD) {
+            return Status{.state = State::exited, .code = 255};
+        }
         return std::unexpected(bld::Err::erno(errno, "waitpid failed"));
     }
-    if (res == 0) return Status{.state = State::running, .code = 0};
+    if (res == 0) {
+        return Status{.state = State::running, .code = 0};
+    }
     return parse_status(wstatus);
 #endif
 }
@@ -1898,12 +1824,14 @@ auto bld::Proc::wait_pid(P_id pid, int options) -> std::expected<Status, bld::Er
 auto bld::Proc::try_wait_pid(P_id pid) -> std::expected<Status, bld::Err>
 {
 #ifdef _WIN32
-    if (!pid) return Status{.state = State::exited, .code = 255};
+    if (!pid) {
+        return Status{.state = State::exited, .code = 255};
+    }
     DWORD res = ::WaitForSingleObject(static_cast<HANDLE>(pid), 0);
     if (res == WAIT_OBJECT_0) {
         DWORD exit_code = 0;
         GetExitCodeProcess(static_cast<HANDLE>(pid), &exit_code);
-        return Status{.state = State::exited, .code = static_cast<uint8_t>(exit_code)};
+        return Status{.state = State::exited, .code = static_cast<int>(exit_code)};
     }
     return Status{.state = State::running, .code = 0};
 #else
@@ -1922,18 +1850,18 @@ auto bld::Proc::parse_status(int wstatus) -> Status
         s.code = 0;
     } else {
         s.state = State::exited;
-        s.code = static_cast<std::uint8_t>(wstatus);
+        s.code = wstatus;
     }
 #else
     if (WIFEXITED(wstatus)) {
         s.state = State::exited;
-        s.code = static_cast<::std::uint8_t>(WEXITSTATUS(wstatus));
+        s.code = static_cast<int>(WEXITSTATUS(wstatus));
     } else if (WIFSIGNALED(wstatus)) {
         s.state = State::signaled;
-        s.code = static_cast<::std::uint8_t>(WTERMSIG(wstatus));
+        s.code = static_cast<int>(WTERMSIG(wstatus));
     } else if (WIFSTOPPED(wstatus)) {
         s.state = State::stopped;
-        s.code = static_cast<::std::uint8_t>(WSTOPSIG(wstatus));
+        s.code = static_cast<int>(WSTOPSIG(wstatus));
     } else if (WIFCONTINUED(wstatus)) {
         s.state = State::continued;
         s.code = 0;
@@ -1972,10 +1900,10 @@ auto std::formatter<bld::Proc::Status>::format(const bld::Proc::Status &s, std::
     }
     switch (s.state) {
     case bld::Proc::State::exited:
-        out = fmt == mode::debug ? std::format_to(out, ", code = {} }}", +s.code) : std::format_to(out, ", {} }}", +s.code);
+        out = fmt == mode::debug ? std::format_to(out, ", code = {} }}", s.code) : std::format_to(out, ", {} }}", s.code);
         break;
     case bld::Proc::State::signaled:
-        out = fmt == mode::debug ? std::format_to(out, ", sig = {} }}", +s.code) : std::format_to(out, ", {} }}", +s.code);
+        out = fmt == mode::debug ? std::format_to(out, ", sig = {} }}", s.code) : std::format_to(out, ", {} }}", s.code);
         break;
     case bld::Proc::State::running:
     case bld::Proc::State::stopped:
@@ -2123,20 +2051,31 @@ auto bld::in_s::operator()(bld::Capture_config &cfg) const -> void
     cfg.in = fd;
 }
 
-bld::out_f::out_f(std::string_view path, bld::Open_mode mode)
+auto bld::out_f::open(std::string_view path, bld::Open_mode mode) -> std::expected<bld::out_f, bld::Err>
 {
     std::filesystem::path p{path};
     if (p.has_parent_path() && !std::filesystem::exists(p.parent_path())) {
-        bld::log::f("Fatal: Parent directory for output file '{}' does not exist.", path);
-        std::exit(EXIT_FAILURE);
+        return std::unexpected(bld::Err::erc(std::errc::no_such_file_or_directory,
+                                             std::format("Parent directory for output file '{}' does not exist", path)));
     }
     auto res = bld::Owned_Fd::open(path, mode);
+    if (!res) {
+        return std::unexpected(std::move(res.error()));
+    }
+    bld::log::d("Opened out fd: {} (file: '{}')", res->handle_, path);
+    bld::out_f f;
+    f.fd = std::move(*res);
+    return f;
+}
+
+bld::out_f::out_f(std::string_view path, bld::Open_mode mode)
+{
+    auto res = open(path, mode);
     if (!res) {
         bld::log::f("Fatal: Could not open output file '{}': {}", path, res.error().msg);
         std::exit(EXIT_FAILURE);
     }
-    bld::log::i("Opened out fd: {} (file: '{}')", res->handle_, path);
-    fd = std::move(*res);
+    fd = std::move(res->fd);
 }
 
 auto bld::out_f::operator()(bld::Proc_config &cfg) const -> void
@@ -2144,21 +2083,31 @@ auto bld::out_f::operator()(bld::Proc_config &cfg) const -> void
     cfg.out = fd;
 }
 
-bld::err_f::err_f(std::string_view path, bld::Open_mode mode)
+auto bld::err_f::open(std::string_view path, bld::Open_mode mode) -> std::expected<bld::err_f, bld::Err>
 {
     std::filesystem::path p{path};
-
     if (p.has_parent_path() && !std::filesystem::exists(p.parent_path())) {
-        bld::log::f("Parent directory for error log '{}' does not exist.", path);
-        std::exit(EXIT_FAILURE);
+        return std::unexpected(bld::Err::erc(std::errc::no_such_file_or_directory,
+                                             std::format("Parent directory for error log '{}' does not exist", path)));
     }
     auto res = bld::Owned_Fd::open(path, mode);
     if (!res) {
-        bld::log::f("Could not open error file '{}': {}", path, res.error().msg);
+        return std::unexpected(std::move(res.error()));
+    }
+    bld::log::d("Opened err fd: {} (file: '{}')", res->handle_, path);
+    bld::err_f f;
+    f.fd = std::move(*res);
+    return f;
+}
+
+bld::err_f::err_f(std::string_view path, bld::Open_mode mode)
+{
+    auto res = open(path, mode);
+    if (!res) {
+        bld::log::f("Fatal: Could not open error file '{}': {}", path, res.error().msg);
         std::exit(EXIT_FAILURE);
     }
-    bld::log::i("Opened err fd: {}: (file: '{}')", res->handle_, path);
-    fd = std::move(*res);
+    fd = std::move(res->fd);
 }
 
 auto bld::err_f::operator()(bld::Proc_config &cfg) const -> void
@@ -2166,20 +2115,30 @@ auto bld::err_f::operator()(bld::Proc_config &cfg) const -> void
     cfg.err = fd;
 }
 
-bld::in_f::in_f(std::string_view path)
+auto bld::in_f::open(std::string_view path) -> std::expected<bld::in_f, bld::Err>
 {
-    std::filesystem::path p{path};
-    if (!std::filesystem::exists(p)) {
-        bld::log::f("Fatal: Path '{}' for reading input doesn't exist.", path);
-        std::exit(EXIT_FAILURE);
+    if (!std::filesystem::exists(path)) {
+        return std::unexpected(
+            bld::Err::erc(std::errc::no_such_file_or_directory, std::format("Path '{}' for reading input doesn't exist", path)));
     }
     auto res = bld::Owned_Fd::open(path, bld::Open_mode::read);
+    if (!res) {
+        return std::unexpected(std::move(res.error()));
+    }
+    bld::log::d("Opened in fd: {} (file: '{}')", res->handle_, path);
+    bld::in_f f;
+    f.fd = std::move(*res);
+    return f;
+}
+
+bld::in_f::in_f(std::string_view path)
+{
+    auto res = open(path);
     if (!res) {
         bld::log::f("Fatal: Could not open input file '{}': {}", path, res.error().msg);
         std::exit(EXIT_FAILURE);
     }
-    bld::log::i("Opened in fd: {}: (file: '{}')", res->handle_, path);
-    fd = std::move(*res);
+    fd = std::move(res->fd);
 }
 
 auto bld::in_f::operator()(bld::Proc_config &cfg) const -> void
@@ -2225,20 +2184,25 @@ auto bld::in_str::operator()(Capture_config &cfg) const -> void
     cfg.in_str = val;
 }
 
+auto bld::raw_crlf::operator()(Capture_config &cfg) const -> void
+{
+    cfg.normalize_crlf = false;
+}
+
 auto bld::details::execute(const bld::Cmd &cmd, const Proc_config &cfg, std::source_location loc) -> std::expected<bld::Proc, bld::Err>
 {
     Proc::Io_routing io{};
 
     if (cfg.in.is_valid()) {
-        bld::log::i("Routing input from fd: {} for cmd: {:?}", cfg.in.val, cmd);
+        bld::log::d("Routing input from fd: {} for cmd: {:?}", cfg.in.val, cmd);
         io.in = cfg.in.val;
     }
     if (cfg.out.is_valid()) {
-        bld::log::i("Routing output to fd: {} for cmd: {:?}", cfg.out.val, cmd);
+        bld::log::d("Routing output to fd: {} for cmd: {:?}", cfg.out.val, cmd);
         io.out = cfg.out.val;
     }
     if (cfg.err.is_valid()) {
-        bld::log::i("Routing error to fd: {} for cmd: {:?}", cfg.err.val, cmd);
+        bld::log::d("Routing error to fd: {} for cmd: {:?}", cfg.err.val, cmd);
         io.err = cfg.err.val;
     }
     io.merge_err_to_out = cfg.merge_err_and_out;
@@ -2261,9 +2225,10 @@ auto bld::details::execute(const bld::Cmd &cmd, const Proc_config &cfg, std::sou
         });
 }
 
-auto bld::details::capture_execute(const bld::Cmd &cmd, bld::Capture_config &cap_cfg, std::source_location loc) -> std::expected<bld::Proc::Status, bld::Err>
+auto bld::details::capture_execute(const bld::Cmd &cmd, bld::Capture_config &cap_cfg, std::source_location loc)
+    -> std::expected<bld::Proc::Status, bld::Err>
 {
-    bld::log::i("Setting up capture for cmd: {:?}", cmd);
+    bld::log::d("Setting up capture for cmd: {:?}", cmd);
 
     auto make_pipe = [](int p[2], const char *name) -> std::expected<void, bld::Err> {
 #ifdef _WIN32
@@ -2290,7 +2255,7 @@ auto bld::details::capture_execute(const bld::Cmd &cmd, bld::Capture_config &cap
         }
     };
 
-    auto read_fd = [](int fd, void* buf, unsigned int count) -> int {
+    auto read_fd = [](int fd, void *buf, unsigned int count) -> int {
 #ifdef _WIN32
         return ::_read(fd, buf, count);
 #else
@@ -2298,7 +2263,7 @@ auto bld::details::capture_execute(const bld::Cmd &cmd, bld::Capture_config &cap
 #endif
     };
 
-    auto write_fd = [](int fd, const void* buf, unsigned int count) -> int {
+    auto write_fd = [](int fd, const void *buf, unsigned int count) -> int {
 #ifdef _WIN32
         return ::_write(fd, buf, count);
 #else
@@ -2310,39 +2275,57 @@ auto bld::details::capture_execute(const bld::Cmd &cmd, bld::Capture_config &cap
     Proc_config run_cfg{.label = cap_cfg.label, .async = true, .loc = cap_cfg.loc, .in = cap_cfg.in};
 
     if (!cap_cfg.in_str.empty()) {
-        if (auto res = make_pipe(pipe_in, "stdin"); !res) return std::unexpected(res.error());
+        if (auto res = make_pipe(pipe_in, "stdin"); !res) {
+            return std::unexpected(res.error());
+        }
         run_cfg.in = Fd_view{pipe_in[0]};
-        bld::log::i("Created stdin pipe (read: {}, write: {})", pipe_in[0], pipe_in[1]);
+        bld::log::d("Created stdin pipe (read: {}, write: {})", pipe_in[0], pipe_in[1]);
     }
 
     if (cap_cfg.out) {
-        if (auto res = make_pipe(pipe_out, "stdout"); !res) return std::unexpected(res.error());
+        if (auto res = make_pipe(pipe_out, "stdout"); !res) {
+            return std::unexpected(res.error());
+        }
         run_cfg.out = Fd_view{pipe_out[1]};
-        bld::log::i("Created stdout pipe (read: {}, write: {})", pipe_out[0], pipe_out[1]);
+        bld::log::d("Created stdout pipe (read: {}, write: {})", pipe_out[0], pipe_out[1]);
     }
 
     if (cap_cfg.merge_out_err) {
         run_cfg.merge_err_and_out = true;
-        bld::log::i("Merging stderr into stdout pipe");
+        bld::log::d("Merging stderr into stdout pipe");
     } else if (cap_cfg.err) {
-        if (auto res = make_pipe(pipe_err, "stderr"); !res) return std::unexpected(res.error());
+        if (auto res = make_pipe(pipe_err, "stderr"); !res) {
+            return std::unexpected(res.error());
+        }
         run_cfg.err = Fd_view{pipe_err[1]};
-        bld::log::i("Created stderr pipe (read: {}, write: {})", pipe_err[0], pipe_err[1]);
+        bld::log::d("Created stderr pipe (read: {}, write: {})", pipe_err[0], pipe_err[1]);
     }
 
     auto proc_res = bld::details::execute(cmd, run_cfg, loc);
 
-    // The parent must immediately close the child's ends of the pipes, 
+    // The parent must immediately close the child's ends of the pipes,
     // otherwise the read loops below will block forever waiting for EOF.
-    if (cap_cfg.out) close_fd(pipe_out[1]);
-    if (cap_cfg.err && !cap_cfg.merge_out_err) close_fd(pipe_err[1]);
-    if (!cap_cfg.in_str.empty()) close_fd(pipe_in[0]);
+    if (cap_cfg.out) {
+        close_fd(pipe_out[1]);
+    }
+    if (cap_cfg.err && !cap_cfg.merge_out_err) {
+        close_fd(pipe_err[1]);
+    }
+    if (!cap_cfg.in_str.empty()) {
+        close_fd(pipe_in[0]);
+    }
 
     if (!proc_res) {
         // Clean up our remaining ends if spawn completely failed
-        if (cap_cfg.out) close_fd(pipe_out[0]);
-        if (cap_cfg.err && !cap_cfg.merge_out_err) close_fd(pipe_err[0]);
-        if (!cap_cfg.in_str.empty()) close_fd(pipe_in[1]);
+        if (cap_cfg.out) {
+            close_fd(pipe_out[0]);
+        }
+        if (cap_cfg.err && !cap_cfg.merge_out_err) {
+            close_fd(pipe_err[0]);
+        }
+        if (!cap_cfg.in_str.empty()) {
+            close_fd(pipe_in[1]);
+        }
         return std::unexpected(proc_res.error());
     }
 
@@ -2354,8 +2337,11 @@ auto bld::details::capture_execute(const bld::Cmd &cmd, bld::Capture_config &cap
             char buf[4096];
             while (true) {
                 int bytes = read_fd(fd, buf, sizeof(buf));
-                if (bytes > 0) ptr->append(buf, static_cast<std::size_t>(bytes));
-                else break;
+                if (bytes > 0) {
+                    ptr->append(buf, static_cast<std::size_t>(bytes));
+                } else {
+                    break;
+                }
             }
             close_fd(fd);
         });
@@ -2366,8 +2352,11 @@ auto bld::details::capture_execute(const bld::Cmd &cmd, bld::Capture_config &cap
             char buf[4096];
             while (true) {
                 int bytes = read_fd(fd, buf, sizeof(buf));
-                if (bytes > 0) ptr->append(buf, static_cast<std::size_t>(bytes));
-                else break;
+                if (bytes > 0) {
+                    ptr->append(buf, static_cast<std::size_t>(bytes));
+                } else {
+                    break;
+                }
             }
             close_fd(fd);
         });
@@ -2393,6 +2382,16 @@ auto bld::details::capture_execute(const bld::Cmd &cmd, bld::Capture_config &cap
         if (t.joinable()) {
             t.join();
         }
+    }
+
+    if (cap_cfg.normalize_crlf) {
+        auto normalize = [](std::string *s) {
+            if (s) {
+                *s = bld::str::replace_all(*s, "\r\n", "\n");
+            }
+        };
+        normalize(cap_cfg.out);
+        normalize(cap_cfg.err);
     }
 
     return proc.wait();
@@ -2452,23 +2451,24 @@ auto bld::get_current_cxx_compiler() -> std::string_view
     return compiler;
 }
 
-auto bld::rebuild_this_when_needed(int argc, char **argv, std::string_view compiler, std::source_location loc) -> void
+auto bld::rebuild_this_when_needed(int argc, char **argv, std::string_view compiler, std::source_location loc)
+    -> std::expected<void, bld::Err>
 {
     if (argv == nullptr || argc <= 0) {
-        return;
+        return {};
     }
 
     std::span<char *> args_span{argv, static_cast<std::size_t>(argc)};
     namespace fs = std::filesystem;
-    std::string target = args_span[0];
+    std::string target = bld::add_exe_on_win32(args_span[0]);
 
     std::string source = loc.file_name();
 
     if (!bld::is_outdated(target, source)) {
-        return;
+        return {};
     }
 
-    bld::log::i("Rebuilding...", target, source);
+    bld::log::i("Rebuilding '{}' from '{}'", target, source);
 
     std::string old_target = target + ".old";
     std::error_code ec;
@@ -2487,17 +2487,20 @@ auto bld::rebuild_this_when_needed(int argc, char **argv, std::string_view compi
     }
 
     bld::Cmd build_cmd{cxx, "-o", target, source, "-std=c++23", "-O3", "-Wall", "-Wextra"};
-    #ifdef _WIN32
-    #ifdef __GNUC__
-        build_cmd.push("-lstdc++exp");
-    #endif
-    #endif
+#ifdef _WIN32
+#ifdef __GNUC__
+    build_cmd.push("-lstdc++exp");
+#endif
+#endif
 
     auto proc = bld::run(build_cmd);
     if (!proc || proc->status_.code != 0) {
-        bld::log::e("FATAL: Failed to rebuild build script.");
         fs::rename(old_target, target, ec);
-        std::exit(1);
+        if (!proc) {
+            return std::unexpected(std::move(proc.error()));
+        }
+        return std::unexpected(bld::Err::erc(std::errc::operation_canceled,
+                                             std::format("Failed to rebuild build script: compiler exited with code {}", proc->status_.code)));
     }
 
     bld::log::i("Successfully rebuilt! Restarting...");
@@ -2505,30 +2508,33 @@ auto bld::rebuild_this_when_needed(int argc, char **argv, std::string_view compi
     std::vector<char *> c_argv(args_span.begin(), args_span.end());
     c_argv.push_back(nullptr);
 
+#ifdef _WIN32
+    ::_execvp(target.c_str(), c_argv.data());
+#else
     ::execvp(target.c_str(), c_argv.data());
+#endif
 
-    bld::log::f("FATAL: Failed to restart build script after compilation: {}", std::strerror(errno));
-    std::exit(1);
+    return std::unexpected(bld::Err::erno(errno, "Failed to restart build script after compilation"));
 }
 
 auto bld::rebuild_this_when_needed_ext(int argc, char **argv, std::vector<std::string> flags, std::string_view compiler, std::source_location loc)
-    -> void
+    -> std::expected<void, bld::Err>
 {
     if (argv == nullptr || argc <= 0) {
-        return;
+        return {};
     }
 
     std::span<char *> args_span{argv, static_cast<std::size_t>(argc)};
     namespace fs = std::filesystem;
-    std::string target = args_span[0];
+    std::string target = bld::add_exe_on_win32(args_span[0]);
 
     std::string source = loc.file_name();
 
     if (!bld::is_outdated(target, std::array<std::string_view, 2>{source, std::string_view(__FILE__)})) {
-        return;
+        return {};
     }
 
-    bld::log::i("Rebuilding...", target, source);
+    bld::log::i("Rebuilding '{}' from '{}'", target, source);
 
     std::string old_target = target + ".old";
     std::error_code ec;
@@ -2560,9 +2566,12 @@ auto bld::rebuild_this_when_needed_ext(int argc, char **argv, std::vector<std::s
 
     auto proc = bld::run(build_cmd);
     if (!proc || proc->status_.code != 0) {
-        bld::log::e("FATAL: Failed to rebuild build script.");
         fs::rename(old_target, target, ec);
-        std::exit(1);
+        if (!proc) {
+            return std::unexpected(std::move(proc.error()));
+        }
+        return std::unexpected(bld::Err::erc(std::errc::operation_canceled,
+                                             std::format("Failed to rebuild build script: compiler exited with code {}", proc->status_.code)));
     }
 
     bld::log::i("Successfully rebuilt! Restarting...");
@@ -2570,10 +2579,13 @@ auto bld::rebuild_this_when_needed_ext(int argc, char **argv, std::vector<std::s
     std::vector<char *> c_argv(args_span.begin(), args_span.end());
     c_argv.push_back(nullptr);
 
+#ifdef _WIN32
+    ::_execvp(target.c_str(), c_argv.data());
+#else
     ::execvp(target.c_str(), c_argv.data());
+#endif
 
-    bld::log::f("FATAL: Failed to restart build script after compilation: {}", std::strerror(errno));
-    std::exit(1);
+    return std::unexpected(bld::Err::erno(errno, "Failed to restart build script after compilation"));
 }
 
 auto bld::wait_all(std::span<bld::Proc> procs) -> std::expected<std::size_t, bld::Err>
@@ -2598,13 +2610,15 @@ auto bld::wait_all(std::span<bld::Proc> procs) -> std::expected<std::size_t, bld
     std::size_t completed = 0;
     bool has_errors = false;
 
-    // Windows has a MAXIMUM_WAIT_OBJECTS limit of 64.
-    // Since we batch by hardware_concurrency, this is perfectly safe.
+    // Windows only allows waiting on up to MAXIMUM_WAIT_OBJECTS handles at once.
+    // Wait in chunks so wait_all works with any number of processes.
+    constexpr std::size_t max_wait_batch = static_cast<std::size_t>(MAXIMUM_WAIT_OBJECTS);
     while (!handles.empty()) {
+        const DWORD batch = static_cast<DWORD>(std::min(handles.size(), max_wait_batch));
         // Wait for ANY process to finish (bWaitAll = FALSE)
-        DWORD wait_res = ::WaitForMultipleObjects(static_cast<DWORD>(handles.size()), handles.data(), FALSE, INFINITE);
+        DWORD wait_res = ::WaitForMultipleObjects(batch, handles.data(), FALSE, INFINITE);
 
-        if (wait_res >= WAIT_OBJECT_0 && wait_res < WAIT_OBJECT_0 + handles.size()) {
+        if (wait_res >= WAIT_OBJECT_0 && wait_res < WAIT_OBJECT_0 + batch) {
             DWORD idx = wait_res - WAIT_OBJECT_0;
             bld::Proc *p = proc_ptrs[idx];
             HANDLE h = handles[idx];
@@ -2612,7 +2626,7 @@ auto bld::wait_all(std::span<bld::Proc> procs) -> std::expected<std::size_t, bld
             DWORD exit_code = 0;
             ::GetExitCodeProcess(h, &exit_code);
 
-            p->status_ = bld::Proc::Status{bld::Proc::State::exited, static_cast<uint8_t>(exit_code)};
+            p->status_ = bld::Proc::Status{bld::Proc::State::exited, static_cast<int>(exit_code)};
             ::CloseHandle(h);
             p->id_ = nullptr; // Clear the PID/Handle
 
@@ -2717,6 +2731,10 @@ auto bld::run(std::span<bld::Task> tasks, std::size_t max_jobs) -> std::expected
             max_jobs = 1;
         }
     }
+#ifdef _WIN32
+    // WaitForMultipleObjects cannot wait on more than MAXIMUM_WAIT_OBJECTS handles.
+    max_jobs = std::min(max_jobs, static_cast<std::size_t>(MAXIMUM_WAIT_OBJECTS));
+#endif
 
     bld::log::i("Building in batches of: {}", max_jobs);
 
@@ -2761,6 +2779,72 @@ auto bld::run(std::span<bld::Task> tasks, std::size_t max_jobs) -> std::expected
     }
 
     bld::log::i("Done; total completed tasks: {}", completed);
+    return {};
+}
+
+auto bld::run_threaded(std::span<bld::Task> tasks, std::size_t threads) -> std::expected<void, bld::Err>
+{
+    if (threads == 0) {
+        threads = std::thread::hardware_concurrency();
+        if (threads == 0) {
+            threads = 1;
+        }
+    }
+    threads = std::min(threads, tasks.size());
+
+    bld::log::i("Running {} tasks across {} threads", tasks.size(), threads);
+
+    std::atomic<std::size_t> next{0};
+    std::atomic<std::size_t> ran{0};
+    std::atomic<std::size_t> failed{0};
+    std::atomic<bool> cancel{false};
+    std::atomic<std::size_t> live_workers{threads};
+    std::mutex mtx;
+    std::condition_variable cv;
+
+    std::vector<std::thread> workers;
+    workers.reserve(threads);
+    for (std::size_t i = 0; i < threads; ++i) {
+        workers.emplace_back([&] {
+            while (!cancel.load(std::memory_order_relaxed)) {
+                const std::size_t idx = next.fetch_add(1, std::memory_order_relaxed);
+                if (idx >= tasks.size()) {
+                    break;
+                }
+                auto proc_res = bld::details::execute(tasks[idx].cmd, tasks[idx].cfg, tasks[idx].cfg.loc);
+                bool ok = false;
+                if (proc_res) {
+                    if (auto wait_res = proc_res->wait(); wait_res) {
+                        ok = wait_res->state == bld::Proc::State::exited && wait_res->code == 0;
+                    }
+                }
+                ran.fetch_add(1, std::memory_order_relaxed);
+                if (!ok) {
+                    failed.fetch_add(1, std::memory_order_relaxed);
+                    cancel.store(true, std::memory_order_relaxed);
+                }
+            }
+            if (live_workers.fetch_sub(1, std::memory_order_acq_rel) == 1) {
+                std::lock_guard<std::mutex> lk(mtx);
+                cv.notify_all();
+            }
+        });
+    }
+
+    {
+        std::unique_lock<std::mutex> lk(mtx);
+        cv.wait(lk, [&] { return live_workers.load(std::memory_order_acquire) == 0; });
+    }
+    for (auto &w : workers) {
+        w.join();
+    }
+
+    const std::size_t n_failed = failed.load(std::memory_order_relaxed);
+    bld::log::i("Done; total completed tasks: {}", ran.load(std::memory_order_relaxed));
+    if (n_failed > 0) {
+        return std::unexpected(
+            bld::Err::erc(std::errc::operation_canceled, std::format("{} of {} tasks failed", n_failed, tasks.size())));
+    }
     return {};
 }
 
@@ -2813,7 +2897,7 @@ auto bld::Config::print_help(std::string_view prog_name, std::string_view specif
             auto joined = opt.choices | std::views::join_with(std::string_view{"|"}) | std::ranges::to<std::string>();
             std::format_to(std::back_inserter(help_text), "\n  Choices: [{}]", joined);
         }
-        bld::log::i("{}", help_text);
+        std::println(std::cout, "{}", help_text);
         return;
     }
 
@@ -2864,10 +2948,10 @@ auto bld::Config::print_help(std::string_view prog_name, std::string_view specif
         std::format_to(std::back_inserter(help_text), " (default: {})", def_str);
     }
 
-    bld::log::i("{}", help_text);
+    std::println(std::cout, "{}", help_text);
 }
 
-auto bld::Config::parse(int argc, char *argv[]) -> void
+auto bld::Config::parse(int argc, char *argv[]) -> std::expected<Parse_outcome, bld::Err>
 {
     std::span<char *> args{argv, static_cast<std::size_t>(argc)};
     std::string_view prog_name = args.empty() ? "bld" : args[0];
@@ -2882,7 +2966,7 @@ auto bld::Config::parse(int argc, char *argv[]) -> void
                 specific = args[i + 1];
             }
             print_help(prog_name, specific);
-            std::exit(0);
+            return Parse_outcome{.help_requested = true};
         }
     }
 
@@ -2913,8 +2997,8 @@ auto bld::Config::parse(int argc, char *argv[]) -> void
                 if (ec == std::errc{} && p == val.data() + val.size()) {
                     data[key] = v;
                 } else {
-                    bld::log::e("FATAL: Option '{}' expects an integer, got '{}'", key, val);
-                    std::exit(1);
+                    return std::unexpected(
+                        bld::Err::erc(std::errc::invalid_argument, std::format("Option '{}' expects an integer, got '{}'", key, val)));
                 }
             } else if (expected_type == Double) {
                 double v{};
@@ -2922,16 +3006,16 @@ auto bld::Config::parse(int argc, char *argv[]) -> void
                 if (ec == std::errc{} && p == val.data() + val.size()) {
                     data[key] = v;
                 } else {
-                    bld::log::e("FATAL: Option '{}' expects a double, got '{}'", key, val);
-                    std::exit(1);
+                    return std::unexpected(
+                        bld::Err::erc(std::errc::invalid_argument, std::format("Option '{}' expects a double, got '{}'", key, val)));
                 }
             } else if (expected_type == String) {
                 std::string string_val(val);
                 if (!options[key].choices.empty()) {
                     auto &ch = options[key].choices;
                     if (std::find(ch.begin(), ch.end(), string_val) == ch.end()) {
-                        bld::log::e("FATAL: Invalid choice '{}' for option '{}'.", string_val, key);
-                        std::exit(1);
+                        return std::unexpected(bld::Err::erc(
+                            std::errc::invalid_argument, std::format("Invalid choice '{}' for option '{}'.", string_val, key)));
                     }
                 }
                 data[key] = std::move(string_val);
@@ -2960,6 +3044,8 @@ auto bld::Config::parse(int argc, char *argv[]) -> void
 
         data[key] = std::string(val);
     }
+
+    return Parse_outcome{};
 }
 
 bld::Config::Proxy::operator bool() const
@@ -3264,7 +3350,16 @@ bool Dir_entry::is_symlink() const noexcept
 bool Dir_entry::is_hidden() const noexcept
 {
     const auto n = filename();
-    return !n.empty() && n.front() == '.';
+    if (!n.empty() && n.front() == '.') {
+        return true;
+    }
+#ifdef _WIN32
+    const DWORD attrs = ::GetFileAttributesW(path.c_str());
+    if (attrs != INVALID_FILE_ATTRIBUTES) {
+        return (attrs & FILE_ATTRIBUTE_HIDDEN) != 0;
+    }
+#endif
+    return false;
 }
 
 std::string_view Dir_entry::extension() const noexcept
@@ -3311,6 +3406,9 @@ Dir_walker::Dir_walker(std::filesystem::path root) : root_{std::move(root)}
 Dir_walker::Dir_walker(const std::string &root) : root_{root}
 {}
 
+Dir_walker::Dir_walker(const char *root) : root_{root}
+{}
+
 auto Dir_walker::recursive(bool v) noexcept -> Dir_walker &
 {
     recursive_ = v;
@@ -3323,9 +3421,15 @@ auto Dir_walker::flat() noexcept -> Dir_walker &
     return *this;
 }
 
-auto Dir_walker::include_dirs(bool v) noexcept -> Dir_walker &
+auto Dir_walker::exclude_dirs(bool v) noexcept -> Dir_walker &
 {
-    include_dirs_ = v;
+    include_dirs_ = !v;
+    return *this;
+}
+
+auto Dir_walker::files_only(bool v) noexcept -> Dir_walker &
+{
+    include_dirs_ = !v;
     return *this;
 }
 
@@ -3692,10 +3796,13 @@ auto relative(std::string_view path, std::string_view base) noexcept -> std::exp
 auto read_file(std::string_view path) noexcept -> std::expected<std::string, bld::Err>
 {
     try {
-
-        if (!std::filesystem::is_regular_file(path)) {
-            bld::log::e("Cannot read becuase '{}' is a directory.", path);
-            return std::unexpected(bld::Err::erc(std::errc::io_error, std::format("'{}' is a directory", path)));
+        std::error_code ec;
+        if (!std::filesystem::is_regular_file(path, ec)) {
+            if (ec) {
+                return std::unexpected(
+                    bld::Err{.err = ec, .msg = std::format("Failed to read '{}': {}", path, ec.message())});
+            }
+            return std::unexpected(bld::Err::erc(std::errc::io_error, std::format("'{}' is not a regular file", path)));
         }
         std::ifstream file(std::filesystem::path(path), std::ios::in | std::ios::binary | std::ios::ate);
         if (!file) {
@@ -3825,6 +3932,109 @@ auto find_by_name(std::string_view root, Names &&...names) noexcept -> Walk_resu
             }
             return res;
         });
+}
+
+std::vector<Cpp_module> scan_modules(const std::string &path, std::vector<std::string> extensions)
+{
+    std::vector<bld::fs::Cpp_module> modules;
+
+    if (extensions.empty()) {
+        bld::log::e("Extesions cannot be empty: {}", std::source_location::current().function_name());
+        return {};
+    }
+
+    for (auto &e : extensions) {
+        if (!e.empty() && e.front() != '.') {
+            e = '.' + e;
+        }
+    }
+
+    auto walk_res = bld::fs::Dir_walker{path}
+        .recursive()
+        .where([&extensions](const bld::fs::Dir_entry &entry) {
+            return std::ranges::any_of(extensions, [&](const std::string &ext) { return entry.extension() == ext; });
+        })
+        .for_each([&](const bld::fs::Dir_entry &entry) {
+            std::string content;
+            if (auto res = bld::fs::read_file(entry.path.string()); res) {
+                content = *res;
+            } else {
+                bld::log::w("Failed to read module file '{}': {}", entry.path.string(), res.error().msg);
+                return;
+            }
+            if (content.empty()) {
+                return;
+            }
+
+            // Tokenize
+            std::vector<std::string> tokens;
+            std::string token;
+            for (char c : content) {
+                if (std::isspace(static_cast<unsigned char>(c)) || c == ';') {
+                    if (!token.empty()) {
+                        tokens.push_back(token);
+                        token.clear();
+                    }
+                    if (c == ';') {
+                        tokens.push_back(";");
+                    }
+                } else {
+                    token += c;
+                }
+            }
+
+            bld::fs::Cpp_module mod;
+            mod.file = entry.path;
+            bool found_name = false;
+            std::string primary_name;
+            std::unordered_set<std::string> seen_imports;
+
+            for (size_t i = 0; i < tokens.size(); ++i) {
+                if (tokens[i] == "export" && i + 2 < tokens.size() && tokens[i + 1] == "module") {
+                    mod.name = tokens[i + 2];
+                    found_name = true;
+                    size_t colon = mod.name.find(':');
+                    primary_name = (colon != std::string::npos) ? mod.name.substr(0, colon) : mod.name;
+                } else if (tokens[i] == "import") {
+                    if (i > 0 && tokens[i - 1] == "export") {
+                        continue;
+                    }
+                    if (i + 1 < tokens.size()) {
+                        std::string dep = tokens[i + 1];
+                        if (!dep.starts_with("std") && dep != ";" && !dep.empty()) {
+                            if (dep.starts_with(":") && !primary_name.empty()) {
+                                dep = primary_name + dep;
+                            }
+                            if (seen_imports.insert(dep).second) {
+                                mod.imports.push_back(dep);
+                            }
+                        }
+                    }
+                } else if (tokens[i] == "export" && i + 2 < tokens.size() && tokens[i + 1] == "import") {
+                    std::string dep = tokens[i + 2];
+                    if (!dep.starts_with("std") && dep != ";" && !dep.empty()) {
+                        if (dep.starts_with(":") && !primary_name.empty()) {
+                                    dep = primary_name + dep;
+                                }
+                                if (seen_imports.insert(dep).second) {
+                                    mod.imports.push_back(dep);
+                                }
+                            }
+                        }
+                    }
+
+                    if (found_name) {
+                        modules.push_back(std::move(mod));
+                    } else {
+                        bld::log::w("Skipped file (no module decl found): {}", entry.path.string());
+                    }
+                });
+
+    if (!walk_res) {
+        bld::log::e("Failed to scan modules in '{}': {}", path, walk_res.error().message());
+    }
+
+    return modules;
 }
 
 } // namespace bld::fs
@@ -4017,6 +4227,171 @@ auto format(std::chrono::nanoseconds ns) -> std::string
 }
 
 } // namespace bld::time
+
+namespace bld::fs {
+
+constexpr Walk_result::Walk_result(Walk_action a) noexcept : action{a}
+{}
+constexpr Walk_result::Walk_result(std::error_code ec) noexcept : action{ec ? Walk_action::stop : Walk_action::next}, error{ec}
+{}
+
+namespace detail {
+template <Valid_visitor V>
+auto invoke_visitor(V &&v, const Dir_entry &e) -> Walk_result
+{
+    if constexpr (Void_visitor<V>) {
+        std::invoke(std::forward<V>(v), e);
+        return {};
+    } else {
+        return std::invoke(std::forward<V>(v), e);
+    }
+}
+} // namespace detail
+
+template <typename Pred>
+    requires std::predicate<Pred, const Dir_entry &>
+auto Dir_walker::where(Pred pred) -> Dir_walker &
+{
+    filters_.emplace_back(std::move(pred));
+    return *this;
+}
+
+template <detail::Valid_visitor V>
+auto Dir_walker::walk(V &&visitor, std::source_location caller) const noexcept -> Walk_result_t<void>
+{
+    return run([&](const Dir_entry &e) { return detail::invoke_visitor(std::forward<V>(visitor), e); }, caller);
+}
+
+template <std::invocable<const Dir_entry &> F>
+auto Dir_walker::for_each(F &&fn, std::source_location caller) const noexcept -> Walk_result_t<void>
+{
+    return run(
+        [&](const Dir_entry &e) -> Walk_result {
+            std::invoke(std::forward<F>(fn), e);
+            return Walk_action::next;
+        },
+        caller);
+}
+
+template <typename Pred>
+    requires std::predicate<Pred, const Dir_entry &>
+auto Dir_walker::partition(Pred pred, std::source_location caller) const noexcept
+    -> Walk_result_t<std::pair<std::vector<Dir_entry>, std::vector<Dir_entry>>>
+{
+    std::vector<Dir_entry> yes, no;
+    return run(
+               [&](const Dir_entry &e) -> Walk_result {
+                   (std::invoke(pred, e) ? yes : no).push_back(e);
+                   return Walk_action::next;
+               },
+               caller)
+        .transform([&] { return std::pair{std::move(yes), std::move(no)}; });
+}
+
+template <typename T, std::invocable<T, const Dir_entry &> F>
+auto Dir_walker::fold(T init, F &&fn, std::source_location caller) const noexcept -> Walk_result_t<T>
+{
+    T acc = std::move(init);
+    return run(
+               [&](const Dir_entry &e) -> Walk_result {
+                   acc = std::invoke(std::forward<F>(fn), std::move(acc), e);
+                   return Walk_action::next;
+               },
+               caller)
+        .transform([&] { return std::move(acc); });
+}
+
+template <std::invocable<Dir_walker &> F>
+auto Dir_walker::apply(F &&fn) -> Dir_walker &
+{
+    std::invoke(std::forward<F>(fn), *this);
+    return *this;
+}
+
+template <std::invocable<const Dir_entry &> F>
+auto Dir_walker::run(F &&fn, std::source_location caller) const noexcept -> Walk_result_t<void>
+{
+    namespace fs = std::filesystem;
+
+    if (root_.empty()) {
+        bld::log::w("Dir_walker: empty root ({})", caller.function_name());
+        return std::unexpected{Walk_error{.kind = Walk_error::Kind::fs, .code = std::make_error_code(std::errc::invalid_argument)}};
+    }
+
+    std::error_code ec;
+    const auto iter_opts = follow_symlinks_ ? fs::directory_options::skip_permission_denied | fs::directory_options::follow_directory_symlink
+                                            : fs::directory_options::skip_permission_denied;
+
+    auto handle = [&](const Dir_entry &e) -> Walk_result {
+        if (is_skipped(e)) {
+            return Walk_action::skip_dir;
+        }
+        if (!is_visible(e)) {
+            return Walk_action::next;
+        }
+        if (!passes_filters(e)) {
+            return Walk_action::next;
+        }
+        return std::invoke(fn, e);
+    };
+
+    if (!recursive_) {
+        fs::directory_iterator it{root_, iter_opts, ec};
+        if (ec) {
+            return std::unexpected{Walk_error{.kind = Walk_error::Kind::fs, .code = ec}};
+        }
+
+        for (const auto &raw : it) {
+            const auto [action, err] = handle(make_entry(raw, 0));
+            if (err) {
+                return std::unexpected{Walk_error{.kind = Walk_error::Kind::visitor, .code = err}};
+            }
+            if (action == Walk_action::stop) {
+                return {};
+            }
+        }
+        return {};
+    }
+
+    fs::recursive_directory_iterator it{root_, iter_opts, ec};
+    if (ec) {
+        return std::unexpected{Walk_error{.kind = Walk_error::Kind::fs, .code = ec}};
+    }
+
+    for (const auto &raw : it) {
+        const int d = it.depth();
+        if (d >= max_depth_) {
+            it.disable_recursion_pending();
+        }
+
+        const auto [action, err] = handle(make_entry(raw, d));
+
+        if (err) {
+            return std::unexpected{Walk_error{.kind = Walk_error::Kind::visitor, .code = err}};
+        }
+
+        switch (action) {
+        case Walk_action::stop:
+            it = {};
+            return {};
+        case Walk_action::skip_dir:
+            it.disable_recursion_pending();
+            break;
+        case Walk_action::next:
+            break;
+        }
+    }
+
+    return {};
+}
+
+template <detail::Valid_visitor V>
+inline auto walk(std::string_view root, V &&visitor, std::source_location caller) noexcept
+{
+    return Dir_walker{root}.walk(std::forward<V>(visitor), caller);
+}
+
+} // namespace bld::fs
 
 #endif // B_LDR_IMPLEMENTATION_ONCE
 #endif // B_LDR_IMPLEMENTATION
