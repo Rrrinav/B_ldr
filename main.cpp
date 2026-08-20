@@ -38,12 +38,12 @@ auto run_tests() -> bool
 
 int main(int argc, char *argv[])
 {
-    bld::rebuild_this_when_needed_ext(argc, argv);
-    cfg.parse(argc, argv);
+    std::ignore = bld::rebuild_this_when_needed_ext(argc, argv);
+    std::ignore = cfg.parse(argc, argv);
 
     bld::time::stamp t1{};
 
-    if (cfg["test"]) {
+    if (cfg["test"] || cfg["-test"]) {
         if (run_tests()) {
             bld::log::i("Tests executed in {}", bld::time::format(t1.elapsed()));
             return EXIT_SUCCESS;

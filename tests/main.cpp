@@ -260,6 +260,27 @@ static auto make_sandbox_file(const std::filesystem::path &path, std::string_vie
     return internal_test_read_file(path);
 }
 
+namespace {
+#ifdef _WIN32
+inline bld::Cmd true_cmd()  { return bld::Cmd{"cmd", "/c", "exit", "0"}; }
+inline bld::Cmd false_cmd() { return bld::Cmd{"cmd", "/c", "exit", "1"}; }
+inline bld::Cmd sleep_cmd() { return bld::Cmd{"powershell", "-NoProfile", "-Command", "Start-Sleep -Milliseconds 300"}; }
+inline bld::Cmd echo_cmd(std::string_view out_data, std::string_view err_data)
+{
+    return bld::Cmd{"powershell", "-NoProfile", "-Command",
+                    std::format("[Console]::OutputEncoding=[System.Text.Encoding]::UTF8;Write-Output {};[Console]::Error.WriteLine('{}')", out_data, err_data)};
+}
+#else
+inline bld::Cmd true_cmd()  { return bld::Cmd{"true"}; }
+inline bld::Cmd false_cmd() { return bld::Cmd{"false"}; }
+inline bld::Cmd sleep_cmd() { return bld::Cmd{"sleep", "0.02"}; }
+inline bld::Cmd echo_cmd(std::string_view out_data, std::string_view err_data)
+{
+    return bld::Cmd{"sh", "-c", std::format("echo {} && echo {} >&2", out_data, err_data)};
+}
+#endif
+} // namespace
+
 auto run_tests() -> int
 {
     namespace fs = std::filesystem;
@@ -434,7 +455,7 @@ auto run_tests() -> int
              make_sandbox_file(src1, "src1", std::chrono::seconds(0));
              make_sandbox_file(src2, "src2", std::chrono::seconds(20)); // src2 is newer than target
 
-             std::array<std::string_view, 2> sources{src1.string(), src2.string()};
+             std::array<std::string, 2> sources{src1.string(), src2.string()};
 
              if (!bld::is_outdated(target.string(), sources)) {
                  return std::unexpected("failed to detect that the second source file triggered an outdated state");
@@ -458,8 +479,11 @@ auto run_tests() -> int
 #else
                  if (bld::capture(bld::Cmd{"./test_fs"}, bld::cap_merge{cap})) {
 #endif
-                     std::ifstream f("./tests/fs/out");
-                     auto parsed = bld::test::parse_results(f);
+                     std::expected<std::vector<bld::test::Test_file_res>, std::string> parsed;
+                     {
+                         std::ifstream f("./tests/fs/out");
+                         parsed = bld::test::parse_results(f);
+                     }
                      std::filesystem::remove_all("./tests/fs/out");
                      std::filesystem::remove_all("./tests_fs");
                      if (!parsed) {
@@ -506,8 +530,11 @@ auto run_tests() -> int
 #else
                  if (bld::capture(bld::Cmd{"./test_str"}, bld::cap_merge{cap})) {
 #endif
-                     std::ifstream f("./tests/str/out");
-                     auto parsed = bld::test::parse_results(f);
+                     std::expected<std::vector<bld::test::Test_file_res>, std::string> parsed;
+                     {
+                         std::ifstream f("./tests/str/out");
+                         parsed = bld::test::parse_results(f);
+                     }
                      std::filesystem::remove_all("./tests/str/out");
                      std::filesystem::remove_all("./tests_str");
                      if (!parsed) {
@@ -540,13 +567,13 @@ auto run_tests() -> int
 
         {"process_sync_and_async_execution",
          []() -> std::expected<void, std::string> {
-             bld::Cmd cmd_sync{"true"};
+             bld::Cmd cmd_sync = true_cmd();
              auto sync_res = bld::run(bld::Cmd_loc{cmd_sync});
              if (!sync_res || sync_res->status_code() != 0) {
                  return std::unexpected("synchronous execution failure");
              }
 
-             bld::Cmd cmd_async{"sleep", "0.02"};
+             bld::Cmd cmd_async = sleep_cmd();
              auto async_res = bld::run(bld::Cmd_loc{cmd_async}, bld::async{});
              if (!async_res || !async_res->is_running()) {
                  return std::unexpected("asynchronous process tracking error");
@@ -560,7 +587,7 @@ auto run_tests() -> int
          }},
         {"process_capture_stdout_and_stderr",
          []() -> std::expected<void, std::string> {
-             bld::Cmd cmd{"sh", "-c", "echo out_data && echo err_data >&2"};
+             bld::Cmd cmd = echo_cmd("out_data", "err_data");
              std::string stdout_storage;
              std::string stderr_storage;
 
@@ -579,7 +606,7 @@ auto run_tests() -> int
          }},
         {"process_capture_merged_streams",
          []() -> std::expected<void, std::string> {
-             bld::Cmd cmd{"sh", "-c", "echo a && echo b >&2"};
+             bld::Cmd cmd = echo_cmd("a", "b");
              std::string merged_storage;
 
              auto status = bld::capture(bld::Cmd_loc{cmd}, bld::cap_merge{merged_storage});
@@ -596,9 +623,9 @@ auto run_tests() -> int
         {"task_batch_staggered_scheduler",
          []() -> std::expected<void, std::string> {
              std::vector<bld::Task> execution_list;
-             execution_list.emplace_back(bld::Cmd_loc{bld::Cmd{"sleep", "0.01"}});
-             execution_list.emplace_back(bld::Cmd_loc{bld::Cmd{"sleep", "0.01"}});
-             execution_list.emplace_back(bld::Cmd_loc{bld::Cmd{"sleep", "0.01"}});
+             execution_list.emplace_back(bld::Cmd_loc{sleep_cmd()});
+             execution_list.emplace_back(bld::Cmd_loc{sleep_cmd()});
+             execution_list.emplace_back(bld::Cmd_loc{sleep_cmd()});
 
              auto batch_status = bld::run(execution_list, 2);
              if (!batch_status) {
@@ -608,9 +635,9 @@ auto run_tests() -> int
          }},
         {"task_batch_poison_interruption", []() -> std::expected<void, std::string> {
              std::vector<bld::Task> broken_list;
-             broken_list.emplace_back(bld::Cmd_loc{bld::Cmd{"true"}});
-             broken_list.emplace_back(bld::Cmd_loc{bld::Cmd{"false"}});
-             broken_list.emplace_back(bld::Cmd_loc{bld::Cmd{"true"}});
+             broken_list.emplace_back(bld::Cmd_loc{true_cmd()});
+             broken_list.emplace_back(bld::Cmd_loc{false_cmd()});
+             broken_list.emplace_back(bld::Cmd_loc{true_cmd()});
 
              // Force max_jobs = 1 to guarantee sequential processing.
              // This ensures the 3rd task is NEVER scheduled because the 2nd task poisons the batch queue.
