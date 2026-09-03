@@ -17,29 +17,17 @@
   FITNESS FOR A PARTICULAR PURPOSE AND NONINFRINGEMENT.IN NO EVENT SHALL THE AUTHORS OR COPYRIGHT HOLDERS BE LIABLE FOR ANY CLAIM,
   DAMAGES OR OTHER LIABILITY, WHETHER IN AN ACTION OF CONTRACT, TORT OR OTHERWISE, ARISING FROM,
   OUT OF OR IN CONNECTION WITH THE SOFTWARE OR THE USE OR OTHER DEALINGS IN THE SOFTWARE.
-*/
 
-/*
-  inspired by nob.h by rexim/alexey/tsoding.
-  github.com/tsoding/nob.h
+  Inspired by nob.h — github.com/tsoding/nob.h
 */
-
-/*
-    Usage:
-        // In exactly one translation unit:
-        #define B_LDR_IMPLEMENTATION
-        #include "b_ldr.hpp"
- */
 
 #ifndef B_LDR_HPP
 #define B_LDR_HPP
 
 #include <any>
 #include <atomic>
-#include <cerrno>
-#include <charconv>
+#include <bit> // std::endian (bld::env)
 #include <chrono>
-#include <condition_variable>
 #include <cstddef>
 #include <cstdint>
 #include <cstdlib>
@@ -50,7 +38,6 @@
 #include <format>
 #include <functional>
 #include <iostream>
-#include <iterator>
 #include <memory>
 #include <mutex>
 #include <optional>
@@ -69,38 +56,44 @@
 #include <variant>
 #include <vector>
 
+// — Platform —
 #ifdef _WIN32
-    #ifndef WIN32_LEAN_AND_MEAN
-    #define WIN32_LEAN_AND_MEAN
-    #endif
-    #include <fcntl.h>
-    #include <io.h>
-    #include <process.h>
-    #include <windows.h>
-    #ifndef STDIN_FILENO
-    #define STDIN_FILENO 0
-    #define STDOUT_FILENO 1
-    #define STDERR_FILENO 2
-    #endif
-#else
-// POSIX / Linux
-    #include <fcntl.h>
-    #include <poll.h>
-    #include <sched.h>
-    #include <sys/types.h>
-    #include <sys/wait.h>
-    #include <unistd.h>
+#ifndef WIN32_LEAN_AND_MEAN
+#define WIN32_LEAN_AND_MEAN
+#endif
+#include <fcntl.h>
+#include <io.h>
+#include <process.h>
+#include <windows.h>
+#ifndef STDIN_FILENO
+#define STDIN_FILENO 0
+#define STDOUT_FILENO 1
+#define STDERR_FILENO 2
+#endif
+#else // POSIX / Linux
+#include <fcntl.h>
+#include <poll.h>
+#include <sched.h>
+#include <sys/types.h>
+#include <sys/wait.h>
+#include <unistd.h>
 #endif
 
-// Public API map
-//   1. Errors and formatters         bld::Err
-//   2. Logging                       bld::Logger, bld::log
-//   3. Commands and processes        bld::Cmd, bld::Proc
-//   4. Execution                     bld::run, bld::capture, bld::Task
-//   5. Rebuild helpers               bld::is_outdated, bld::rebuild_this_when_needed
-//   6. Config                        bld::Config
-//   7. Test helpers                  bld::test
-//   8. Filesystem                    bld::fs
+//   SECTION 01 — Errors & formatters ............. bld::Err
+//   SECTION 02 — Logging ......................... bld::Logger, bld::log
+//   SECTION 03 — Commands & Processes ............ bld::Cmd, bld::Proc, Fd_view
+//   SECTION 04 — Execution ....................... bld::run, bld::capture, Task
+//   SECTION 05 — Rebuild helpers ................. is_outdated, rebuild_this_when_*
+//   SECTION 06 — Config .......................... bld::Config
+//   SECTION 07 — Test helpers .................... bld::test
+//   SECTION 08 — Filesystem ...................... bld::fs
+//   SECTION 09 — String utilities ................ bld::str
+//   SECTION 10 — Time ............................ bld::time
+//   SECTION 11 — Environment (consteval, low) .... bld::env  (kept low on purpose)
+//   SECTION 12 — Formatters & inline templates ... std::formatter + templates
+
+// SECTION 01 — Errors & formatters (bld::Err)
+//   Declarations only. Definitions live in IMPL SECTION 01.
 
 namespace bld {
 struct Err
@@ -132,6 +125,9 @@ struct std::formatter<bld::Err>
     auto format(const bld::Err &err, std::format_context &ctx) const -> std::format_context::iterator;
 };
 // clang-format on
+
+// SECTION 02 — Logging (bld::Logger, bld::log)
+//   Declarations only. Definitions live in IMPL SECTION 02.
 
 namespace bld::log::detail {
 // A proxy for easier handling of streams.
@@ -241,7 +237,7 @@ void f(Os &str, std::format_string<Args...> fmt, Args &&...args);
 } // namespace bld::log
 
 namespace bld {
-[[maybe_unused]] inline std::function<bool (std::string)> panic_callback = [](std::string str) {
+[[maybe_unused]] inline std::function<bool(std::string)> panic_callback = [](std::string str) {
     std::cout.flush();
     std::cerr.flush();
     std::println(std::cerr, "[B_LDR PANIC]: {}", str);
@@ -249,9 +245,11 @@ namespace bld {
 };
 auto panic(std::string s) -> void;
 // Does nothing is ".exe" is already present
-auto add_exe_on_win32([[maybe_unused]]std::string exec) -> std::string;
-};
+auto add_exe_on_win32([[maybe_unused]] std::string exec) -> std::string;
+}; // namespace bld
 
+// SECTION 03 — Commands & Processes (bld::Cmd, bld::Proc, Fd_view …)
+//   Declarations only. Definitions live in IMPL SECTION 03.
 namespace bld {
 struct Cmd
 {
@@ -463,6 +461,8 @@ struct Capture_config
     bool normalize_crlf{true};
 };
 
+// SECTION 04 — Execution (bld::run, bld::capture, bld::Task)
+//   Declarations only. Definitions live in IMPL SECTION 04.
 namespace details {
 auto execute(const bld::Cmd &cmd, const Proc_config &cfg, std::source_location loc = std::source_location::current())
     -> std::expected<bld::Proc, bld::Err>;
@@ -625,6 +625,8 @@ auto run(std::span<bld::Task> tasks, std::size_t max_jobs = 0) -> std::expected<
 auto run_threaded(std::span<bld::Task> tasks, std::size_t threads = 0) -> std::expected<void, bld::Err>;
 } // namespace bld
 
+// SECTION 05 — Rebuild helpers (is_outdated, rebuild_this_when_needed)
+//   Declarations only. Definitions live in IMPL SECTION 05.
 namespace bld {
 [[nodiscard]]
 auto is_outdated(std::string_view target, std::string_view source) -> bool;
@@ -651,6 +653,8 @@ auto rebuild_this_when_needed_ext(
 
 } // namespace bld
 
+// SECTION 06 — Config (bld::Config)
+//   Declarations only. Definitions live in IMPL SECTION 06.
 namespace bld {
 class Config
 {
@@ -717,6 +721,8 @@ struct std::formatter<std::unordered_map<std::string_view, bld::Config::value_ty
         -> std::format_context::iterator;
 };
 
+// SECTION 07 — Test helpers (bld::test)
+//   Declarations only. Definitions live in IMPL SECTION 07.
 namespace bld::test {
 
 // clang-format off
@@ -757,6 +763,8 @@ struct std::formatter<bld::test::compute_diff_op>
     auto format(const bld::test::compute_diff_op &diff, std::format_context &ctx) const -> std::format_context::iterator;
 };
 
+// SECTION 08 — Filesystem (bld::fs)
+//   Declarations only. Definitions live in IMPL SECTION 08.
 namespace bld::fs {
 auto make_dir_if_not_exists(std::string_view path, bool create_parents = true, std::source_location loc = std::source_location::current()) noexcept
     -> bool;
@@ -967,6 +975,8 @@ struct Cpp_module
 std::vector<Cpp_module> scan_modules(const std::string &path, std::vector<std::string> extensions = {"cppm", "ixx"});
 } // namespace bld::fs
 
+// SECTION 09 — String utilities (bld::str)
+//   Declarations only. Definitions live in IMPL SECTION 09.
 namespace bld::str {
 [[nodiscard]] auto trim_left(std::string_view s) noexcept -> std::string_view;
 [[nodiscard]] auto trim_right(std::string_view s) noexcept -> std::string_view;
@@ -984,6 +994,8 @@ template <std::ranges::range Range>
 [[nodiscard]] auto join(const Range &range, std::string_view delimiter) -> std::string;
 } // namespace bld::str
 
+// SECTION 10 — Time (bld::time)
+//   Declarations only. Definitions live in IMPL SECTION 10.
 namespace bld::time {
 struct stamp
 {
@@ -994,7 +1006,10 @@ struct stamp
     auto reset() noexcept -> std::chrono::nanoseconds;
     [[nodiscard]] auto elapsed() const noexcept -> std::chrono::nanoseconds;
     [[nodiscard]] auto since(const stamp &baseline) const noexcept -> std::chrono::nanoseconds;
-    operator time_point_t() const noexcept { return tp_; }
+    operator time_point_t() const noexcept
+    {
+        return tp_;
+    }
 };
 
 [[nodiscard]] auto now() noexcept -> stamp;
@@ -1002,20 +1017,535 @@ struct stamp
 [[nodiscard]] auto format(std::chrono::nanoseconds ns) -> std::string;
 }; // namespace bld::time
 
+// SECTION 11 — Environment (bld::env) — consteval, header-only, kept low
+//   Declarations + definitions together (must be header-visible). No IMPL.
+//   Subsections: 11.1 OS, 11.2 Arch, 11.3 Compiler, 11.4 Build config.
+// clang-format off
+namespace bld::env {
+
+// 11.1 — OS detection (is_windows, is_linux, is_apple/macos, is_bsd…)
+[[nodiscard]] consteval bool is_windows() noexcept
+{
+#if defined(_WIN32)
+    return true;
+#else
+    return false;
+#endif
+}
+[[nodiscard]] consteval bool is_linux() noexcept
+{
+#if defined(__linux__) && !defined(__ANDROID__)
+    return true;
+#else
+    return false;
+#endif
+}
+[[nodiscard]] consteval bool is_apple() noexcept
+{
+#if defined(__APPLE__)
+    return true;
+#else
+    return false;
+#endif
+}
+[[nodiscard]] consteval bool is_macos() noexcept
+{
+#if defined(__APPLE__) && defined(__MACH__)
+    return true;
+#else
+    return false;
+#endif
+}
+[[nodiscard]] consteval bool is_ios() noexcept
+{
+#if defined(__APPLE__) && defined(TARGET_OS_IPHONE) && TARGET_OS_IPHONE
+    return true;
+#else
+    return false;
+#endif
+}
+[[nodiscard]] consteval bool is_unix() noexcept
+{
+#if defined(__unix__)
+    return true;
+#else
+    return false;
+#endif
+}
+[[nodiscard]] consteval bool is_posix() noexcept
+{
+#if defined(_POSIX_VERSION) || defined(__unix__) || defined(__APPLE__) || defined(__linux__)
+    return true;
+#else
+    return false;
+#endif
+}
+[[nodiscard]] consteval bool is_bsd() noexcept
+{
+#if defined(__FreeBSD__) || defined(__OpenBSD__) || defined(__NetBSD__) || defined(__DragonFly__)
+    return true;
+#else
+    return false;
+#endif
+}
+[[nodiscard]] consteval bool is_freebsd() noexcept
+{
+#if defined(__FreeBSD__)
+    return true;
+#else
+    return false;
+#endif
+}
+[[nodiscard]] consteval bool is_openbsd() noexcept
+{
+#if defined(__OpenBSD__)
+    return true;
+#else
+    return false;
+#endif
+}
+[[nodiscard]] consteval bool is_netbsd() noexcept
+{
+#if defined(__NetBSD__)
+    return true;
+#else
+    return false;
+#endif
+}
+[[nodiscard]] consteval bool is_dragonfly() noexcept
+{
+#if defined(__DragonFly__)
+    return true;
+#else
+    return false;
+#endif
+}
+[[nodiscard]] consteval bool is_android() noexcept
+{
+#if defined(__ANDROID__)
+    return true;
+#else
+    return false;
+#endif
+}
+[[nodiscard]] consteval bool is_mingw() noexcept
+{
+#if defined(__MINGW32__) || defined(__MINGW64__)
+    return true;
+#else
+    return false;
+#endif
+}
+[[nodiscard]] consteval bool is_wasm() noexcept
+{
+#if defined(__wasm__) || defined(__wasm32__) || defined(__wasm64__) || defined(__EMSCRIPTEN__)
+    return true;
+#else
+    return false;
+#endif
+}
+[[nodiscard]] consteval bool is_emscripten() noexcept
+{
+#if defined(__EMSCRIPTEN__)
+    return true;
+#else
+    return false;
+#endif
+}
+
+enum class Os { windows, linux, macos, ios, freebsd, openbsd, netbsd, dragonfly, bsd, android, wasm, emscripten, unix, posix, unknown };
+
+[[nodiscard]] consteval Os os() noexcept
+{
+    if (is_windows()) return Os::windows;
+    if (is_android()) return Os::android;
+    if (is_ios()) return Os::ios;
+    if (is_macos()) return Os::macos;
+    if (is_freebsd()) return Os::freebsd;
+    if (is_openbsd()) return Os::openbsd;
+    if (is_netbsd()) return Os::netbsd;
+    if (is_dragonfly()) return Os::dragonfly;
+    if (is_bsd()) return Os::bsd;
+    if (is_linux()) return Os::linux;
+    if (is_emscripten()) return Os::emscripten;
+    if (is_wasm()) return Os::wasm;
+    if (is_unix()) return Os::unix;
+    if (is_posix()) return Os::posix;
+    return Os::unknown;
+}
+
+[[nodiscard]] consteval std::string_view os_name() noexcept
+{
+    if (is_windows()) return "windows";
+    if (is_android()) return "android";
+    if (is_ios()) return "ios";
+    if (is_macos()) return "macos";
+    if (is_freebsd()) return "freebsd";
+    if (is_openbsd()) return "openbsd";
+    if (is_netbsd()) return "netbsd";
+    if (is_dragonfly()) return "dragonfly";
+    if (is_bsd()) return "bsd";
+    if (is_linux()) return "linux";
+    if (is_emscripten()) return "emscripten";
+    if (is_wasm()) return "wasm";
+    if (is_unix()) return "unix";
+    if (is_posix()) return "posix";
+    return "unknown";
+}
+
+// 11.2 — Arch detection (is_x86_64, is_aarch64, is_arm … arch_name, endian)
+[[nodiscard]] consteval bool is_x86_64() noexcept
+{
+#if defined(__x86_64__) || defined(__amd64__) || defined(_M_X64) || defined(_M_AMD64)
+    return true;
+#else
+    return false;
+#endif
+}
+[[nodiscard]] consteval bool is_x86() noexcept
+{
+#if defined(__i386__) || defined(_M_IX86)
+    return true;
+#else
+    return false;
+#endif
+}
+[[nodiscard]] consteval bool is_aarch64() noexcept
+{
+#if defined(__aarch64__) || defined(__arm64__) || defined(_M_ARM64) || defined(_M_ARM64EC)
+    return true;
+#else
+    return false;
+#endif
+}
+[[nodiscard]] consteval bool is_arm() noexcept
+{
+#if defined(__arm__) || defined(_M_ARM)
+    return true;
+#else
+    return false;
+#endif
+}
+[[nodiscard]] consteval bool is_riscv() noexcept
+{
+#if defined(__riscv)
+    return true;
+#else
+    return false;
+#endif
+}
+[[nodiscard]] consteval bool is_riscv64() noexcept
+{
+#if defined(__riscv) && __riscv_xlen == 64
+    return true;
+#else
+    return false;
+#endif
+}
+[[nodiscard]] consteval bool is_riscv32() noexcept
+{
+#if defined(__riscv) && __riscv_xlen == 32
+    return true;
+#else
+    return false;
+#endif
+}
+[[nodiscard]] consteval bool is_ppc() noexcept
+{
+#if defined(__powerpc__) || defined(__ppc__) || defined(_M_PPC)
+    return true;
+#else
+    return false;
+#endif
+}
+[[nodiscard]] consteval bool is_ppc64() noexcept
+{
+#if defined(__powerpc64__) || defined(__ppc64__) || defined(__POWERPC64__)
+    return true;
+#else
+    return false;
+#endif
+}
+
+[[nodiscard]] consteval bool is_32bit() noexcept { return sizeof(void*) == 4; }
+[[nodiscard]] consteval bool is_64bit() noexcept { return sizeof(void*) == 8; }
+
+[[nodiscard]] consteval std::endian endian() noexcept
+{
+#if defined(__BYTE_ORDER__) && defined(__ORDER_LITTLE_ENDIAN__) && defined(__ORDER_BIG_ENDIAN__)
+#if __BYTE_ORDER__ == __ORDER_LITTLE_ENDIAN__
+    return std::endian::little;
+#elif __BYTE_ORDER__ == __ORDER_BIG_ENDIAN__
+    return std::endian::big;
+#else
+    return std::endian::native;
+#endif
+#else
+    return std::endian::native;
+#endif
+}
+[[nodiscard]] consteval bool is_little_endian() noexcept { return endian() == std::endian::little; }
+[[nodiscard]] consteval bool is_big_endian() noexcept { return endian() == std::endian::big; }
+
+enum class Arch { x86_64, x86, aarch64, arm, riscv64, riscv32, riscv, ppc64, ppc, wasm, unknown };
+
+[[nodiscard]] consteval Arch arch() noexcept
+{
+    if (is_x86_64()) return Arch::x86_64;
+    if (is_x86()) return Arch::x86;
+    if (is_aarch64()) return Arch::aarch64;
+    if (is_arm()) return Arch::arm;
+    if (is_riscv64()) return Arch::riscv64;
+    if (is_riscv32()) return Arch::riscv32;
+    if (is_riscv()) return Arch::riscv;
+    if (is_ppc64()) return Arch::ppc64;
+    if (is_ppc()) return Arch::ppc;
+    if (is_wasm()) return Arch::wasm;
+    return Arch::unknown;
+}
+
+[[nodiscard]] consteval std::string_view arch_name() noexcept
+{
+    if (is_x86_64()) return "x86_64";
+    if (is_x86()) return "x86";
+    if (is_aarch64()) return "aarch64";
+    if (is_arm()) return "arm";
+    if (is_riscv64()) return "riscv64";
+    if (is_riscv32()) return "riscv32";
+    if (is_riscv()) return "riscv";
+    if (is_ppc64()) return "ppc64";
+    if (is_ppc()) return "ppc";
+    if (is_wasm()) return "wasm";
+    return "unknown";
+}
+
+// 11.3 — Compiler & toolchain (is_clang/gcc/msvc, version, stdlib, C++ std)
+[[nodiscard]] consteval bool is_clang() noexcept
+{
+#if defined(__clang__)
+    return true;
+#else
+    return false;
+#endif
+}
+[[nodiscard]] consteval bool is_gcc() noexcept
+{
+#if defined(__GNUC__) && !defined(__clang__)
+    return true;
+#else
+    return false;
+#endif
+}
+[[nodiscard]] consteval bool is_msvc() noexcept
+{
+#if defined(_MSC_VER)
+    return true;
+#else
+    return false;
+#endif
+}
+
+enum class Compiler { gcc, clang, msvc, unknown };
+
+[[nodiscard]] consteval Compiler compiler() noexcept
+{
+    if (is_clang()) return Compiler::clang;
+    if (is_gcc()) return Compiler::gcc;
+    if (is_msvc()) return Compiler::msvc;
+    return Compiler::unknown;
+}
+
+[[nodiscard]] consteval std::string_view compiler_name() noexcept
+{
+    if (is_clang()) return "clang";
+    if (is_gcc()) return "gcc";
+    if (is_msvc()) return "msvc";
+    return "unknown";
+}
+
+[[nodiscard]] consteval int compiler_version_major() noexcept
+{
+#if defined(__clang__)
+    return __clang_major__;
+#elif defined(__GNUC__) && !defined(__clang__)
+    return __GNUC__;
+#elif defined(_MSC_VER)
+    return _MSC_VER / 100;
+#else
+    return 0;
+#endif
+}
+[[nodiscard]] consteval int compiler_version_minor() noexcept
+{
+#if defined(__clang__)
+    return __clang_minor__;
+#elif defined(__GNUC__) && !defined(__clang__)
+    return __GNUC_MINOR__;
+#elif defined(_MSC_VER)
+    return _MSC_VER % 100;
+#else
+    return 0;
+#endif
+}
+[[nodiscard]] consteval int compiler_version_patch() noexcept
+{
+#if defined(__clang__)
+    return __clang_patchlevel__;
+#elif defined(__GNUC__) && !defined(__clang__)
+    return __GNUC_PATCHLEVEL__;
+#elif defined(_MSC_VER)
+#if defined(_MSC_FULL_VER)
+    return _MSC_FULL_VER % 100000;
+#else
+    return 0;
+#endif
+#else
+    return 0;
+#endif
+}
+
+[[nodiscard]] consteval bool is_libstdcpp() noexcept
+{
+#if defined(__GLIBCXX__)
+    return true;
+#else
+    return false;
+#endif
+}
+[[nodiscard]] consteval bool is_libcpp() noexcept
+{
+#if defined(_LIBCPP_VERSION)
+    return true;
+#else
+    return false;
+#endif
+}
+[[nodiscard]] consteval bool is_msvc_stl() noexcept
+{
+#if defined(_MSVC_STL_VERSION) || (defined(_MSC_VER) && !defined(__clang__) && !defined(__GNUC__))
+    return true;
+#else
+    return false;
+#endif
+}
+
+[[nodiscard]] consteval std::string_view stdlib_name() noexcept
+{
+    if (is_libcpp()) return "libc++";
+    if (is_libstdcpp()) return "libstdc++";
+    if (is_msvc_stl()) return "msvc-stl";
+    return "unknown";
+}
+
+[[nodiscard]] consteval long cxx_standard() noexcept
+{
+#if defined(_MSVC_LANG)
+    return _MSVC_LANG;
+#else
+    return __cplusplus;
+#endif
+}
+
+[[nodiscard]] consteval std::string_view cxx_standard_name() noexcept
+{
+    constexpr long v = cxx_standard();
+    if (v >= 202302L) return "c++23";
+    if (v >= 202002L) return "c++20";
+    if (v >= 201703L) return "c++17";
+    if (v >= 201402L) return "c++14";
+    if (v >= 201103L) return "c++11";
+    return "pre-c++11";
+}
+
+[[nodiscard]] consteval bool is_cpp11() noexcept { return cxx_standard() >= 201103L; }
+[[nodiscard]] consteval bool is_cpp14() noexcept { return cxx_standard() >= 201402L; }
+[[nodiscard]] consteval bool is_cpp17() noexcept { return cxx_standard() >= 201703L; }
+[[nodiscard]] consteval bool is_cpp20() noexcept { return cxx_standard() >= 202002L; }
+[[nodiscard]] consteval bool is_cpp23() noexcept { return cxx_standard() >= 202302L; }
+
+// 11.4 — Build config (is_debug/release, has_exceptions/rtti, sanitizers)
+[[nodiscard]] consteval bool is_debug() noexcept
+{
+#if defined(NDEBUG)
+    return false;
+#else
+    return true;
+#endif
+}
+[[nodiscard]] consteval bool is_release() noexcept { return !is_debug(); }
+
+[[nodiscard]] consteval std::string_view build_type_name() noexcept { return is_debug() ? "debug" : "release"; }
+
+[[nodiscard]] consteval bool has_exceptions() noexcept
+{
+#if defined(__cpp_exceptions) || defined(__EXCEPTIONS) || defined(_CPPUNWIND) || (defined(_HAS_EXCEPTIONS) && _HAS_EXCEPTIONS)
+    return true;
+#else
+    return false;
+#endif
+}
+[[nodiscard]] consteval bool has_rtti() noexcept
+{
+#if defined(__cpp_rtti) || defined(__GXX_RTTI) || defined(_CPPRTTI)
+    return true;
+#else
+    return false;
+#endif
+}
+[[nodiscard]] consteval bool has_asan() noexcept
+{
+#if defined(__SANITIZE_ADDRESS__)
+    return true;
+#elif defined(__has_feature)
+#if __has_feature(address_sanitizer)
+    return true;
+#else
+    return false;
+#endif
+#else
+    return false;
+#endif
+}
+[[nodiscard]] consteval bool has_ubsan() noexcept
+{
+#if defined(__SANITIZE_UNDEFINED__)
+    return true;
+#else
+    return false;
+#endif
+}
+[[nodiscard]] consteval bool has_tsan() noexcept
+{
+#if defined(__SANITIZE_THREAD__)
+    return true;
+#else
+    return false;
+#endif
+}
+[[nodiscard]] consteval bool has_msan() noexcept
+{
+#if defined(__SANITIZE_MEMORY__)
+    return true;
+#else
+    return false;
+#endif
+}
+[[nodiscard]] consteval bool has_sanitizer() noexcept { return has_asan() || has_ubsan() || has_tsan() || has_msan(); }
+
+} // namespace bld::env
+
+// SECTION 12 — Formatters & inline templates (header-only)
+//   Must stay in header: std::formatter specializations + constexpr/templates.
+//   Search "SECTION 12" to find.
 namespace std {
 constexpr auto formatter<bld::Err>::parse(format_parse_context &ctx) -> format_parse_context::iterator
 {
     auto it = ctx.begin();
     if (it != ctx.end() && *it != '}') {
         switch (*it) {
-        case '?':
-            fmt = mode::debug;
-            break;
-        case 'p':
-            fmt = mode::plain;
-            break;
-        default:
-            throw format_error("invalid Cmd format");
+        case '?': fmt = mode::debug; break;
+        case 'p': fmt = mode::plain; break;
+        default: throw format_error("invalid Cmd format");
         }
         ++it;
     }
@@ -1027,17 +1557,10 @@ constexpr auto formatter<bld::Cmd>::parse(format_parse_context &ctx) -> format_p
     auto it = ctx.begin();
     if (it != ctx.end() && *it != '}') {
         switch (*it) {
-        case 'q':
-            fmt = mode::unquoted;
-            break;
-        case '?':
-            fmt = mode::debug;
-            break;
-        case 'p':
-            fmt = mode::plain;
-            break;
-        default:
-            throw format_error("invalid Cmd format");
+        case 'q': fmt = mode::unquoted; break;
+        case '?': fmt = mode::debug; break;
+        case 'p': fmt = mode::plain; break;
+        default: throw format_error("invalid Cmd format");
         }
         ++it;
     }
@@ -1049,14 +1572,9 @@ constexpr auto formatter<bld::Proc::Status>::parse(format_parse_context &ctx) ->
     auto it = ctx.begin();
     if (it != ctx.end() && *it != '}') {
         switch (*it) {
-        case 'p':
-            fmt = mode::plain;
-            break;
-        case '?':
-            fmt = mode::debug;
-            break;
-        default:
-            throw format_error("invalid Proc::Status format specifier");
+        case 'p': fmt = mode::plain; break;
+        case '?': fmt = mode::debug; break;
+        default: throw format_error("invalid Proc::Status format specifier");
         }
         ++it;
     }
@@ -1068,14 +1586,9 @@ constexpr auto formatter<bld::Proc>::parse(format_parse_context &ctx) -> format_
     auto it = ctx.begin();
     while (it != ctx.end() && *it != '}') {
         switch (*it) {
-        case 'p':
-            show_pid = true;
-            break;
-        case '?':
-            show_debug = true;
-            break;
-        default:
-            throw format_error("invalid Proc format specifier");
+        case 'p': show_pid = true; break;
+        case '?': show_debug = true; break;
+        default: throw format_error("invalid Proc format specifier");
         }
         ++it;
     }
@@ -1094,11 +1607,9 @@ constexpr auto formatter<bld::test::compute_diff_op>::parse(format_parse_context
     auto end = ctx.end();
     if (it != end && *it != '}') {
         if (*it == 'n') {
-            use_color = false;
-            ++it;
+            use_color = false; ++it;
         } else if (*it == 'c') {
-            use_color = true;
-            ++it;
+            use_color = true; ++it;
         } else {
             throw format_error("invalid format specifier for compute_diff_op");
         }
@@ -1110,6 +1621,7 @@ constexpr auto formatter<bld::test::compute_diff_op>::parse(format_parse_context
 }
 
 } // namespace std
+// clang-format on
 
 namespace bld {
 
@@ -1178,17 +1690,14 @@ auto Cmd::span(this auto &self) noexcept
 {
     return std::span{self.args_};
 }
-
 constexpr Fd_view::Fd_view(Native_t v) : val(v)
 {}
 constexpr auto Fd_view::is_valid() const noexcept -> bool
 {
     return val != INVALID;
 }
-
 constexpr Owned_Fd::Owned_Fd(Fd_view::Native_t v) : handle_(v)
 {}
-
 template <typename... Configs>
 constexpr auto validate_run_configs() -> void
 {
@@ -1379,18 +1888,22 @@ void f(Os &str, std::format_string<Args...> fmt, Args &&...args)
 }
 
 } // namespace bld::log
-
 #endif // B_LDR_HPP
 
+// Implementation — Definitions (behind B_LDR_IMPLEMENTATION)
+//   Only one TU should define B_LDR_IMPLEMENTATION. Mirrors header order.
+//   Search "IMPL SECTION" to jump. Most non-template definitions live here.
 #ifdef B_LDR_IMPLEMENTATION
 #ifndef B_LDR_IMPLEMENTATION_ONCE
 #define B_LDR_IMPLEMENTATION_ONCE
 
-// Implementation
-
+#include <cerrno>
+#include <charconv>
+#include <condition_variable>
 #include <cstring>
 #include <filesystem>
 #include <fstream>
+#include <iterator>
 #include <thread>
 #include <unordered_set>
 
@@ -1401,7 +1914,7 @@ auto bld::panic(std::string s) -> void
     }
 }
 
-auto bld::add_exe_on_win32([[maybe_unused]]std::string exec) -> std::string
+auto bld::add_exe_on_win32([[maybe_unused]] std::string exec) -> std::string
 {
 #ifdef _WIN32
     if (!exec.ends_with(".exe")) {
@@ -1411,6 +1924,7 @@ auto bld::add_exe_on_win32([[maybe_unused]]std::string exec) -> std::string
     return exec;
 }
 
+// IMPL SECTION 01 — Errors (bld::Err)
 auto bld::Err::erc(std::errc code, std::string message) -> Err
 {
     return Err{.err = std::make_error_code(code), .msg = std::move(message)};
@@ -1468,6 +1982,7 @@ std::ostream &bld::log::detail::Stream_proxy::get() const
     return *ptr;
 }
 
+// IMPL SECTION 02 — Logging (bld::Logger, bld::log)
 auto bld::Logger::Default_logger_fn::operator()(std::ostream &stream, const Log_record &record) const -> void
 {
     if (record.lvl < min_lvl) {
@@ -1492,6 +2007,7 @@ auto bld::Logger::set_logger_fn(Logger_fn_t fn, std::source_location loc) -> voi
     logger_fn = std::move(fn);
 }
 
+// IMPL SECTION 03 — Commands & Processes (bld::Cmd, bld::Proc, Fd_view)
 auto bld::Cmd::push(std::string_view s) -> void
 {
     args_.emplace_back(s);
@@ -1611,7 +2127,7 @@ auto bld::Proc::wait() -> std::expected<Status, bld::Err>
 
     DWORD exit_code = 0;
     if (::GetExitCodeProcess(static_cast<HANDLE>(id_), &exit_code)) {
-            status_ = {State::exited, static_cast<int>(exit_code)};
+        status_ = {State::exited, static_cast<int>(exit_code)};
     }
     ::CloseHandle(static_cast<HANDLE>(id_));
     id_ = nullptr;
@@ -1646,7 +2162,7 @@ auto bld::Proc::try_wait() -> std::expected<Status, bld::Err>
     if (res == WAIT_OBJECT_0) {
         DWORD exit_code = 0;
         if (::GetExitCodeProcess(static_cast<HANDLE>(id_), &exit_code)) {
-        status_ = {State::exited, static_cast<int>(exit_code)};
+            status_ = {State::exited, static_cast<int>(exit_code)};
         }
         ::CloseHandle(static_cast<HANDLE>(id_));
         id_ = nullptr;
@@ -2055,8 +2571,8 @@ auto bld::out_f::open(std::string_view path, bld::Open_mode mode) -> std::expect
 {
     std::filesystem::path p{path};
     if (p.has_parent_path() && !std::filesystem::exists(p.parent_path())) {
-        return std::unexpected(bld::Err::erc(std::errc::no_such_file_or_directory,
-                                             std::format("Parent directory for output file '{}' does not exist", path)));
+        return std::unexpected(
+            bld::Err::erc(std::errc::no_such_file_or_directory, std::format("Parent directory for output file '{}' does not exist", path)));
     }
     auto res = bld::Owned_Fd::open(path, mode);
     if (!res) {
@@ -2087,8 +2603,8 @@ auto bld::err_f::open(std::string_view path, bld::Open_mode mode) -> std::expect
 {
     std::filesystem::path p{path};
     if (p.has_parent_path() && !std::filesystem::exists(p.parent_path())) {
-        return std::unexpected(bld::Err::erc(std::errc::no_such_file_or_directory,
-                                             std::format("Parent directory for error log '{}' does not exist", path)));
+        return std::unexpected(
+            bld::Err::erc(std::errc::no_such_file_or_directory, std::format("Parent directory for error log '{}' does not exist", path)));
     }
     auto res = bld::Owned_Fd::open(path, mode);
     if (!res) {
@@ -2118,8 +2634,7 @@ auto bld::err_f::operator()(bld::Proc_config &cfg) const -> void
 auto bld::in_f::open(std::string_view path) -> std::expected<bld::in_f, bld::Err>
 {
     if (!std::filesystem::exists(path)) {
-        return std::unexpected(
-            bld::Err::erc(std::errc::no_such_file_or_directory, std::format("Path '{}' for reading input doesn't exist", path)));
+        return std::unexpected(bld::Err::erc(std::errc::no_such_file_or_directory, std::format("Path '{}' for reading input doesn't exist", path)));
     }
     auto res = bld::Owned_Fd::open(path, bld::Open_mode::read);
     if (!res) {
@@ -2189,6 +2704,7 @@ auto bld::raw_crlf::operator()(Capture_config &cfg) const -> void
     cfg.normalize_crlf = false;
 }
 
+// IMPL SECTION 04 — Execution (bld::run, bld::capture, bld::Task)
 auto bld::details::execute(const bld::Cmd &cmd, const Proc_config &cfg, std::source_location loc) -> std::expected<bld::Proc, bld::Err>
 {
     Proc::Io_routing io{};
@@ -2397,6 +2913,7 @@ auto bld::details::capture_execute(const bld::Cmd &cmd, bld::Capture_config &cap
     return proc.wait();
 }
 
+// IMPL SECTION 05 — Rebuild helpers (is_outdated, rebuild_this_when_needed)
 auto bld::is_outdated(std::string_view target, std::string_view source) -> bool
 {
     namespace fs = std::filesystem;
@@ -2451,8 +2968,7 @@ auto bld::get_current_cxx_compiler() -> std::string_view
     return compiler;
 }
 
-auto bld::rebuild_this_when_needed(int argc, char **argv, std::string_view compiler, std::source_location loc)
-    -> std::expected<void, bld::Err>
+auto bld::rebuild_this_when_needed(int argc, char **argv, std::string_view compiler, std::source_location loc) -> std::expected<void, bld::Err>
 {
     if (argv == nullptr || argc <= 0) {
         return {};
@@ -2499,8 +3015,10 @@ auto bld::rebuild_this_when_needed(int argc, char **argv, std::string_view compi
         if (!proc) {
             return std::unexpected(std::move(proc.error()));
         }
-        return std::unexpected(bld::Err::erc(std::errc::operation_canceled,
-                                             std::format("Failed to rebuild build script: compiler exited with code {}", proc->status_.code)));
+        return std::unexpected(
+            bld::Err::erc(
+                std::errc::operation_canceled,
+                std::format("Failed to rebuild build script: compiler exited with code {}", proc->status_.code)));
     }
 
     bld::log::i("Successfully rebuilt! Restarting...");
@@ -2570,8 +3088,10 @@ auto bld::rebuild_this_when_needed_ext(int argc, char **argv, std::vector<std::s
         if (!proc) {
             return std::unexpected(std::move(proc.error()));
         }
-        return std::unexpected(bld::Err::erc(std::errc::operation_canceled,
-                                             std::format("Failed to rebuild build script: compiler exited with code {}", proc->status_.code)));
+        return std::unexpected(
+            bld::Err::erc(
+                std::errc::operation_canceled,
+                std::format("Failed to rebuild build script: compiler exited with code {}", proc->status_.code)));
     }
 
     bld::log::i("Successfully rebuilt! Restarting...");
@@ -2842,12 +3362,12 @@ auto bld::run_threaded(std::span<bld::Task> tasks, std::size_t threads) -> std::
     const std::size_t n_failed = failed.load(std::memory_order_relaxed);
     bld::log::i("Done; total completed tasks: {}", ran.load(std::memory_order_relaxed));
     if (n_failed > 0) {
-        return std::unexpected(
-            bld::Err::erc(std::errc::operation_canceled, std::format("{} of {} tasks failed", n_failed, tasks.size())));
+        return std::unexpected(bld::Err::erc(std::errc::operation_canceled, std::format("{} of {} tasks failed", n_failed, tasks.size())));
     }
     return {};
 }
 
+// IMPL SECTION 06 — Config (bld::Config)
 auto bld::Config::get() -> Config &
 {
     static Config instance;
@@ -3014,8 +3534,8 @@ auto bld::Config::parse(int argc, char *argv[]) -> std::expected<Parse_outcome, 
                 if (!options[key].choices.empty()) {
                     auto &ch = options[key].choices;
                     if (std::find(ch.begin(), ch.end(), string_val) == ch.end()) {
-                        return std::unexpected(bld::Err::erc(
-                            std::errc::invalid_argument, std::format("Invalid choice '{}' for option '{}'.", string_val, key)));
+                        return std::unexpected(
+                            bld::Err::erc(std::errc::invalid_argument, std::format("Invalid choice '{}' for option '{}'.", string_val, key)));
                     }
                 }
                 data[key] = std::move(string_val);
@@ -3131,6 +3651,7 @@ auto std::formatter<std::unordered_map<std::string_view, bld::Config::value_type
     return out;
 }
 
+// IMPL SECTION 07 — Test helpers (bld::test)
 bld::test::Frontier::Frontier(std::ptrdiff_t max_d) : data(2 * max_d + 1, 0), offset(max_d)
 {}
 
@@ -3306,6 +3827,7 @@ auto std::formatter<bld::test::compute_diff_op>::format(const bld::test::compute
     return out;
 }
 
+// IMPL SECTION 08 — Filesystem (bld::fs)
 auto bld::fs::make_dir_if_not_exists(std::string_view path, bool create_parents, std::source_location loc) noexcept -> bool
 {
     namespace fs = std::filesystem;
@@ -3799,8 +4321,7 @@ auto read_file(std::string_view path) noexcept -> std::expected<std::string, bld
         std::error_code ec;
         if (!std::filesystem::is_regular_file(path, ec)) {
             if (ec) {
-                return std::unexpected(
-                    bld::Err{.err = ec, .msg = std::format("Failed to read '{}': {}", path, ec.message())});
+                return std::unexpected(bld::Err{.err = ec, .msg = std::format("Failed to read '{}': {}", path, ec.message())});
             }
             return std::unexpected(bld::Err::erc(std::errc::io_error, std::format("'{}' is not a regular file", path)));
         }
@@ -3950,85 +4471,85 @@ std::vector<Cpp_module> scan_modules(const std::string &path, std::vector<std::s
     }
 
     auto walk_res = bld::fs::Dir_walker{path}
-        .recursive()
-        .where([&extensions](const bld::fs::Dir_entry &entry) {
-            return std::ranges::any_of(extensions, [&](const std::string &ext) { return entry.extension() == ext; });
-        })
-        .for_each([&](const bld::fs::Dir_entry &entry) {
-            std::string content;
-            if (auto res = bld::fs::read_file(entry.path.string()); res) {
-                content = *res;
-            } else {
-                bld::log::w("Failed to read module file '{}': {}", entry.path.string(), res.error().msg);
-                return;
-            }
-            if (content.empty()) {
-                return;
-            }
-
-            // Tokenize
-            std::vector<std::string> tokens;
-            std::string token;
-            for (char c : content) {
-                if (std::isspace(static_cast<unsigned char>(c)) || c == ';') {
-                    if (!token.empty()) {
-                        tokens.push_back(token);
-                        token.clear();
-                    }
-                    if (c == ';') {
-                        tokens.push_back(";");
-                    }
-                } else {
-                    token += c;
-                }
-            }
-
-            bld::fs::Cpp_module mod;
-            mod.file = entry.path;
-            bool found_name = false;
-            std::string primary_name;
-            std::unordered_set<std::string> seen_imports;
-
-            for (size_t i = 0; i < tokens.size(); ++i) {
-                if (tokens[i] == "export" && i + 2 < tokens.size() && tokens[i + 1] == "module") {
-                    mod.name = tokens[i + 2];
-                    found_name = true;
-                    size_t colon = mod.name.find(':');
-                    primary_name = (colon != std::string::npos) ? mod.name.substr(0, colon) : mod.name;
-                } else if (tokens[i] == "import") {
-                    if (i > 0 && tokens[i - 1] == "export") {
-                        continue;
-                    }
-                    if (i + 1 < tokens.size()) {
-                        std::string dep = tokens[i + 1];
-                        if (!dep.starts_with("std") && dep != ";" && !dep.empty()) {
-                            if (dep.starts_with(":") && !primary_name.empty()) {
-                                dep = primary_name + dep;
+                        .recursive()
+                        .where([&extensions](const bld::fs::Dir_entry &entry) {
+                            return std::ranges::any_of(extensions, [&](const std::string &ext) { return entry.extension() == ext; });
+                        })
+                        .for_each([&](const bld::fs::Dir_entry &entry) {
+                            std::string content;
+                            if (auto res = bld::fs::read_file(entry.path.string()); res) {
+                                content = *res;
+                            } else {
+                                bld::log::w("Failed to read module file '{}': {}", entry.path.string(), res.error().msg);
+                                return;
                             }
-                            if (seen_imports.insert(dep).second) {
-                                mod.imports.push_back(dep);
+                            if (content.empty()) {
+                                return;
                             }
-                        }
-                    }
-                } else if (tokens[i] == "export" && i + 2 < tokens.size() && tokens[i + 1] == "import") {
-                    std::string dep = tokens[i + 2];
-                    if (!dep.starts_with("std") && dep != ";" && !dep.empty()) {
-                        if (dep.starts_with(":") && !primary_name.empty()) {
-                                    dep = primary_name + dep;
-                                }
-                                if (seen_imports.insert(dep).second) {
-                                    mod.imports.push_back(dep);
+
+                            // Tokenize
+                            std::vector<std::string> tokens;
+                            std::string token;
+                            for (char c : content) {
+                                if (std::isspace(static_cast<unsigned char>(c)) || c == ';') {
+                                    if (!token.empty()) {
+                                        tokens.push_back(token);
+                                        token.clear();
+                                    }
+                                    if (c == ';') {
+                                        tokens.push_back(";");
+                                    }
+                                } else {
+                                    token += c;
                                 }
                             }
-                        }
-                    }
 
-                    if (found_name) {
-                        modules.push_back(std::move(mod));
-                    } else {
-                        bld::log::w("Skipped file (no module decl found): {}", entry.path.string());
-                    }
-                });
+                            bld::fs::Cpp_module mod;
+                            mod.file = entry.path;
+                            bool found_name = false;
+                            std::string primary_name;
+                            std::unordered_set<std::string> seen_imports;
+
+                            for (size_t i = 0; i < tokens.size(); ++i) {
+                                if (tokens[i] == "export" && i + 2 < tokens.size() && tokens[i + 1] == "module") {
+                                    mod.name = tokens[i + 2];
+                                    found_name = true;
+                                    size_t colon = mod.name.find(':');
+                                    primary_name = (colon != std::string::npos) ? mod.name.substr(0, colon) : mod.name;
+                                } else if (tokens[i] == "import") {
+                                    if (i > 0 && tokens[i - 1] == "export") {
+                                        continue;
+                                    }
+                                    if (i + 1 < tokens.size()) {
+                                        std::string dep = tokens[i + 1];
+                                        if (!dep.starts_with("std") && dep != ";" && !dep.empty()) {
+                                            if (dep.starts_with(":") && !primary_name.empty()) {
+                                                dep = primary_name + dep;
+                                            }
+                                            if (seen_imports.insert(dep).second) {
+                                                mod.imports.push_back(dep);
+                                            }
+                                        }
+                                    }
+                                } else if (tokens[i] == "export" && i + 2 < tokens.size() && tokens[i + 1] == "import") {
+                                    std::string dep = tokens[i + 2];
+                                    if (!dep.starts_with("std") && dep != ";" && !dep.empty()) {
+                                        if (dep.starts_with(":") && !primary_name.empty()) {
+                                            dep = primary_name + dep;
+                                        }
+                                        if (seen_imports.insert(dep).second) {
+                                            mod.imports.push_back(dep);
+                                        }
+                                    }
+                                }
+                            }
+
+                            if (found_name) {
+                                modules.push_back(std::move(mod));
+                            } else {
+                                bld::log::w("Skipped file (no module decl found): {}", entry.path.string());
+                            }
+                        });
 
     if (!walk_res) {
         bld::log::e("Failed to scan modules in '{}': {}", path, walk_res.error().message());
@@ -4039,6 +4560,7 @@ std::vector<Cpp_module> scan_modules(const std::string &path, std::vector<std::s
 
 } // namespace bld::fs
 
+// IMPL SECTION 09 — String utilities (bld::str)
 namespace bld::str {
 
 auto trim_left(std::string_view s) noexcept -> std::string_view
@@ -4179,6 +4701,8 @@ template <std::ranges::range Range>
 }
 
 } // namespace bld::str
+
+// IMPL SECTION 10 — Time (bld::time)
 namespace bld::time {
 
 auto stamp::reset() noexcept -> std::chrono::nanoseconds
@@ -4392,6 +4916,10 @@ inline auto walk(std::string_view root, V &&visitor, std::source_location caller
 }
 
 } // namespace bld::fs
+
+// =============================================================================
+// END OF IMPLEMENTATION
+// =============================================================================
 
 #endif // B_LDR_IMPLEMENTATION_ONCE
 #endif // B_LDR_IMPLEMENTATION
