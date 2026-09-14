@@ -13,7 +13,8 @@ Because [Tsoding](https://github.com/tsoding) said you should write your own bui
 - **Logging**: leveled logging (`DEBUG`/`INFO`/`WARN`/`ERROR`/`FATAL`) with colors, custom sinks.
 - **Incremental builds**: `bld::is_outdated` and `rebuild_this_when_needed` so your build script
   recompiles itself when it (or the header) changes.
-- **Parallel tasks**: run batches of commands concurrently, wait for all, stop on first failure.
+- **Unified runs**: execute one command, a parallel task set, an incremental dependency plan, or a
+  `compile_commands.json` file through the same `run` scheduler.
 - **Config parsing**: declare options, get a generated `--help`, read values with `cfg["key"]`.
 - **Filesystem + strings + time + diff testing**: batteries included.
 - **Cross-platform**: Linux/macOS (POSIX) and Windows (MSVC, MinGW, clang-cl).
@@ -74,32 +75,58 @@ if (auto proc = bld::run(gcc); proc && proc->status_code() == 0) {
 auto proc = bld::run(bld::Cmd{"sleep", "5"}, bld::async{});
 auto status = proc->wait();
 
-// redirect output to a file (no shell involved)
-bld::run(gcc, bld::out_f{"build.log"}, bld::err_f{"build.err"});
+// redirect output to a file (no shell involved, opened lazily at spawn time)
+bld::run(gcc, bld::lazy_out_file{"build.log"}, bld::lazy_err_file{"build.err"});
+
+// ...or with an already-open fd (eager). out_file opens now and passes its fd:
+bld::run(gcc, bld::out_file{"build.log"}, bld::err_file{"build.err"});
+
+// raw fds also work:
+bld::run(gcc, bld::out_fd{bld::Fd_view{STDOUT_FILENO}});
+
+// one borrowed fd for merged out+err (like out_err_file, but borrowed):
+if (auto log = bld::Owned_Fd::open("build.log", bld::Open_mode::write)) {
+    bld::run(gcc, bld::out_err_fd{*log});
+}
+
+// ...or capture into strings (borrowed, must outlive the wait).
+// Separate by default; only out_err_str merges:
+std::string out, err, merged;
+bld::run(gcc, bld::out_str{out}, bld::err_str{err});
+bld::run(gcc, bld::out_err_str{merged});
 ```
 
 ### Capturing output
 
 ```cpp
-std::string out, err;
-auto status = bld::capture(bld::Cmd{"git", "status"}, bld::cap_out{out}, bld::cap_err{err});
+// Always merged stdout+stderr, returned as a string on exit 0.
+// Non-zero exit becomes an Err with the merged output as std::string payload.
+auto out = bld::capture(bld::Cmd{"git", "status"});
+if (out) { bld::log::i("{}", *out); }
 
-std::string merged;
-bld::capture(bld::Cmd{"clang", "-x", "c++", "-"}, bld::cap_merge{merged}, bld::in_str{"int main(){}"});
+auto merged = bld::capture(bld::Cmd{"clang", "-x", "c++", "-"}, bld::in_str{"int main(){}"});
 
 // Captured output is always normalized: \r\n -> \n (so Windows text matches "\n"-terminated strings)
-bld::capture(bld::Cmd{"dir"}, bld::cap_merge{merged});
+bld::capture(bld::Cmd{"dir"});
 
 // ...except when you pass raw_crlf{} to keep the bytes as-is:
-bld::capture(bld::Cmd{"dir"}, bld::cap_merge{merged}, bld::raw_crlf{});
+bld::capture(bld::Cmd{"dir"}, bld::raw_crlf{});
 ```
 
-### Incremental dependency graph
+### Incremental dependency plan
 
 ```cpp
-if (bld::is_outdated("main", std::array{"main.cpp", "foo.cpp"}) || bld::is_outdated("main", "main.cpp")) {
-    bld::run(bld::Cmd{"g++", "main.cpp", "-o", "main"});
-}
+bld::Plan build;
+build.add("main.o", bld::Cmd{"g++", "-c", "main.cpp", "-o", "main.o"});
+build.needs("main.o", "main.cpp");
+build.produces("main.o", "main.o");
+build.mark_compile_command("main.o");
+build.add("main", bld::Cmd{"g++", "main.o", "-o", "main"});
+build.needs("main", "main.o");
+build.produces("main", "main");
+
+// The second task depends on main.o because it declares main.o as an input.
+auto result = bld::run(build, bld::use_threads{8});
 ```
 
 ### Config
@@ -138,22 +165,35 @@ auto walk = bld::fs::Dir_walker{"src"}
     .collect();                                 // expected<vector<Dir_entry>>
 ```
 
-### Parallel tasks
+### Unified runs and compile databases
 
 ```cpp
 std::vector<bld::Task> tasks;
 tasks.emplace_back(bld::Cmd{"g++", "-c", "a.cpp", "-o", "a.o"});
 tasks.emplace_back(bld::Cmd{"g++", "-c", "b.cpp", "-o", "b.o"});
 
-if (auto res = bld::run(tasks, /*max_jobs=*/4); !res) {
-    bld::log::e("build stopped: {}", res.error());
-}
+// Threads schedule tasks, async cap limits live procs (both via Proc_group).
+// use_threads{nullopt} => max-1; <=0 => max+i; >0 => capped by max.
+// max_async{0} => follow threads; >0 => absolute proc cap.
+auto res = bld::run(tasks, bld::use_threads{4}, bld::max_async{8});
 
-// Same tasks, but scheduled on a real worker-thread pool instead of batches:
-if (auto res = bld::run_threaded(tasks, /*threads=*/4); !res) {
-    bld::log::e("build stopped: {}", res.error());
-}
+// Export explicitly marked compile_command() tasks, or execute an existing database directly.
+bld::run(build, bld::write_compile_commands{"compile_commands.json"});
+bld::run(bld::compile_commands("build/compile_commands.json"), bld::use_threads{8});
+
+// span<Task> runs all by default; add deduce_dependency to build a DAG
+// from Task.inputs/outputs/after. Plan always uses its own graph.
+bld::Task a{bld::Cmd{"sh", "-c", "echo a > a.o"}}; a.produces("a.o");
+bld::Task b{bld::Cmd{"sh", "-c", "cat a.o > b"}}; b.needs("a.o");
+std::vector<bld::Task> chain{std::move(a), std::move(b)};
+bld::run(chain, bld::deduce_dependency{});
 ```
+
+Wrong configs fail fast: duplicates (`label` twice, `use_threads` twice) are
+compile errors; bad combinations (deps without `deduce_dependency`,
+`deduce_dependency` with a `Plan`, empty commands, cycles, self-deps, missing
+`cwd`) are runtime `Err`s naming the culprit.
+`examples/run.cpp` sections 7–8 demo every one.
 
 ### Diff / testing
 
@@ -177,7 +217,7 @@ g++ -std=c++23 -I. examples/hello.cpp -o hello
 | `examples/hello.cpp` | Minimal script: rebuild helper, logging, running a command |
 | `examples/logging.cpp` | Levels, colors, `set_min_level`, custom streams/logger |
 | `examples/commands.cpp` | Sync/async runs, exit codes, file redirection |
-| `examples/capture.cpp` | `cap_out`/`cap_err`/`cap_merge`, stdin injection, default CRLF normalization + `raw_crlf{}` opt-out |
+| `examples/capture.cpp` | Merged capture, stdin injection (`in_str`/`in_fd`/`in_file`/`lazy_in_file`), default CRLF normalization + `raw_crlf{}` opt-out |
 | `examples/files.cpp` | Reading/writing, directories, `Dir_walker`, find helpers |
 | `examples/config.cpp` | Options, types, choices, `--help`, proxy reads |
 | `examples/tasks.cpp` | Parallel task batches, failure handling |

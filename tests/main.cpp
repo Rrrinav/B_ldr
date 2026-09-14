@@ -12,6 +12,30 @@
 #define B_LDR_IMPLEMENTATION
 #include "../b_ldr.hpp"
 
+// Modifier-category classification guards: these drive the guided static_asserts
+// in run/capture/wait_all/Task/run_new. If a modifier ever gains/loses an
+// overload, these fail at compile time next to the mistake.
+static_assert(bld::Config_modifier_c<bld::out_fd>);
+static_assert(bld::Config_modifier_c<bld::label>);
+static_assert(bld::Config_modifier_c<bld::out_str>);
+static_assert(bld::Config_modifier_c<bld::err_str>);
+static_assert(bld::Config_modifier_c<bld::out_err_str>);
+static_assert(bld::Config_modifier_c<bld::out_err_fd>);
+static_assert(!bld::Config_modifier_c<bld::use_threads>);
+static_assert(!bld::Config_modifier_c<bld::in_str>);
+static_assert(bld::Run_modifier_c<bld::use_threads>);
+static_assert(bld::Run_modifier_c<bld::keep_going>);
+static_assert(!bld::Run_modifier_c<bld::out_fd>);
+static_assert(!bld::Run_modifier_c<bld::out_str>);
+static_assert(!bld::Run_modifier_c<bld::out_err_fd>);
+static_assert(bld::Capture_modifier_c<bld::in_str>);
+static_assert(bld::Capture_modifier_c<bld::label>);
+static_assert(!bld::Capture_modifier_c<bld::out_fd>);
+static_assert(!bld::Capture_modifier_c<bld::use_threads>);
+static_assert(!bld::Capture_modifier_c<bld::out_str>);
+static_assert(!bld::Capture_modifier_c<bld::out_err_str>);
+static_assert(!bld::Capture_modifier_c<bld::out_err_fd>);
+
 namespace bld::test {
 struct Test_case
 {
@@ -368,7 +392,7 @@ auto run_tests() -> int
                  .add_option("--optimize", bld::Config::Bool, "Optimize flag", false);
 
              std::vector<const char *> mock_argv = {"./bld", "jobs=16", "--optimize", "mode=release"};
-             c.parse(mock_argv.size(), const_cast<char **>(mock_argv.data()));
+             std::ignore = c.parse(mock_argv.size(), const_cast<char **>(mock_argv.data()));
 
              if (int(c["jobs"]) != 16) {
                  return std::unexpected("int proxy conversion failed");
@@ -389,7 +413,7 @@ auto run_tests() -> int
              c.add_option("flag", bld::Config::Bool, "Test", true);
 
              std::vector<const char *> mock_argv = {"./bld"};
-             c.parse(mock_argv.size(), const_cast<char **>(mock_argv.data()));
+             std::ignore = c.parse(mock_argv.size(), const_cast<char **>(mock_argv.data()));
 
              try {
                  int val = c["flag"]; // Invalid cast from bool to int
@@ -463,9 +487,8 @@ auto run_tests() -> int
              return {};
          }},
 
-        {"test_fs_functions",
+         {"test_fs_functions",
          []() -> std::expected<void, std::string> {
-             std::string cap{};
              bld::Cmd cmd{"g++", "-o", "./test_fs", "tests/fs/main.cpp", "-std=c++23", "-O3", "-Wall", "-Wextra", "-I."};
 #ifdef _WIN32
 #ifdef __GNUC__
@@ -475,9 +498,9 @@ auto run_tests() -> int
              if (bld::run(cmd)) {
                  // Just becuase I wanted to supress the output
 #ifdef _WIN32
-                 if (bld::capture(bld::Cmd{"./test_fs.exe"}, bld::cap_merge{cap})) {
+                 if (auto cap = bld::capture(bld::Cmd{"./test_fs.exe"})) {
 #else
-                 if (bld::capture(bld::Cmd{"./test_fs"}, bld::cap_merge{cap})) {
+                 if (auto cap = bld::capture(bld::Cmd{"./test_fs"})) {
 #endif
                      std::expected<std::vector<bld::test::Test_file_res>, std::string> parsed;
                      {
@@ -515,7 +538,6 @@ auto run_tests() -> int
          }},
         {"test_str_functions",
          []() -> std::expected<void, std::string> {
-             std::string cap{};
              bld::Cmd cmd{"g++", "-o", "./test_str", "tests/str/main.cpp", "-std=c++23", "-O3", "-Wall", "-Wextra", "-I."};
 
 #ifdef _WIN32
@@ -526,9 +548,9 @@ auto run_tests() -> int
              if (bld::run(cmd))
              {
 #ifdef _WIN32
-                 if (bld::capture(bld::Cmd{"./test_str.exe"}, bld::cap_merge{cap})) {
+                 if (auto cap = bld::capture(bld::Cmd{"./test_str.exe"})) {
 #else
-                 if (bld::capture(bld::Cmd{"./test_str"}, bld::cap_merge{cap})) {
+                 if (auto cap = bld::capture(bld::Cmd{"./test_str"})) {
 #endif
                      std::expected<std::vector<bld::test::Test_file_res>, std::string> parsed;
                      {
@@ -588,34 +610,353 @@ auto run_tests() -> int
         {"process_capture_stdout_and_stderr",
          []() -> std::expected<void, std::string> {
              bld::Cmd cmd = echo_cmd("out_data", "err_data");
-             std::string stdout_storage;
-             std::string stderr_storage;
 
-             auto status = bld::capture(bld::Cmd_loc{cmd}, bld::cap_out{stdout_storage}, bld::cap_err{stderr_storage});
-             if (!status || status->code != 0) {
-                 return std::unexpected("process execution failed during capture parsing");
+             auto merged = bld::capture(bld::Cmd_loc{cmd});
+             if (!merged) {
+                 return std::unexpected(std::format("process execution failed during capture parsing: {}", merged.error()));
              }
 
-             if (stdout_storage != "out_data\n") {
-                 return std::unexpected(std::format("stdout corrupted: '{}'", stdout_storage));
+             if (merged->find("out_data") == std::string::npos) {
+                 return std::unexpected(std::format("stdout missing from merged capture: '{}'", *merged));
              }
-             if (stderr_storage != "err_data\n") {
-                 return std::unexpected(std::format("stderr corrupted: '{}'", stderr_storage));
+             if (merged->find("err_data") == std::string::npos) {
+                 return std::unexpected(std::format("stderr missing from merged capture: '{}'", *merged));
              }
              return {};
          }},
         {"process_capture_merged_streams",
          []() -> std::expected<void, std::string> {
              bld::Cmd cmd = echo_cmd("a", "b");
-             std::string merged_storage;
 
-             auto status = bld::capture(bld::Cmd_loc{cmd}, bld::cap_merge{merged_storage});
-             if (!status || status->code != 0) {
-                 return std::unexpected("process execution failed during capture merge");
+             auto merged = bld::capture(bld::Cmd_loc{cmd});
+             if (!merged) {
+                 return std::unexpected(std::format("process execution failed during capture merge: {}", merged.error()));
              }
 
-             if (merged_storage.find("a") == std::string::npos || merged_storage.find("b") == std::string::npos) {
-                 return std::unexpected(std::format("merge capture failed to combine streams: '{}'", merged_storage));
+             if (merged->find("a") == std::string::npos || merged->find("b") == std::string::npos) {
+                 return std::unexpected(std::format("merge capture failed to combine streams: '{}'", *merged));
+             }
+             return {};
+         }},
+        {"run_out_str_captures_stdout_only",
+         []() -> std::expected<void, std::string> {
+             bld::Cmd cmd = echo_cmd("out_data", "err_data");
+             std::string out;
+
+             auto proc = bld::run(bld::Cmd_loc{cmd}, bld::out_str{out});
+             if (!proc) {
+                 return std::unexpected(std::format("run with out_str failed: {}", proc.error()));
+             }
+             // Separate by default: stdout captured, stderr untouched by the string.
+             if (out != "out_data\n") {
+                 return std::unexpected(std::format("stdout capture wrong: '{}'", out));
+             }
+             return {};
+         }},
+        {"run_err_str_captures_stderr_only",
+         []() -> std::expected<void, std::string> {
+             bld::Cmd cmd = echo_cmd("out_data", "err_data");
+             std::string err;
+
+             auto proc = bld::run(bld::Cmd_loc{cmd}, bld::err_str{err});
+             if (!proc) {
+                 return std::unexpected(std::format("run with err_str failed: {}", proc.error()));
+             }
+             if (err != "err_data\n") {
+                 return std::unexpected(std::format("stderr capture wrong: '{}'", err));
+             }
+             return {};
+         }},
+        {"run_out_err_str_merges",
+         []() -> std::expected<void, std::string> {
+             bld::Cmd cmd = echo_cmd("out_data", "err_data");
+             std::string merged;
+
+             auto proc = bld::run(bld::Cmd_loc{cmd}, bld::out_err_str{merged});
+             if (!proc) {
+                 return std::unexpected(std::format("run with out_err_str failed: {}", proc.error()));
+             }
+             if (merged.find("out_data") == std::string::npos || merged.find("err_data") == std::string::npos) {
+                 return std::unexpected(std::format("merged string capture wrong: '{}'", merged));
+             }
+             return {};
+         }},
+        {"run_split_out_and_err_str",
+         []() -> std::expected<void, std::string> {
+             bld::Cmd cmd = echo_cmd("out_data", "err_data");
+             std::string out, err;
+
+             auto proc = bld::run(bld::Cmd_loc{cmd}, bld::out_str{out}, bld::err_str{err});
+             if (!proc) {
+                 return std::unexpected(std::format("run with split strings failed: {}", proc.error()));
+             }
+             if (out != "out_data\n") {
+                 return std::unexpected(std::format("split stdout wrong: '{}'", out));
+             }
+             if (err != "err_data\n") {
+                 return std::unexpected(std::format("split stderr wrong: '{}'", err));
+             }
+             return {};
+         }},
+        {"run_out_err_fd_merges",
+         []() -> std::expected<void, std::string> {
+             bld::Cmd cmd = echo_cmd("out_data", "err_data");
+             auto fd = bld::Owned_Fd::open("test_sandbox/oefd.txt", bld::Open_mode::write);
+             if (!fd) {
+                 return std::unexpected(std::format("could not open sandbox file: {}", fd.error()));
+             }
+
+             auto proc = bld::run(bld::Cmd_loc{cmd}, bld::out_err_fd{*fd});
+             if (!proc) {
+                 return std::unexpected(std::format("run with out_err_fd failed: {}", proc.error()));
+             }
+             auto txt = bld::fs::read_file("test_sandbox/oefd.txt");
+             if (!txt) {
+                 return std::unexpected("could not read back merged fd output");
+             }
+             if (txt->find("out_data") == std::string::npos || txt->find("err_data") == std::string::npos) {
+                 return std::unexpected(std::format("merged fd output wrong: '{}'", *txt));
+             }
+             return {};
+         }},
+        {"run_str_capture_async_detached",
+         []() -> std::expected<void, std::string> {
+             // Drains live in the Proc: strings are complete after wait()
+             // even though the run returned while the child was starting.
+             std::string out;
+             auto proc = bld::run(bld::Cmd_loc{echo_cmd("late_data", "x")}, bld::async{}, bld::out_str{out});
+             if (!proc) {
+                 return std::unexpected(std::format("async spawn with out_str failed: {}", proc.error()));
+             }
+             auto status = proc->wait();
+             if (!status || status->code != 0) {
+                 return std::unexpected("async captured proc did not exit cleanly");
+             }
+             if (out != "late_data\n") {
+                 return std::unexpected(std::format("async string capture wrong: '{}'", out));
+             }
+             return {};
+         }},
+        {"unified_run_respects_graph_dependencies",
+         []() -> std::expected<void, std::string> {
+             bld::Plan plan;
+             plan.add("prepare", sleep_cmd());
+             plan.add("consume", true_cmd());
+             plan.after("consume", "prepare");
+             auto report = bld::run(plan, bld::use_threads{2});
+             if (!report || report->ran != 2 || report->failed != 0) {
+                 return std::unexpected("dependency plan did not complete through the unified scheduler");
+             }
+             return {};
+         }},
+        {"proc_group_wait_any_reaps_all",
+         []() -> std::expected<void, std::string> {
+             // wait_any blocks until any group child exits; each id resolves once.
+             bld::Proc_group group;
+             auto a = group.run_new(sleep_cmd());
+             auto b = group.run_new(sleep_cmd());
+             auto c = group.run_new(sleep_cmd());
+             if (!a || !b || !c) {
+                 return std::unexpected("group spawn failed");
+             }
+             std::size_t reaped = 0;
+             while (!group.empty()) {
+                 auto done = group.wait_any();
+                 if (!done) {
+                     return std::unexpected(std::format("wait_any failed: {}", done.error()));
+                 }
+                 if (!group.remove(*done)) {
+                     return std::unexpected("wait_any returned an unknown id");
+                 }
+                 ++reaped;
+             }
+             if (reaped != 3) {
+                 return std::unexpected(std::format("expected 3 reaps, got {}", reaped));
+             }
+             return {};
+         }},
+        {"span_deduce_dependency_builds_graph",
+         []() -> std::expected<void, std::string> {
+             std::vector<bld::Task> tasks;
+             bld::Task a{true_cmd()};
+             a.name = "a";
+             a.produces("test_sandbox/dedup.out");
+             bld::Task b{true_cmd()};
+             b.name = "b";
+             b.needs("test_sandbox/dedup.out");
+             tasks.push_back(std::move(a));
+             tasks.push_back(std::move(b));
+             auto report = bld::run(tasks, bld::use_threads{2}, bld::deduce_dependency{});
+             if (!report || report->ran != 2) {
+                 return std::unexpected("deduce_dependency did not run the 2-task chain");
+             }
+             return {};
+         }},
+        {"plan_rejects_deduce_dependency_flag",
+         []() -> std::expected<void, std::string> {
+             bld::Plan plan;
+             plan.add("x", true_cmd());
+             auto report = bld::run(plan, bld::deduce_dependency{});
+             if (report) {
+                 return std::unexpected("run(Plan, deduce_dependency) unexpectedly succeeded");
+             }
+             if (report.error().msg.find("deduce_dependency") == std::string::npos) {
+                 return std::unexpected(std::format("wrong error: '{}'", report.error().msg));
+             }
+             return {};
+         }},
+        {"span_deps_without_deduce_rejected",
+         []() -> std::expected<void, std::string> {
+             std::vector<bld::Task> tasks;
+             bld::Task a{true_cmd()};
+             a.name = "a";
+             a.produces("test_sandbox/undep.out");
+             bld::Task b{true_cmd()};
+             b.name = "b";
+             b.needs("test_sandbox/undep.out");
+             tasks.push_back(std::move(a));
+             tasks.push_back(std::move(b));
+             auto report = bld::run(tasks, bld::use_threads{2});
+             if (report) {
+                 return std::unexpected("deps without deduce unexpectedly succeeded");
+             }
+             if (report.error().msg.find("deduce_dependency") == std::string::npos) {
+                 return std::unexpected(std::format("wrong error: '{}'", report.error().msg));
+             }
+             return {};
+         }},
+        {"empty_command_names_task",
+         []() -> std::expected<void, std::string> {
+             std::vector<bld::Task> tasks;
+             bld::Task t;
+             t.name = "oops-empty";
+             tasks.push_back(std::move(t));
+             auto report = bld::run(tasks);
+             if (report) {
+                 return std::unexpected("empty command unexpectedly succeeded");
+             }
+             if (report.error().msg.find("oops-empty") == std::string::npos) {
+                 return std::unexpected(std::format("error does not name task: '{}'", report.error().msg));
+             }
+             return {};
+         }},
+        {"self_dependency_rejected",
+         []() -> std::expected<void, std::string> {
+             std::vector<bld::Task> tasks;
+             bld::Task a{true_cmd()};
+             a.name = "self";
+             a.after_dep("self");
+             tasks.push_back(std::move(a));
+             auto report = bld::run(tasks, bld::deduce_dependency{});
+             if (report) {
+                 return std::unexpected("self-dependency unexpectedly succeeded");
+             }
+             if (report.error().msg.find("itself") == std::string::npos) {
+                 return std::unexpected(std::format("wrong error: '{}'", report.error().msg));
+             }
+             return {};
+         }},
+        {"dependency_cycle_rejected",
+         []() -> std::expected<void, std::string> {
+             std::vector<bld::Task> tasks;
+             bld::Task a{true_cmd()};
+             a.name = "a";
+             a.produces("test_sandbox/cyc_a");
+             a.needs("test_sandbox/cyc_b");
+             bld::Task b{true_cmd()};
+             b.name = "b";
+             b.produces("test_sandbox/cyc_b");
+             b.needs("test_sandbox/cyc_a");
+             tasks.push_back(std::move(a));
+             tasks.push_back(std::move(b));
+             auto report = bld::run(tasks, bld::deduce_dependency{});
+             if (report) {
+                 return std::unexpected("cycle unexpectedly succeeded");
+             }
+             if (report.error().msg.find("cycle") == std::string::npos) {
+                 return std::unexpected(std::format("wrong error: '{}'", report.error().msg));
+             }
+             return {};
+         }},
+        {"missing_cwd_rejected",
+         []() -> std::expected<void, std::string> {
+             auto proc = bld::run(true_cmd(), bld::cwd{"test_sandbox/nope"});
+             if (proc) {
+                 return std::unexpected("missing cwd unexpectedly succeeded");
+             }
+             if (proc.error().msg.find("does not exist") == std::string::npos) {
+                 return std::unexpected(std::format("wrong error: '{}'", proc.error().msg));
+             }
+             return {};
+         }},
+        {"use_threads_resolution",
+         []() -> std::expected<void, std::string> {
+             const std::size_t max = bld::max_thread_count();
+             if (max == 0) {
+                 return std::unexpected("max_thread_count is 0");
+             }
+             if (bld::resolve_thread_count(std::nullopt) != bld::resolve_thread_count(-1)) {
+                 return std::unexpected("default should equal -1");
+             }
+             if (bld::resolve_thread_count(0) != max) {
+                 return std::unexpected("0 should resolve to max");
+             }
+             if (bld::resolve_thread_count(1) != 1) {
+                 return std::unexpected("1 should resolve to 1");
+             }
+             if (bld::resolve_thread_count(1000000) != max) {
+                 return std::unexpected("huge value should be capped by max");
+             }
+             if (bld::resolve_thread_count(-static_cast<int>(max) - 100) != 1) {
+                 return std::unexpected("extreme negative should clamp to 1");
+             }
+             if (bld::resolve_async_cap(0, 4) != 4) {
+                 return std::unexpected("max_async 0 should follow threads");
+             }
+             if (bld::resolve_async_cap(3, 4) != 3) {
+                 return std::unexpected("explicit max_async should pass through");
+             }
+             return {};
+         }},
+        {"loader_infer_outputs",
+         []() -> std::expected<void, std::string> {
+             const std::string db = "test_sandbox/infer.json";
+             auto w = bld::fs::write_file(
+                 db, "[{\"directory\": \".\", \"file\": \"a.cpp\", \"arguments\": [\"g++\", \"-c\", \"a.cpp\", \"-o\", \"a.o\"]}]");
+             if (!w) {
+                 return std::unexpected("could not write test db");
+             }
+             auto with = bld::details::load_compile_commands(bld::compile_commands(db, true));
+             auto without = bld::details::load_compile_commands(bld::compile_commands(db, false));
+             if (!with || !without || with->empty() || without->empty()) {
+                 return std::unexpected("loader failed");
+             }
+             if ((*with)[0].outputs.empty() || (*with)[0].outputs.front() != "a.o") {
+                 return std::unexpected("infer_outputs=true did not parse -o");
+             }
+             if (!(*without)[0].outputs.empty()) {
+                 return std::unexpected("infer_outputs=false should leave outputs empty");
+             }
+             if ((*with)[0].inputs.empty() || (*without)[0].inputs.empty()) {
+                 return std::unexpected("loader should record the file as input");
+             }
+             return {};
+         }},
+        {"compile_commands_can_be_written_and_run_directly",
+         []() -> std::expected<void, std::string> {
+             const std::string database = "test_sandbox/compile_commands.json";
+             bld::Plan plan;
+             plan.add("unit", true_cmd());
+             plan.needs("unit", "unit.cpp");
+             plan.produces("unit", "unit.o");
+             plan.mark_compile_command("unit");
+             auto written = bld::run(plan, bld::force{}, bld::write_compile_commands{database});
+             if (!written) {
+                 return std::unexpected("failed to write compile_commands.json");
+             }
+             auto imported = bld::run(bld::compile_commands(database));
+             if (!imported || imported->ran != 1) {
+                 return std::unexpected("compile_commands.json was not executable as a run input");
              }
              return {};
          }},
@@ -627,7 +968,7 @@ auto run_tests() -> int
              execution_list.emplace_back(bld::Cmd_loc{sleep_cmd()});
              execution_list.emplace_back(bld::Cmd_loc{sleep_cmd()});
 
-             auto batch_status = bld::run(execution_list, 2);
+             auto batch_status = bld::run(execution_list, bld::use_threads{2});
              if (!batch_status) {
                  return std::unexpected("parallel batch tracking cluster crashed");
              }
@@ -639,16 +980,16 @@ auto run_tests() -> int
              broken_list.emplace_back(bld::Cmd_loc{false_cmd()});
              broken_list.emplace_back(bld::Cmd_loc{true_cmd()});
 
-             // Force max_jobs = 1 to guarantee sequential processing.
+             // Force use_threads{1} to guarantee sequential processing.
              // This ensures the 3rd task is NEVER scheduled because the 2nd task poisons the batch queue.
-             auto batch_status = bld::run(broken_list, 1);
+             auto batch_status = bld::run(broken_list, bld::use_threads{1});
              if (batch_status) {
                  return std::unexpected("scheduler silently swallowed task failure");
              }
 
-             auto count = std::any_cast<std::size_t>(batch_status.error().payload);
-             if (count >= 3) {
-                 return std::unexpected(std::format("poisoned pill failed to halt execution queue. Completed count: {}", count));
+             auto *report = std::any_cast<bld::Run_result>(&batch_status.error().payload);
+             if (report == nullptr || report->failed != 1) {
+                 return std::unexpected("scheduler failure did not provide a unified run report");
              }
              return {};
          }}};

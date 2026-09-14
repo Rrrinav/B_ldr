@@ -1,8 +1,4 @@
-// tasks.cpp — running commands in parallel.
-//
-// bld::Task pairs a command with its config. Collect them, then bld::run(tasks, max_jobs)
-// executes up to max_jobs at a time (batch style), or bld::run_threaded(tasks, threads)
-// schedules them on a worker-thread pool. Both return std::expected<void, Err>.
+// tasks.cpp — one runner for commands, parallel work, and dependency graphs.
 
 #define B_LDR_IMPLEMENTATION
 #include "../b_ldr.hpp"
@@ -15,9 +11,9 @@ int main()
     tasks.emplace_back(bld::Cmd{"sleep", "0.5"});
     tasks.emplace_back(bld::Cmd{"sleep", "0.5"});
 
-    // All four run concurrently; the whole batch finishes in ~0.5s, not 2s.
+    // All four run concurrently; the whole run finishes in ~0.5s, not 2s.
     auto t0 = bld::time::now();
-    auto res = bld::run(tasks, 4);
+    auto res = bld::run(tasks, bld::use_threads{4});
     if (res) {
         bld::log::i("4 parallel sleeps took {}", bld::time::format(t0.elapsed()));
     }
@@ -28,28 +24,15 @@ int main()
     fragile.emplace_back(bld::Cmd{"false"});
     fragile.emplace_back(bld::Cmd{"true"});
 
-    auto bad = bld::run(fragile, 2);
+    auto bad = bld::run(fragile, bld::use_threads{2});
     if (!bad) {
-        const auto completed = std::any_cast<std::size_t>(bad.error().payload);
-        bld::log::e("batch failed after {} completed tasks: {}", completed, bad.error());
+        const auto &report = std::any_cast<const bld::Run_result &>(bad.error().payload);
+        bld::log::e("run failed after {} task(s): {}", report.ran, bad.error());
     }
 
-    // Same idea, but with a real worker-thread pool: run_threaded(tasks, threads).
-    // The first failure cancels the remaining queued tasks; tasks already running
-    // are allowed to finish. threads == 0 means "use hardware_concurrency".
-    auto t1 = bld::time::now();
-    auto threaded = bld::run_threaded(tasks, 4);
-    if (threaded) {
-        bld::log::i("4 threaded sleeps took {}", bld::time::format(t1.elapsed()));
-    }
-
-    auto bad_threaded = bld::run_threaded(fragile, 2);
-    if (!bad_threaded) {
-        bld::log::e("threaded pool failed: {}", bad_threaded.error());
-    }
-
-    // max_jobs == 0 means "use hardware_concurrency".
-    bld::log::i("default parallelism would be {} jobs", std::thread::hardware_concurrency());
+    // use_threads{nullopt} (default) => max-1. Positive => capped by max.
+    // Add inputs/outputs + deduce_dependency to make this same call graph-aware.
+    bld::log::i("default parallelism would be {} threads", bld::max_thread_count());
 
     return EXIT_SUCCESS;
 }

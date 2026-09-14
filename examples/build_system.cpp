@@ -5,22 +5,15 @@
 //   demo_src/util.cpp  -> demo_build/util.o
 //   link both objects  -> demo_build/app
 //
-// It demonstrates the core loop of every build system:
-//   1. only rebuild what is_outdated (newer sources, missing output),
-//   2. compile independent objects in parallel,
-//   3. link only after every object is done.
+// It demonstrates the unified runner:
+//   1. declare inputs and outputs,
+//   2. run independent objects in parallel,
+//   3. let the runner unlock the linker once they finish.
 //
 // Run it twice — the second run does nothing, because everything is up to date.
 
 #define B_LDR_IMPLEMENTATION
 #include "../b_ldr.hpp"
-
-struct Job
-{
-    std::string out;
-    std::vector<std::string> deps; // outputs that feed into this job
-    bld::Cmd cmd;
-};
 
 int main(int argc, char *argv[])
 {
@@ -50,46 +43,22 @@ int main(int argc, char *argv[])
         }
     }
 
-    // Phase 1: compile the objects. main.o and util.o don't depend on each other,
-    // so they are scheduled together and run in parallel.
-    const std::vector<Job> compiles = {
-        {"demo_build/main.o",
-         {"demo_src/main.cpp", "demo_src/util.hpp"},
-         bld::Cmd{"g++", "-c", "demo_src/main.cpp", "-o", "demo_build/main.o"}},
-        {"demo_build/util.o",
-         {"demo_src/util.cpp", "demo_src/util.hpp"},
-         bld::Cmd{"g++", "-c", "demo_src/util.cpp", "-o", "demo_build/util.o"}},
-    };
+    bld::Plan build;
+    build.add("main.o", bld::Cmd{"g++", "-c", "demo_src/main.cpp", "-o", "demo_build/main.o"});
+    build.needs_from("main.o", {"demo_src/main.cpp", "demo_src/util.hpp"});
+    build.produces("main.o", "demo_build/main.o");
+    build.mark_compile_command("main.o");
+    build.add("util.o", bld::Cmd{"g++", "-c", "demo_src/util.cpp", "-o", "demo_build/util.o"});
+    build.needs_from("util.o", {"demo_src/util.cpp", "demo_src/util.hpp"});
+    build.produces("util.o", "demo_build/util.o");
+    build.mark_compile_command("util.o");
+    build.add("app", bld::Cmd{"g++", "demo_build/main.o", "demo_build/util.o", "-o", "demo_build/app"});
+    build.needs_from("app", {"demo_build/main.o", "demo_build/util.o"});
+    build.produces("app", "demo_build/app");
 
-    std::vector<bld::Task> pending;
-    for (const auto &job : compiles) {
-        if (bld::is_outdated(job.out, job.deps)) {
-            bld::log::i("scheduling: {}", job.out);
-            pending.emplace_back(job.cmd);
-        } else {
-            bld::log::i("up to date : {}", job.out);
-        }
-    }
-    if (!pending.empty()) {
-        if (auto res = bld::run(pending, 4); !res) {
-            bld::log::e("compile phase failed: {}", res.error());
-            return EXIT_FAILURE;
-        }
-    }
-
-    // Phase 2: link. Runs only after the compiles finished (they're joined above).
-    const Job link{"demo_build/app",
-                   {"demo_build/main.o", "demo_build/util.o"},
-                   bld::Cmd{"g++", "demo_build/main.o", "demo_build/util.o", "-o", "demo_build/app"}};
-    if (bld::is_outdated(link.out, link.deps)) {
-        bld::log::i("linking  : {}", link.out);
-        auto linked = bld::run(link.cmd);
-        if (!linked || linked->status_code() != 0) {
-            bld::log::e("link failed");
-            return EXIT_FAILURE;
-        }
-    } else {
-        bld::log::i("up to date : {}", link.out);
+    if (auto res = bld::run(build, bld::use_threads{4}, bld::write_compile_commands{"demo_build/compile_commands.json"}); !res) {
+        bld::log::e("build failed: {}", res.error());
+        return EXIT_FAILURE;
     }
 
     bld::log::i("build complete: demo_build/app");
