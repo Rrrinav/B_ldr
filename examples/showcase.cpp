@@ -81,22 +81,22 @@ int main(int argc, char *argv[]) {
         bld::Task anon; anon.spec.cmd = bld::Cmd{"echo","anon"};
         plan.add(std::move(anon)); // name auto = "echo anon"
 
-        auto res = bld::run(plan, bld::use_threads{4}, bld::write_compile_commands{"demo_build/compile_commands.json"});
+        auto res = bld::run(plan, bld::jobs{4}, bld::write_compile_commands{"demo_build/compile_commands.json"});
         if (!res) bld::log::e("plan failed: {}", res.error());
     }
 
-    // 5. Unified run — one API for everything (threads/async caps)
+    // 5. Unified run — one API for everything (parallel + async caps)
     {
         // simple
         std::ignore = bld::run(bld::Cmd{"echo","hi"});
-        // via Plan (threads schedule, async cap limits live procs)
+        // via Plan (jobs width caps live procs, async cap too)
         bld::Plan p;
         bld::Task t; t.name = "x"; t.spec.cmd = bld::Cmd{"echo","x"};
         p.add(std::move(t));
-        std::ignore = bld::run(p, bld::use_threads{2}, bld::dry_run{});
+        std::ignore = bld::run(p, bld::jobs{2}, bld::dry_run{});
         // via compile_commands.json
         if (bld::fs::exists("demo_build/compile_commands.json"))
-            std::ignore = bld::run(bld::compile_commands("demo_build/compile_commands.json"), bld::use_threads{4});
+            std::ignore = bld::run(bld::compile_commands("demo_build/compile_commands.json"), bld::jobs{4});
     }
 
     // 6. Filesystem, strings, time, config, is_outdated

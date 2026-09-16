@@ -13,7 +13,7 @@ int main()
 
     // All four run concurrently; the whole run finishes in ~0.5s, not 2s.
     auto t0 = bld::time::now();
-    auto res = bld::run(tasks, bld::use_threads{4});
+    auto res = bld::run(tasks, bld::jobs{4});
     if (res) {
         bld::log::i("4 parallel sleeps took {}", bld::time::format(t0.elapsed()));
     }
@@ -24,15 +24,15 @@ int main()
     fragile.emplace_back(bld::Cmd{"false"});
     fragile.emplace_back(bld::Cmd{"true"});
 
-    auto bad = bld::run(fragile, bld::use_threads{2});
+    auto bad = bld::run(fragile, bld::jobs{2});
     if (!bad) {
         const auto &report = std::any_cast<const bld::Run_result &>(bad.error().payload);
         bld::log::e("run failed after {} task(s): {}", report.ran, bad.error());
     }
 
-    // use_threads{nullopt} (default) => max-1. Positive => capped by max.
+    // jobs{nullopt} (default) => max-1. Positive => capped by max.
     // Add inputs/outputs + deduce_dependency to make this same call graph-aware.
-    bld::log::i("default parallelism would be {} threads", bld::max_thread_count());
+    bld::log::i("default parallelism would be {} procs", bld::max_parallel_count());
 
     return EXIT_SUCCESS;
 }

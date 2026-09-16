@@ -24,7 +24,21 @@ int main()
     // Direct a message at a specific stream (useful for log files).
     bld::log::i(std::cout, "This one goes to stdout instead of stderr");
 
+    // Indentation for nested sections: indent()/unindent() or the RAII scope.
+    bld::log::i("building app");
+    {
+        bld::log::indent_scope nest;
+        bld::log::i("compiling foo.cpp");
+        bld::log::indent();
+        bld::log::i("nested detail");
+        bld::log::unindent();
+        bld::log::i("linking");
+    }
+    bld::log::i("done (indent back to {})", bld::log::indent_level());
+
     // Replace the default formatter with your own.
+    // (Custom sinks get the raw record; read bld::log::indent_level()
+    // inside yours if you want indentation too.)
     bld::Logger::set_logger_fn([](std::ostream &os, const bld::Logger::Log_record &r) {
         std::println(os, "[custom] level={} msg={}", static_cast<int>(r.lvl), r.str);
     });

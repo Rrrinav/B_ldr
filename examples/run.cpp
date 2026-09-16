@@ -14,6 +14,8 @@
 //   async{}                 return running Proc instead of waiting
 //   label{"name"}           log label (at most one)
 //   cwd{"dir"}              child working dir, must exist (at most one)
+//   dry_run{}               log-only preview: log what would run, spawn nothing
+//                           (also on capture() and per-Task in batches)
 //   out_fd{fd} / err_fd / in_fd          borrowed fds (Fd_view; Owned_Fd converts implicitly)
 //   out_err_fd{fd}                       one borrowed fd for out+err (merges)
 //   out_file / err_file / in_file        eager files (Shared_fd, lifetime-safe)
@@ -26,8 +28,9 @@
 //   Rules: <=1 of each in/out/err group, pipe mixes with nothing, no in_str here.
 //
 // RUN MODIFIERS (whole batch only — Run_modifier_c, consume Run_config):
-//   use_threads{[opt]int}   nullopt=>max-1; <=0=>max+i; >0=>capped by max
-//   max_async{n}            0=>follow threads; >0=>absolute live-proc cap
+//   jobs{[opt]int}         nullopt=>max-1; <=0=>max+i; >0=>capped by max
+//                           (use_threads is a deprecated alias)
+//   max_async{n}            0=>follow jobs width; >0=>absolute live-proc cap
 //   deduce_dependency{}     span<Task>: build DAG from Task inputs/outputs/after
 //   keep_going{}            run all possible despite failures (default: stop)
 //   dry_run{}               resolve + print, spawn nothing (composes with force)
@@ -264,29 +267,40 @@ int main()
             bld::log::i("1h merged='{}'", bld::str::trim(merged));
         }
 
-        // Works detached too: drain threads live in the Proc, joined on wait().
+        // Works detached too: capture pipes live in the Proc, pumped on wait().
         std::string late;
         if (auto proc = bld::run(bld::Cmd{"sh", "-c", "sleep 0.1; echo late"}, bld::async{}, bld::out_str{late})) {
             std::ignore = proc->wait();
             bld::log::i("1h async out='{}'", bld::str::trim(late));
         }
 
-        // Works per-Task in batch runs (scheduler reaps via wait_any, same joins).
+        // Works per-Task in batch runs (scheduler reaps via wait_any, same pumps).
         {
             std::string bout;
             std::vector<bld::Task> tasks;
             tasks.emplace_back(bld::Cmd{"echo", "batched"}, bld::out_str{bout});
-            if (auto res = bld::run(tasks, bld::use_threads{2}); !res) {
+            if (auto res = bld::run(tasks, bld::jobs{2}); !res) {
                 bld::log::e("1h batch failed: {}", res.error());
             } else {
                 bld::log::i("1h batch out='{}'", bld::str::trim(bout));
             }
         }
+
+        // 1i. dry_run previews a single command or capture: logs only, spawns
+        // nothing (even `false` reports success, capture comes back empty).
+        if (auto proc = bld::run(bld::Cmd{"false"}, bld::dry_run{}); !proc || proc->status_code() != 0) {
+            bld::log::e("1i single dry-run failed");
+        }
+        if (auto out = bld::capture(bld::Cmd{"echo", "hi"}, bld::dry_run{}); !out || !out->empty()) {
+            bld::log::e("1i capture dry-run failed");
+        } else {
+            bld::log::i("1i dry-runs ok (nothing spawned)");
+        }
     }
 
     // 2. span<Task> run-all: every task runs, no graph.
     {
-        // Bare defaults: use_threads nullopt (=> max-1), async follows threads.
+        // Bare defaults: jobs nullopt (=> max-1), async follows jobs width.
         std::vector<bld::Task> tasks;
         tasks.emplace_back(bld::Cmd{"echo", "a"});
         tasks.emplace_back(bld::Cmd{"echo", "b"});
@@ -294,26 +308,26 @@ int main()
         show_result("2a defaults", res);
     }
 
-    // 2b. use_threads forms: threads schedule, max_async caps live procs.
+    // 2b. jobs forms: width caps live procs, max_async caps them too.
     {
         bld::log::i(
             "2b max={} nullopt={} {{-1}}={} {{0}}={} {{2}}={} huge={}",
-            bld::max_thread_count(),
-            bld::resolve_thread_count(std::nullopt),
-            bld::resolve_thread_count(-1),
-            bld::resolve_thread_count(0),
-            bld::resolve_thread_count(2),
-            bld::resolve_thread_count(1000000));
+            bld::max_parallel_count(),
+            bld::resolve_parallel_width(std::nullopt),
+            bld::resolve_parallel_width(-1),
+            bld::resolve_parallel_width(0),
+            bld::resolve_parallel_width(2),
+            bld::resolve_parallel_width(1000000));
         std::vector<bld::Task> tasks;
         tasks.emplace_back(bld::Cmd{"echo", "a"});
         tasks.emplace_back(bld::Cmd{"echo", "b"});
-        auto r1 = bld::run(tasks, bld::use_threads{2});
-        show_result("2b threads{2}", r1);
-        auto r2 = bld::run(tasks, bld::use_threads{0}); // 0 => max
-        show_result("2b threads{0}=max", r2);
-        auto r3 = bld::run(tasks, bld::use_threads{}, bld::max_async{1}); // serialize procs
+        auto r1 = bld::run(tasks, bld::jobs{2});
+        show_result("2b jobs{2}", r1);
+        auto r2 = bld::run(tasks, bld::jobs{0}); // 0 => max
+        show_result("2b jobs{0}=max", r2);
+        auto r3 = bld::run(tasks, bld::jobs{}, bld::max_async{1}); // serialize procs
         show_result("2b async{1}", r3);
-        auto r4 = bld::run(tasks, bld::use_threads{2}, bld::max_async{8}); // cap above threads: threads win
+        auto r4 = bld::run(tasks, bld::jobs{2}, bld::max_async{8}); // cap above jobs: jobs win
         show_result("2b async{8}", r4);
     }
 
@@ -322,7 +336,7 @@ int main()
         std::vector<bld::Task> tasks;
         tasks.emplace_back(bld::Cmd{"sh", "-c", "pwd"}, bld::label{"pwd-task"}, bld::cwd{"demo_build"});
         tasks.emplace_back(bld::Cmd{"sh", "-c", "echo hi > demo_build/2c.txt"}, bld::lazy_out_file{"demo_build/2c_extra.txt"});
-        auto res = bld::run(tasks, bld::use_threads{4}, bld::keep_going{});
+        auto res = bld::run(tasks, bld::jobs{4}, bld::keep_going{});
         show_result("2c per-task config", res);
     }
 
@@ -332,9 +346,9 @@ int main()
         fragile.emplace_back(bld::Cmd{"true"});
         fragile.emplace_back(bld::Cmd{"false"});
         fragile.emplace_back(bld::Cmd{"true"});
-        auto stopped = bld::run(fragile, bld::use_threads{1});
+        auto stopped = bld::run(fragile, bld::jobs{1});
         show_result("2d stop", stopped); // 3rd task cancelled
-        auto going = bld::run(fragile, bld::use_threads{1}, bld::keep_going{});
+        auto going = bld::run(fragile, bld::jobs{1}, bld::keep_going{});
         show_result("2d keep_going", going); // 3rd task ran
     }
 
@@ -345,13 +359,13 @@ int main()
         a.name = "e_a";
         a.produces("demo_build/2e.o");
         tasks.push_back(std::move(a));
-        auto first = bld::run(tasks, bld::use_threads{2}, bld::deduce_dependency{});
+        auto first = bld::run(tasks, bld::jobs{2}, bld::deduce_dependency{});
         show_result("2e first", first); // ran
-        auto second = bld::run(tasks, bld::use_threads{2}, bld::deduce_dependency{});
+        auto second = bld::run(tasks, bld::jobs{2}, bld::deduce_dependency{});
         show_result("2e second", second); // skipped: up to date
-        auto preview = bld::run(tasks, bld::use_threads{2}, bld::deduce_dependency{}, bld::force{}, bld::dry_run{});
+        auto preview = bld::run(tasks, bld::jobs{2}, bld::deduce_dependency{}, bld::force{}, bld::dry_run{});
         show_result("2e force+dry_run preview", preview); // dry run (would re-run)
-        auto forced = bld::run(tasks, bld::use_threads{2}, bld::deduce_dependency{}, bld::force{});
+        auto forced = bld::run(tasks, bld::jobs{2}, bld::deduce_dependency{}, bld::force{});
         show_result("2e forced", forced); // ran again
     }
 
@@ -393,9 +407,9 @@ int main()
         tasks.push_back(std::move(a));
         tasks.push_back(std::move(b));
         tasks.push_back(std::move(c));
-        auto res = bld::run(tasks, bld::use_threads{2}, bld::deduce_dependency{});
+        auto res = bld::run(tasks, bld::jobs{2}, bld::deduce_dependency{});
         show_result("3 deduce chain", res);
-        auto again = bld::run(tasks, bld::use_threads{2}, bld::deduce_dependency{});
+        auto again = bld::run(tasks, bld::jobs{2}, bld::deduce_dependency{});
         show_result("3 deduce up-to-date", again); // all skipped
     }
 
@@ -416,7 +430,7 @@ int main()
         plan.needs("extra", "demo_build/app");
         plan.produces_to("extra", {"demo_build/extra1", "demo_build/extra2"});
 
-        auto res = bld::run(plan, bld::use_threads{4}, bld::write_compile_commands{"demo_build/compile_commands.json"});
+        auto res = bld::run(plan, bld::jobs{4}, bld::write_compile_commands{"demo_build/compile_commands.json"});
         show_result("4 plan", res); // only mark_compile_command("a") lands in the db
         if (auto db = bld::fs::read_file("demo_build/compile_commands.json")) {
             const bool has_a = db->find("demo_build/a.o") != std::string::npos;
@@ -425,9 +439,9 @@ int main()
         }
         auto dry = bld::run(plan, bld::dry_run{});
         show_result("4 plan dry", dry);
-        auto forced = bld::run(plan, bld::force{}, bld::use_threads{2});
+        auto forced = bld::run(plan, bld::force{}, bld::jobs{2});
         show_result("4 plan forced", forced);
-        auto capped = bld::run(plan, bld::use_threads{}, bld::max_async{4});
+        auto capped = bld::run(plan, bld::jobs{}, bld::max_async{4});
         show_result("4 plan capped", capped);
     }
 
@@ -436,10 +450,10 @@ int main()
         if (!bld::fs::exists("demo_build/compile_commands.json")) {
             bld::log::w("5: no compile_commands.json yet — run section 4 first");
         } else {
-            auto res = bld::run(bld::compile_commands("demo_build/compile_commands.json"), bld::use_threads{4});
+            auto res = bld::run(bld::compile_commands("demo_build/compile_commands.json"), bld::jobs{4});
             show_result("5a db", res);
             auto res2 = bld::run(
-                bld::compile_commands("demo_build/compile_commands.json", true), bld::use_threads{4}, bld::keep_going{});
+                bld::compile_commands("demo_build/compile_commands.json", true), bld::jobs{4}, bld::keep_going{});
             show_result("5b db infer+keep_going", res2);
             // infer_outputs parses "-o <file>" into Task.outputs; false leaves them empty.
             // The Plan-written db above already carries explicit "output" keys, so
@@ -605,12 +619,11 @@ int main()
     // 8. Compile-time errors (uncomment to see the guided messages; none build).
     //    Each fires a static_assert naming the right modifier set.
     //   bld::run(tasks, bld::out_fd{...});            // io routing is per-Task, not a Run modifier
-    //   bld::run(cmd, bld::dry_run{});                // dry_run is a Run modifier, not per-process
-    //   bld::run(cmd, bld::use_threads{2});           // use_threads is a Run modifier, not per-process
+    //   bld::run(cmd, bld::jobs{2});           // jobs is a Run modifier, not per-process
     //   bld::capture(cmd, bld::out_fd{...});          // capture has no out_* modifiers (merged string)
-    //   tasks.emplace_back(cmd, bld::use_threads{2}); // Task takes Proc modifiers, not Run modifiers
+    //   tasks.emplace_back(cmd, bld::jobs{2}); // Task takes Proc modifiers, not Run modifiers
     //   grp.run_new(cmd, bld::keep_going{});          // run_new takes Proc modifiers, not Run modifiers
-    //   bld::run(tasks, bld::use_threads{2}, bld::use_threads{3}); // duplicate flag
+    //   bld::run(tasks, bld::jobs{2}, bld::jobs{3}); // duplicate flag
     //   bld::run(cmd, bld::label{"a"}, bld::label{"b"});           // duplicate label
     //   bld::run(cmd, bld::cwd{"a"}, bld::cwd{"b"});               // duplicate cwd
     //   bld::run(cmd, bld::async{}, bld::async{});                 // duplicate async

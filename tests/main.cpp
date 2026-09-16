@@ -5,6 +5,7 @@
 #include <format>
 #include <fstream>
 #include <functional>
+#include <sstream>
 #include <string>
 #include <string_view>
 #include <vector>
@@ -22,8 +23,11 @@ static_assert(bld::Config_modifier_c<bld::err_str>);
 static_assert(bld::Config_modifier_c<bld::out_err_str>);
 static_assert(bld::Config_modifier_c<bld::out_err_fd>);
 static_assert(!bld::Config_modifier_c<bld::use_threads>);
+static_assert(!bld::Config_modifier_c<bld::jobs>);
+static_assert(bld::Config_modifier_c<bld::dry_run>);
 static_assert(!bld::Config_modifier_c<bld::in_str>);
 static_assert(bld::Run_modifier_c<bld::use_threads>);
+static_assert(bld::Run_modifier_c<bld::jobs>);
 static_assert(bld::Run_modifier_c<bld::keep_going>);
 static_assert(!bld::Run_modifier_c<bld::out_fd>);
 static_assert(!bld::Run_modifier_c<bld::out_str>);
@@ -32,6 +36,8 @@ static_assert(bld::Capture_modifier_c<bld::in_str>);
 static_assert(bld::Capture_modifier_c<bld::label>);
 static_assert(!bld::Capture_modifier_c<bld::out_fd>);
 static_assert(!bld::Capture_modifier_c<bld::use_threads>);
+static_assert(!bld::Capture_modifier_c<bld::jobs>);
+static_assert(bld::Capture_modifier_c<bld::dry_run>);
 static_assert(!bld::Capture_modifier_c<bld::out_str>);
 static_assert(!bld::Capture_modifier_c<bld::out_err_str>);
 static_assert(!bld::Capture_modifier_c<bld::out_err_fd>);
@@ -721,7 +727,7 @@ auto run_tests() -> int
          }},
         {"run_str_capture_async_detached",
          []() -> std::expected<void, std::string> {
-             // Drains live in the Proc: strings are complete after wait()
+             // Capture pipes live in the Proc: strings are complete after wait()
              // even though the run returned while the child was starting.
              std::string out;
              auto proc = bld::run(bld::Cmd_loc{echo_cmd("late_data", "x")}, bld::async{}, bld::out_str{out});
@@ -891,30 +897,153 @@ auto run_tests() -> int
          }},
         {"use_threads_resolution",
          []() -> std::expected<void, std::string> {
-             const std::size_t max = bld::max_thread_count();
+             // Canonical names are jobs/max_parallel_count/resolve_parallel_width;
+             // use_threads/max_thread_count/resolve_thread_count are aliases.
+             const std::size_t max = bld::max_parallel_count();
              if (max == 0) {
-                 return std::unexpected("max_thread_count is 0");
+                 return std::unexpected("max_parallel_count is 0");
              }
-             if (bld::resolve_thread_count(std::nullopt) != bld::resolve_thread_count(-1)) {
+             if (bld::max_thread_count() != max) {
+                 return std::unexpected("max_thread_count alias diverged");
+             }
+             if (bld::resolve_parallel_width(std::nullopt) != bld::resolve_parallel_width(-1)) {
                  return std::unexpected("default should equal -1");
              }
-             if (bld::resolve_thread_count(0) != max) {
+             if (bld::resolve_thread_count(std::nullopt) != bld::resolve_parallel_width(std::nullopt)) {
+                 return std::unexpected("resolve_thread_count alias diverged");
+             }
+             if (bld::resolve_parallel_width(0) != max) {
                  return std::unexpected("0 should resolve to max");
              }
-             if (bld::resolve_thread_count(1) != 1) {
+             if (bld::resolve_parallel_width(1) != 1) {
                  return std::unexpected("1 should resolve to 1");
              }
-             if (bld::resolve_thread_count(1000000) != max) {
+             if (bld::resolve_parallel_width(1000000) != max) {
                  return std::unexpected("huge value should be capped by max");
              }
-             if (bld::resolve_thread_count(-static_cast<int>(max) - 100) != 1) {
+             if (bld::resolve_parallel_width(-static_cast<int>(max) - 100) != 1) {
                  return std::unexpected("extreme negative should clamp to 1");
              }
              if (bld::resolve_async_cap(0, 4) != 4) {
-                 return std::unexpected("max_async 0 should follow threads");
+                 return std::unexpected("max_async 0 should follow parallel width");
              }
              if (bld::resolve_async_cap(3, 4) != 3) {
                  return std::unexpected("explicit max_async should pass through");
+             }
+             return {};
+         }},
+        {"log_indent_prefix_and_scope",
+         []() -> std::expected<void, std::string> {
+             std::ostringstream oss;
+             auto *saved = bld::Logger::ostream.ptr;
+             bld::Logger::ostream = oss;
+             bld::log::set_indent(0);
+             auto restore = [&]() {
+                 bld::Logger::ostream.ptr = saved;
+                 bld::log::set_indent(0);
+             };
+             bld::log::indent(2);
+             if (bld::log::indent_level() != 2) {
+                 restore();
+                 return std::unexpected("indent(2) did not set level 2");
+             }
+             bld::log::i("hello");
+             {
+                 bld::log::indent_scope nest;
+                 if (bld::log::indent_level() != 3) {
+                     restore();
+                     return std::unexpected("indent_scope did not nest to level 3");
+                 }
+                 bld::log::i("nested");
+             }
+             if (bld::log::indent_level() != 2) {
+                 restore();
+                 return std::unexpected("indent_scope did not restore level 2");
+             }
+             bld::log::unindent(99); // clamps at 0, never negative
+             if (bld::log::indent_level() != 0) {
+                 restore();
+                 return std::unexpected("unindent did not clamp to 0");
+             }
+             bld::log::i("flat");
+             restore();
+             std::string out = oss.str();
+             if (out.find("[INFO] :     hello\n") == std::string::npos) {
+                 return std::unexpected(std::format("indent prefix wrong: '{}'", out));
+             }
+             if (out.find("[INFO] :       nested\n") == std::string::npos) {
+                 return std::unexpected(std::format("nested indent prefix wrong: '{}'", out));
+             }
+             if (out.find("[INFO] : flat\n") == std::string::npos) {
+                 return std::unexpected(std::format("restored indent prefix wrong: '{}'", out));
+             }
+             return {};
+         }},
+        {"single_dry_run_spawns_nothing",
+         []() -> std::expected<void, std::string> {
+             // false_cmd exits 1 when really run; dry-run must report success.
+             auto proc = bld::run(bld::Cmd_loc{false_cmd()}, bld::dry_run{});
+             if (!proc) {
+                 return std::unexpected(std::format("dry-run single failed: {}", proc.error()));
+             }
+             if (proc->status_code() != 0 || proc->is_running()) {
+                 return std::unexpected("dry-run proc should be exited/0 and not running");
+             }
+             auto ok = bld::run(bld::Cmd_loc{true_cmd()}, bld::dry_run{});
+             if (!ok || ok->status_code() != 0) {
+                 return std::unexpected("dry-run of true_cmd should succeed");
+             }
+             return {};
+         }},
+        {"capture_dry_run_returns_empty",
+         []() -> std::expected<void, std::string> {
+             // false_cmd fails when really run; dry-run must succeed empty.
+             auto out = bld::capture(bld::Cmd_loc{false_cmd()}, bld::dry_run{});
+             if (!out) {
+                 return std::unexpected(std::format("dry-run capture failed: {}", out.error()));
+             }
+             if (!out->empty()) {
+                 return std::unexpected(std::format("dry-run capture should be empty, got '{}'", *out));
+             }
+             return {};
+         }},
+        {"batch_dry_run_spawns_nothing",
+         []() -> std::expected<void, std::string> {
+             // false_cmd exits 1 when really run; batch dry-run must succeed
+             // reporting everything skipped, spawning nothing.
+             std::vector<bld::Task> tasks;
+             tasks.emplace_back(bld::Cmd_loc{true_cmd()});
+             tasks.emplace_back(bld::Cmd_loc{false_cmd()});
+             auto res = bld::run(tasks, bld::jobs{2}, bld::dry_run{});
+             if (!res) {
+                 return std::unexpected(std::format("batch dry-run failed: {}", res.error()));
+             }
+             if (res->ran != 0 || res->skipped != 2 || !res->ok()) {
+                 return std::unexpected(std::format("expected ran=0 skipped=2, got ran={} skipped={}", res->ran, res->skipped));
+             }
+             return {};
+         }},
+        {"scheduler_logs_task_failure",         []() -> std::expected<void, std::string> {
+             std::ostringstream oss;
+             auto *saved = bld::Logger::ostream.ptr;
+             bld::Logger::ostream = oss;
+             std::vector<bld::Task> tasks;
+             tasks.emplace_back(bld::Cmd_loc{false_cmd()});
+             tasks.back().name = "doomed";
+             auto res = bld::run(tasks, bld::jobs{1});
+             bld::Logger::ostream.ptr = saved;
+             if (res) {
+                 return std::unexpected("failing batch unexpectedly succeeded");
+             }
+             std::string logs = oss.str();
+             if (logs.find("doomed") == std::string::npos) {
+                 return std::unexpected(std::format("task name missing from logs: '{}'", logs));
+             }
+             if (logs.find("exited with status") == std::string::npos) {
+                 return std::unexpected(std::format("exit status missing from logs: '{}'", logs));
+             }
+             if (logs.find("[100%] Task 'doomed' failed: exited with status 1") == std::string::npos) {
+                 return std::unexpected(std::format("progress line wrong/missing: '{}'", logs));
              }
              return {};
          }},
@@ -980,7 +1109,7 @@ auto run_tests() -> int
              broken_list.emplace_back(bld::Cmd_loc{false_cmd()});
              broken_list.emplace_back(bld::Cmd_loc{true_cmd()});
 
-             // Force use_threads{1} to guarantee sequential processing.
+             // Force jobs{1} to guarantee sequential processing.
              // This ensures the 3rd task is NEVER scheduled because the 2nd task poisons the batch queue.
              auto batch_status = bld::run(broken_list, bld::use_threads{1});
              if (batch_status) {

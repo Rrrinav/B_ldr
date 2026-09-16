@@ -50,7 +50,7 @@
 #include <string>
 #include <string_view>
 #include <system_error>
-#include <thread>
+#include <thread> // only for hardware_concurrency(); the lib spawns no threads
 #include <type_traits>
 #include <unordered_map>
 #include <unordered_set>
@@ -182,6 +182,14 @@ struct Logger
 
     inline static std::atomic<Level> min_lvl{Level::inf};
 
+    // Indentation for the default sink: N levels x indent_width spaces
+    // prefixed to the message (after the "LEVEL: " tag). Single-threaded
+    // schedulers just call bld::log::indent()/unindent(); the counter is
+    // atomic so ad-hoc user threads don't corrupt it (interleaving may
+    // still look ragged — indent is meant for single-threaded scripts).
+    inline static std::atomic<int> indent_level{0};
+    inline static constexpr int indent_width = 2;
+
     static auto set_logger_fn(Logger_fn_t fn, std::source_location loc = std::source_location::current()) -> void;
 
     inline static std::atomic<bool> logger_locked{false};
@@ -200,6 +208,60 @@ inline void set_min_level(bld::Logger::Level lvl)
 {
     bld::Logger::min_lvl.store(lvl, std::memory_order_relaxed);
 }
+
+/// Current indent level (see indent()/indent_scope).
+[[nodiscard]] inline auto indent_level() -> int
+{
+    int n = bld::Logger::indent_level.load(std::memory_order_relaxed);
+    return n < 0 ? 0 : n;
+}
+
+/// Pushes indentation for subsequent default-sink messages (clamped >= 0).
+inline void indent(int n = 1)
+{
+    bld::Logger::indent_level.fetch_add(n, std::memory_order_relaxed);
+    if (bld::Logger::indent_level.load(std::memory_order_relaxed) < 0) {
+        bld::Logger::indent_level.store(0, std::memory_order_relaxed);
+    }
+}
+
+/// Pops indentation pushed by indent() (clamped >= 0).
+inline void unindent(int n = 1)
+{
+    indent(-n);
+}
+
+/// Sets the indent level directly (clamped >= 0).
+inline void set_indent(int n)
+{
+    bld::Logger::indent_level.store(n < 0 ? 0 : n, std::memory_order_relaxed);
+}
+
+/// RAII indent: indents on construction, restores the previous level on
+/// destruction. Nestable; non-copyable so a scope can't be dedented twice.
+///
+///   bld::log::i("building app");
+///   {
+///       bld::log::indent_scope nest;
+///       bld::log::i("compiling foo.cpp");  // printed indented
+///   }
+///   bld::log::i("done");  // back at the outer level
+struct indent_scope
+{
+    int prev{0};
+    explicit indent_scope(int n = 1) : prev(indent_level())
+    {
+        indent(n);
+    }
+    ~indent_scope()
+    {
+        set_indent(prev);
+    }
+    indent_scope(const indent_scope &) = delete;
+    indent_scope &operator=(const indent_scope &) = delete;
+    indent_scope(indent_scope &&) = delete;
+    indent_scope &operator=(indent_scope &&) = delete;
+};
 
 template <typename... Args>
 void i(std::format_string<Args...> fmt, Args &&...args);
@@ -461,6 +523,12 @@ struct Proc_config
     /// Working directory for this child. Empty means inherit the build script's directory.
     std::string cwd{""};
     bool async{false};
+    /// Log-only preview: when true, execute() logs what would run and never
+    /// spawns (no cwd validation, no process, no side effects). Set via
+    /// bld::dry_run{} on run(cmd) — or on the batch call for
+    /// run(tasks/plan/db). Rejected on Task/run_new: dry-run is per run()
+    /// call, never per task (run_new always spawns).
+    bool dry_run{false};
     std::source_location loc{std::source_location::current()};
     // Unified routing: one slot per stream (unset = inherit).
     // Replaces the old fd+path field pairs.
@@ -580,12 +648,16 @@ struct Proc
     Exec_spec spec;
     Proc_gid gid{};
 
-    // String-capture drains (out_str/err_str/out_err_str): reader threads append
-    // into borrowed user strings. Owned here so detached async procs keep draining;
-    // joined on wait()/exit-observe/destruction. Targets are borrowed, never owned.
-    std::vector<std::thread> drain_threads_{};
-    std::string *drain_out_{nullptr};
-    std::string *drain_err_{nullptr};
+    // String capture (out_str/err_str/out_err_str): the parent holds the read
+    // ends of pipes whose write ends are the child's stdout/stderr. The
+    // scheduler pumps them single-threaded (poll / PeekNamedPipe) in
+    // wait()/try_wait()/wait_any()/wait_all()/capture_execute — no reader
+    // threads are spawned. Targets are borrowed, never owned; they are
+    // complete once the child is reaped and EOF is drained.
+    int cap_out_fd_{-1};
+    int cap_err_fd_{-1};
+    std::string *cap_out_{nullptr};
+    std::string *cap_err_{nullptr};
 
     explicit Proc() = default;
     explicit Proc(P_id id, const std::string &label_ = "");
@@ -628,12 +700,21 @@ struct Proc
 
     static auto parse_status(int wstatus) -> Status;
 
+    // Drains available capture bytes without blocking. Called repeatedly
+    // while the child runs and once more after it is reaped. Public so
+    // wait_all() and user schedulers can pump siblings single-threaded.
+    auto pump_capture_nonblocking() -> void;
+    // True when this Proc owns string-capture pipes.
+    [[nodiscard]] auto has_capture() const noexcept -> bool;
+    // Drain to EOF + close + CRLF-normalize the borrowed targets.
+    // Idempotent: no-op once fds are -1. Only call after the child is
+    // reaped (or observed exited).
+    auto finish_capture() -> void;
+
 private:
     friend class Proc_group;
     auto update_status(int wstatus) -> void;
-    // Joins drain_threads_ (if any) and CRLF-normalizes the borrowed targets.
-    // Idempotent: no-op once joined. Never call while the child may still write
-    // (i.e. only after reaping or observing exit) — readers block until EOF.
+    // Deprecated alias kept for source compat (no threads remain to join).
     auto join_drain() -> void;
 };
 
@@ -642,16 +723,21 @@ private:
 // template definition below. Each is asserted INLINE in the caller body (not only inside
 // validate_*): that way the helpful message prints first, ahead of any follow-on error.
 #define B_LDR_PROC_MODIFIERS_MSG \
-    "API ERROR: bad modifier for run(cmd)/Task/run_new. Proc modifiers: async, label, cwd, pipe, " \
+    "API ERROR: bad modifier for run(cmd)/Task/run_new. Proc modifiers: async, label, cwd, dry_run, pipe, " \
     "out_/err_/in_ fd/file/lazy, out_err_fd/file/lazy, out_str/err_str/out_err_str. " \
     "Run modifiers go to run(batch,...); in_str/raw_crlf go to capture()."
 #define B_LDR_RUN_MODIFIERS_MSG \
-    "API ERROR: bad modifier for run(batch). Run modifiers: use_threads, max_async, deduce_dependency, " \
+    "API ERROR: bad modifier for run(batch). Run modifiers: jobs (alias use_threads), max_async, deduce_dependency, " \
     "keep_going, dry_run, force, write_compile_commands. Put io/label/cwd on the Task. " \
     "No run(span<Proc>): use wait_all(procs)."
 #define B_LDR_CAPTURE_MODIFIERS_MSG \
     "API ERROR: bad modifier for capture(cmd). Capture takes: in_fd/in_file/lazy_in_file, in_str, label, " \
-    "raw_crlf. Output is always merged; to capture from run(), use run(cmd, out_str{s})."
+    "dry_run, raw_crlf. Output is always merged; to capture from run(), use run(cmd, out_str{s})."
+
+// Forward declaration: the full dry_run modifier (a Run/Proc/Capture modifier)
+// is defined with the run modifiers below. run_new's template needs the name
+// for its dry_run rejection ahead of that definition.
+struct dry_run;
 
 class Proc_group
 {
@@ -672,6 +758,9 @@ public:
     auto run_new(Cmd_loc cl, Configs &&...confs) -> std::expected<Proc_id, Err>
     {
         static_assert((Config_modifier_c<Configs> && ...), B_LDR_PROC_MODIFIERS_MSG);
+        static_assert(
+            !(std::is_same_v<std::remove_cvref_t<Configs>, dry_run> || ...),
+            "API ERROR: dry_run is per run() call, not per spawned proc (run_new always spawns); put dry_run{} on the run()/capture() call.");
         Exec_spec spec;
         spec.cmd = cl.cmd;
         spec.cfg.loc = cl.loc;
@@ -739,6 +828,9 @@ struct Capture_config
     /// Captured output is normalized from CRLF to LF. Always on: Windows programs emit CRLF,
     /// so captured text compares cleanly against "\n"-terminated strings (a no-op on Linux).
     bool normalize_crlf{true};
+    /// Log-only preview: when true, capture() logs what would run and
+    /// returns an empty string without spawning. Set via bld::dry_run{}.
+    bool dry_run{false};
 };
 
 // SECTION 04 — Execution (bld::run, bld::capture, bld::Task)
@@ -750,11 +842,22 @@ auto execute(const bld::Cmd &cmd, const Proc_config &cfg, std::source_location l
 // Validates a single task/proc config: working directory exists.
 auto check_proc_config(const Proc_config &cfg) -> std::expected<void, bld::Err>;
 
-// Cross-platform pipe helpers shared by capture_execute and Proc::spawn's
+// Cross-platform pipe helpers shared by capture_execute and Proc's
 // string capture (out_str/err_str/out_err_str). fds use -1 as empty.
+// All capture I/O is single-threaded (poll / PeekNamedPipe); no helper
+// spawns threads.
 auto make_pipe(int fds[2], const char *name) -> std::expected<void, bld::Err>;
 auto close_fd(int fd) -> void;
 auto read_fd(int fd, void *buf, unsigned int count) -> int;
+auto write_fd(int fd, const void *buf, unsigned int count) -> int;
+auto set_nonblocking(int fd) -> void;
+// Drains whatever is available on fd into out without blocking.
+// Returns true when EOF/fatal is observed (caller should close fd and
+// treat it as done); false means keep polling (including EAGAIN).
+auto pump_fd_nonblocking(int fd, std::string &out) -> bool;
+// Milliseconds sleep used to avoid busy-spinning while waiting for a
+// child whose capture pipes have no data ready.
+auto sleep_ms(int ms) -> void;
 
 // Always captures merged stdout+stderr into one string.
 // Returns the merged output on exit-code 0; on non-zero exit returns an Err
@@ -806,6 +909,13 @@ struct out_file
 {
     // Shared ownership: copying out_file (or the Proc_config it fills)
     // keeps the fd open. See Shared_fd / Io_slot.
+    //
+    // Two ways to build one:
+    //   bld::out_file{"log.txt"}            opens now, fatal (log + exit) on failure.
+    //   bld::out_file::open("log.txt")      opens now, returns expected for manual handling:
+    //     if (auto f = bld::out_file::open("log.txt"); !f) { /* f.error() */ }
+    //     else if (auto proc = bld::run(cmd, *f); !proc) { /* ... */ }
+    // (*f unwraps the expected to the modifier run() takes.)
     bld::Shared_fd fd{};
     out_file() = default;
     out_file(std::string_view path, bld::Open_mode mode = bld::Open_mode::write);
@@ -815,6 +925,8 @@ struct out_file
 };
 struct err_file
 {
+    // Same two forms as out_file: direct ctor (fatal on failure) or
+    // open() + *f for manual error handling.
     bld::Shared_fd fd{};
     err_file() = default;
     err_file(std::string_view path, bld::Open_mode mode = bld::Open_mode::write);
@@ -824,6 +936,8 @@ struct err_file
 };
 struct in_file
 {
+    // Same two forms as out_file: direct ctor (fatal on failure) or
+    // open() + *f for manual error handling.
     bld::Shared_fd fd{};
     in_file() = default;
     in_file(std::string_view path);
@@ -833,6 +947,8 @@ struct in_file
 };
 struct out_err_file
 {
+    // Same two forms as out_file: direct ctor (fatal on failure) or
+    // open() + *f for manual error handling.
     bld::Shared_fd fd{};
     out_err_file() = default;
     out_err_file(std::string_view path, bld::Open_mode mode = bld::Open_mode::write);
@@ -1031,14 +1147,16 @@ struct Run_result
 enum class Failure_policy { stop, keep_going };
 struct Run_config
 {
-    // Worker-thread budget for the scheduler (scheduling width).
-    // Boundary: threads schedule tasks, async cap limits live child procs.
-    //  nullopt       => max_threads - 1 (leave one core free), clamped >= 1.
-    //  value <= 0    => max_threads + value, clamped >= 1 (0 => max).
-    //  value  > 0    => min(value, max_threads).
+    // Concurrency budget for the scheduler (scheduling width): max live
+    // child processes. The scheduler itself is single-threaded — it spawns
+    // processes (fork/CreateProcess) and reaps them via Proc_group::wait_any.
+    // No worker threads are spawned; "threads" in older names means this width.
+    //  nullopt       => max_parallel_count() - 1 (leave one core free), clamped >= 1.
+    //  value <= 0    => max_parallel_count() + value, clamped >= 1 (0 => max).
+    //  value  > 0    => min(value, max_parallel_count()).
     std::optional<int> use_threads{std::nullopt};
     // Cap on concurrently running async child processes (Proc_group size).
-    //  0 => follow resolved threads (coupled default, old behaviour).
+    //  0 => follow resolved parallel width (coupled default, old behaviour).
     //  >0 => absolute cap (may exceed CPU count for I/O-bound procs).
     std::size_t max_async{0};
     Failure_policy failure_policy{Failure_policy::stop};
@@ -1049,41 +1167,59 @@ struct Run_config
     // true => build a dependency graph from Task.inputs/outputs/after.
     bool deduce_dependency{false};
 };
-[[nodiscard]] inline auto max_thread_count() -> std::size_t
+// Canonical name: number of CPUs available for parallel child processes.
+// max_thread_count() is kept as a deprecated alias (it never counted threads).
+[[nodiscard]] inline auto max_parallel_count() -> std::size_t
 {
     std::size_t m = std::thread::hardware_concurrency();
     return m == 0 ? 1 : m;
 }
-[[nodiscard]] inline auto resolve_thread_count(std::optional<int> use_threads_val) -> std::size_t
+[[nodiscard]] inline auto max_thread_count() -> std::size_t
 {
-    std::size_t max_threads = max_thread_count();
-    int v = use_threads_val.value_or(-1);
+    return max_parallel_count();
+}
+// Canonical name for resolving the concurrency width. resolve_thread_count()
+// is kept as a deprecated alias.
+[[nodiscard]] inline auto resolve_parallel_width(std::optional<int> jobs_val) -> std::size_t
+{
+    std::size_t max_procs = max_parallel_count();
+    int v = jobs_val.value_or(-1);
     if (v <= 0) {
-        long resolved = static_cast<long>(max_threads) + static_cast<long>(v);
+        long resolved = static_cast<long>(max_procs) + static_cast<long>(v);
         if (resolved < 1) {
             resolved = 1;
         }
         return static_cast<std::size_t>(resolved);
     }
     std::size_t want = static_cast<std::size_t>(v);
-    return want < max_threads ? want : max_threads;
+    return want < max_procs ? want : max_procs;
 }
-[[nodiscard]] inline auto resolve_async_cap(std::size_t max_async_val, std::size_t resolved_threads) -> std::size_t
+[[nodiscard]] inline auto resolve_thread_count(std::optional<int> use_threads_val) -> std::size_t
+{
+    return resolve_parallel_width(use_threads_val);
+}
+[[nodiscard]] inline auto resolve_async_cap(std::size_t max_async_val, std::size_t resolved_width) -> std::size_t
 {
     if (max_async_val == 0) {
-        return resolved_threads == 0 ? 1 : resolved_threads;
+        return resolved_width == 0 ? 1 : resolved_width;
     }
     return max_async_val == 0 ? 1 : max_async_val;
 }
-struct use_threads
+// Canonical run modifier: cap on concurrently running child processes.
+// `use_threads` is kept as a deprecated alias for source compat.
+struct jobs
 {
     std::optional<int> value{std::nullopt};
-    use_threads() = default;
-    explicit use_threads(int v) : value(v)
+    jobs() = default;
+    explicit jobs(int v) : value(v)
     {}
-    explicit use_threads(std::optional<int> v) : value(v)
+    explicit jobs(std::optional<int> v) : value(v)
     {}
     auto operator()(Run_config &cfg) const -> void;
+};
+struct use_threads : jobs
+{
+    using jobs::jobs;
 };
 struct max_async
 {
@@ -1103,6 +1239,8 @@ struct keep_going
 struct dry_run
 {
     auto operator()(Run_config &cfg) const -> void;
+    auto operator()(Proc_config &cfg) const -> void;
+    auto operator()(Capture_config &cfg) const -> void;
 };
 struct force
 {
@@ -1135,7 +1273,9 @@ template <typename T>
 concept Run_modifier_c = requires(T &&modifier, Run_config &cfg) { modifier(cfg); };
 
 template <typename T>
-constexpr bool is_threads_mod_v = std::is_same_v<std::remove_cvref_t<T>, use_threads>;
+constexpr bool is_jobs_mod_v = std::is_same_v<std::remove_cvref_t<T>, jobs> || std::is_same_v<std::remove_cvref_t<T>, use_threads>;
+template <typename T>
+constexpr bool is_threads_mod_v = is_jobs_mod_v<T>;
 template <typename T>
 constexpr bool is_max_async_mod_v = std::is_same_v<std::remove_cvref_t<T>, max_async>;
 template <typename T>
@@ -1153,14 +1293,14 @@ constexpr auto validate_run_options() -> void
 {
     // NOTE: modifier-category is asserted inline by every caller
     // (run span/Plan/db) via B_LDR_RUN_MODIFIERS_MSG.
-    constexpr int threads_count = (is_threads_mod_v<Options> + ... + 0);
+    constexpr int jobs_count = (is_jobs_mod_v<Options> + ... + 0);
     constexpr int async_count = (is_max_async_mod_v<Options> + ... + 0);
     constexpr int keep_going_count = (is_keep_going_mod_v<Options> + ... + 0);
     constexpr int dry_run_count = (is_dry_run_mod_v<Options> + ... + 0);
     constexpr int force_count = (is_force_mod_v<Options> + ... + 0);
     constexpr int deduce_count = (is_deduce_mod_v<Options> + ... + 0);
     constexpr int write_db_count = (is_write_db_mod_v<Options> + ... + 0);
-    static_assert(threads_count <= 1, "API ERROR: duplicate use_threads (at most one per run).");
+    static_assert(jobs_count <= 1, "API ERROR: duplicate jobs/use_threads (at most one per run).");
     static_assert(async_count <= 1, "API ERROR: duplicate max_async (at most one per run).");
     static_assert(keep_going_count <= 1, "API ERROR: duplicate keep_going (at most one per run).");
     static_assert(dry_run_count <= 1, "API ERROR: duplicate dry_run (at most one per run).");
@@ -2026,6 +2166,7 @@ constexpr auto validate_run_configs() -> void
     constexpr int async_count = (bld::is_async_mod_v<Configs> + ... + 0);
     constexpr int label_count = (bld::is_label_mod_v<Configs> + ... + 0);
     constexpr int cwd_count = (bld::is_cwd_mod_v<Configs> + ... + 0);
+    constexpr int dry_run_count = (bld::is_dry_run_mod_v<Configs> + ... + 0);
     static_assert(
         out_count <= 1,
         "API ERROR: duplicate out_* modifiers (at most one of out_fd/out_file/lazy_out_file/out_err_file/out_err_fd/out_str/out_err_str).");
@@ -2037,6 +2178,7 @@ constexpr auto validate_run_configs() -> void
     static_assert(async_count <= 1, "API ERROR: duplicate async (at most one per command).");
     static_assert(label_count <= 1, "API ERROR: duplicate label (at most one per command).");
     static_assert(cwd_count <= 1, "API ERROR: duplicate cwd (at most one per command).");
+    static_assert(dry_run_count <= 1, "API ERROR: duplicate dry_run (at most one per command).");
     static_assert(
         batch_count == 0 || (out_count == 0 && err_count == 0 && in_count == 0),
         "API ERROR: pipe cannot be combined with per-stream routing.");
@@ -2063,6 +2205,8 @@ constexpr auto validate_capture_configs() -> void
     // B_LDR_CAPTURE_MODIFIERS_MSG.
     constexpr int in_count = (bld::is_cap_in_mod_v<Configs> + ... + 0);
     static_assert(in_count <= 1, "API ERROR: duplicate capture stdin (at most one of in_fd/in_file/lazy_in_file/in_str).");
+    constexpr int dry_run_count = (bld::is_dry_run_mod_v<Configs> + ... + 0);
+    static_assert(dry_run_count <= 1, "API ERROR: duplicate dry_run (at most one per capture).");
 }
 
 template <typename... Configs>
@@ -2084,6 +2228,9 @@ template <typename... Configs>
 Task::Task(Cmd_loc cl, Configs &&...confs)
 {
     static_assert((Config_modifier_c<Configs> && ...), B_LDR_PROC_MODIFIERS_MSG);
+    static_assert(
+        !(bld::is_dry_run_mod_v<Configs> || ...),
+        "API ERROR: dry_run is per run() call, not per Task; put dry_run{} on the run()/capture() call.");
     spec.cmd = cl.cmd;
     spec.cfg.loc = cl.loc;
     spec.cfg.async = true;
@@ -2234,12 +2381,11 @@ void f(Os &str, std::format_string<Args...> fmt, Args &&...args)
 
 #include <cerrno>
 #include <charconv>
-#include <condition_variable>
 #include <cstring>
 #include <filesystem>
 #include <fstream>
 #include <iterator>
-#include <thread>
+#include <thread> // only for hardware_concurrency(); no threads are spawned
 #include <unordered_set>
 
 #ifndef _WIN32
@@ -2329,10 +2475,12 @@ auto bld::Logger::Default_logger_fn::operator()(std::ostream &stream, const Log_
         return;
     }
     const auto s = style(record.lvl);
+    int depth = indent_level.load(std::memory_order_relaxed);
+    std::string pad(static_cast<std::size_t>(depth < 0 ? 0 : depth) * static_cast<std::size_t>(indent_width), ' ');
     if (use_color) {
-        std::println(stream, "{}{}{}: {}", s.color, s.label, reset, record.str);
+        std::println(stream, "{}{}{}: {}{}", s.color, s.label, reset, pad, record.str);
     } else {
-        std::println(stream, "{}: {}", s.label, record.str);
+        std::println(stream, "{}: {}{}", s.label, pad, record.str);
     }
 }
 
@@ -2442,20 +2590,20 @@ bld::Proc::~Proc()
     }
 #endif
     // Covers statuses set externally (e.g. Proc_group::wait_any) without wait().
-    join_drain();
+    finish_capture();
 }
 
 #ifdef _WIN32
 bld::Proc::Proc(Proc &&other) noexcept
     : id_(std::exchange(other.id_, nullptr)), status_(other.status_), spec(std::move(other.spec)), gid(other.gid),
-      drain_threads_(std::move(other.drain_threads_)), drain_out_(std::exchange(other.drain_out_, nullptr)),
-      drain_err_(std::exchange(other.drain_err_, nullptr))
+      cap_out_fd_(std::exchange(other.cap_out_fd_, -1)), cap_err_fd_(std::exchange(other.cap_err_fd_, -1)),
+      cap_out_(std::exchange(other.cap_out_, nullptr)), cap_err_(std::exchange(other.cap_err_, nullptr))
 {}
 #else
 bld::Proc::Proc(Proc &&other) noexcept
     : id_(std::exchange(other.id_, -1)), status_(other.status_), spec(std::move(other.spec)), gid(other.gid),
-      drain_threads_(std::move(other.drain_threads_)), drain_out_(std::exchange(other.drain_out_, nullptr)),
-      drain_err_(std::exchange(other.drain_err_, nullptr))
+      cap_out_fd_(std::exchange(other.cap_out_fd_, -1)), cap_err_fd_(std::exchange(other.cap_err_fd_, -1)),
+      cap_out_(std::exchange(other.cap_out_, nullptr)), cap_err_(std::exchange(other.cap_err_, nullptr))
 {}
 #endif
 
@@ -2475,31 +2623,73 @@ auto bld::Proc::operator=(Proc &&other) noexcept -> Proc &
         }
         id_ = std::exchange(other.id_, -1);
 #endif
-        // wait() above joins when it reaps, but statuses set externally
-        // (Proc_group::wait_any) can leave drains pending on a dead child.
-        // The child is gone there, so joining is exact. Unconditional and safe.
-        join_drain();
+        // wait() above drains when it reaps, but statuses set externally
+        // (Proc_group::wait_any) can leave capture pipes half-drained.
+        // The child is gone there, so finishing is exact. Unconditional and safe.
+        finish_capture();
         status_ = other.status_;
         spec = std::move(other.spec);
         gid = other.gid;
-        drain_threads_ = std::move(other.drain_threads_);
-        drain_out_ = std::exchange(other.drain_out_, nullptr);
-        drain_err_ = std::exchange(other.drain_err_, nullptr);
+        // Take over capture pipes (exchange to avoid double-close).
+        cap_out_fd_ = std::exchange(other.cap_out_fd_, -1);
+        cap_err_fd_ = std::exchange(other.cap_err_fd_, -1);
+        cap_out_ = std::exchange(other.cap_out_, nullptr);
+        cap_err_ = std::exchange(other.cap_err_, nullptr);
     }
     return *this;
 }
 
-auto bld::Proc::join_drain() -> void
+auto bld::Proc::has_capture() const noexcept -> bool
 {
-    for (auto &t : drain_threads_) {
-        if (t.joinable()) {
-            t.join();
+    return cap_out_fd_ >= 0 || cap_err_fd_ >= 0;
+}
+
+auto bld::Proc::pump_capture_nonblocking() -> void
+{
+    if (cap_out_fd_ >= 0 && cap_out_ != nullptr) {
+        if (details::pump_fd_nonblocking(cap_out_fd_, *cap_out_)) {
+            details::close_fd(cap_out_fd_);
+            cap_out_fd_ = -1;
+        }
+    } else if (cap_out_fd_ >= 0) {
+        details::close_fd(cap_out_fd_);
+        cap_out_fd_ = -1;
+    }
+    if (cap_err_fd_ >= 0 && cap_err_ != nullptr) {
+        if (cap_err_fd_ == cap_out_fd_) {
+            // Merged into the same pipe: nothing extra to do.
+        } else if (details::pump_fd_nonblocking(cap_err_fd_, *cap_err_)) {
+            details::close_fd(cap_err_fd_);
+            cap_err_fd_ = -1;
+        }
+    } else if (cap_err_fd_ >= 0) {
+        details::close_fd(cap_err_fd_);
+        cap_err_fd_ = -1;
+    }
+}
+
+auto bld::Proc::finish_capture() -> void
+{
+    // The child is dead (or never existed) here, so EOF arrives without
+    // blocking: pump until both pipes report EOF. Sleep briefly between
+    // rounds so we don't spin if the kernel hasn't delivered EOF yet.
+    for (int i = 0; i < 5000 && has_capture(); ++i) {
+        pump_capture_nonblocking();
+        if (has_capture()) {
+            details::sleep_ms(1);
         }
     }
-    drain_threads_.clear();
+    if (cap_out_fd_ >= 0) {
+        details::close_fd(cap_out_fd_);
+        cap_out_fd_ = -1;
+    }
+    if (cap_err_fd_ >= 0) {
+        details::close_fd(cap_err_fd_);
+        cap_err_fd_ = -1;
+    }
     // Captured text matches capture(): CRLF -> LF (no-op on Linux).
-    auto *out = std::exchange(drain_out_, nullptr);
-    auto *err = std::exchange(drain_err_, nullptr);
+    auto *out = std::exchange(cap_out_, nullptr);
+    auto *err = std::exchange(cap_err_, nullptr);
     if (out != nullptr) {
         *out = bld::str::replace_all(*out, "\r\n", "\n");
     }
@@ -2508,45 +2698,115 @@ auto bld::Proc::join_drain() -> void
     }
 }
 
+auto bld::Proc::join_drain() -> void
+{
+    finish_capture();
+}
+
 auto bld::Proc::wait() -> std::expected<Status, bld::Err>
 {
 #ifdef _WIN32
     if (!id_ || status_.state != State::running) {
-        join_drain();
+        finish_capture();
         return status_;
     }
-
-    if (::WaitForSingleObject(static_cast<HANDLE>(id_), INFINITE) == WAIT_FAILED) {
-        return std::unexpected(bld::Err::erno(GetLastError(), "WaitForSingleObject failed"));
-    }
-
-    DWORD exit_code = 0;
-    if (::GetExitCodeProcess(static_cast<HANDLE>(id_), &exit_code)) {
-        status_ = {State::exited, static_cast<int>(exit_code)};
-    }
-    ::CloseHandle(static_cast<HANDLE>(id_));
-    id_ = nullptr;
-    join_drain();
-    return status_;
-#else
-    if (id_ <= 0 || status_.state != State::running) {
-        join_drain();
+    if (!has_capture()) {
+        if (::WaitForSingleObject(static_cast<HANDLE>(id_), INFINITE) == WAIT_FAILED) {
+            return std::unexpected(bld::Err::erno(GetLastError(), "WaitForSingleObject failed"));
+        }
+        DWORD exit_code = 0;
+        if (::GetExitCodeProcess(static_cast<HANDLE>(id_), &exit_code)) {
+            status_ = {State::exited, static_cast<int>(exit_code)};
+        }
+        ::CloseHandle(static_cast<HANDLE>(id_));
+        id_ = nullptr;
+        finish_capture();
         return status_;
     }
-
-    int wstatus = 0;
-    if (::waitpid(id_, &wstatus, 0) == -1) {
-        if (errno == ECHILD) {
-            status_ = {State::exited, 255};
-            join_drain();
+    // With string capture: pump pipes while waiting so the child never
+    // blocks on a full pipe. Short slices keep latency low.
+    while (true) {
+        pump_capture_nonblocking();
+        DWORD res = ::WaitForSingleObject(static_cast<HANDLE>(id_), 10);
+        if (res == WAIT_OBJECT_0) {
+            DWORD exit_code = 0;
+            if (::GetExitCodeProcess(static_cast<HANDLE>(id_), &exit_code)) {
+                status_ = {State::exited, static_cast<int>(exit_code)};
+            }
+            ::CloseHandle(static_cast<HANDLE>(id_));
+            id_ = nullptr;
+            finish_capture();
             return status_;
         }
-        return std::unexpected(bld::Err::erno(errno, "waitpid failed"));
+        if (res == WAIT_FAILED) {
+            return std::unexpected(bld::Err::erno(GetLastError(), "WaitForSingleObject failed"));
+        }
+        // WAIT_TIMEOUT: loop and pump again.
     }
-
-    update_status(wstatus);
-    join_drain();
-    return status_;
+#else
+    if (id_ <= 0 || status_.state != State::running) {
+        finish_capture();
+        return status_;
+    }
+    if (!has_capture()) {
+        int wstatus = 0;
+        if (::waitpid(id_, &wstatus, 0) == -1) {
+            if (errno == ECHILD) {
+                status_ = {State::exited, 255};
+                finish_capture();
+                return status_;
+            }
+            return std::unexpected(bld::Err::erno(errno, "waitpid failed"));
+        }
+        update_status(wstatus);
+        finish_capture();
+        return status_;
+    }
+    // With string capture: interleave non-blocking pipe pumps with
+    // waitpid(WNOHANG) + poll() so large outputs never deadlock.
+    while (true) {
+        pump_capture_nonblocking();
+        int wstatus = 0;
+        pid_t r = ::waitpid(id_, &wstatus, WNOHANG);
+        if (r == -1) {
+            if (errno == EINTR) {
+                continue;
+            }
+            if (errno == ECHILD) {
+                status_ = {State::exited, 255};
+                finish_capture();
+                return status_;
+            }
+            return std::unexpected(bld::Err::erno(errno, "waitpid failed"));
+        }
+        if (r > 0) {
+            update_status(wstatus);
+            if (status_.state == State::exited || status_.state == State::signaled) {
+                finish_capture();
+                return status_;
+            }
+            // Stopped/continued: keep pumping; child may write again.
+        }
+        if (!has_capture()) {
+            details::sleep_ms(1);
+            continue;
+        }
+        struct pollfd pfds[2];
+        int n = 0;
+        if (cap_out_fd_ >= 0) {
+            pfds[n].fd = cap_out_fd_;
+            pfds[n].events = POLLIN;
+            pfds[n].revents = 0;
+            ++n;
+        }
+        if (cap_err_fd_ >= 0 && cap_err_fd_ != cap_out_fd_) {
+            pfds[n].fd = cap_err_fd_;
+            pfds[n].events = POLLIN;
+            pfds[n].revents = 0;
+            ++n;
+        }
+        ::poll(pfds, static_cast<nfds_t>(n), 10);
+    }
 #endif
 }
 
@@ -2554,10 +2814,10 @@ auto bld::Proc::try_wait() -> std::expected<Status, bld::Err>
 {
 #ifdef _WIN32
     if (!id_ || status_.state != State::running) {
-        join_drain();
+        finish_capture();
         return status_;
     }
-
+    pump_capture_nonblocking();
     DWORD res = ::WaitForSingleObject(static_cast<HANDLE>(id_), 0);
     if (res == WAIT_OBJECT_0) {
         DWORD exit_code = 0;
@@ -2566,24 +2826,24 @@ auto bld::Proc::try_wait() -> std::expected<Status, bld::Err>
         }
         ::CloseHandle(static_cast<HANDLE>(id_));
         id_ = nullptr;
-        join_drain();
+        finish_capture();
     } else if (res == WAIT_FAILED) {
         return std::unexpected(bld::Err::erno(GetLastError(), "WaitForSingleObject failed"));
     }
     return status_;
 #else
     if (id_ <= 0 || status_.state != State::running) {
-        join_drain();
+        finish_capture();
         return status_;
     }
-
+    pump_capture_nonblocking();
     int wstatus = 0;
     P_id res = ::waitpid(id_, &wstatus, WNOHANG);
 
     if (res == -1) {
         if (errno == ECHILD) {
             status_ = {State::exited, 255};
-            join_drain();
+            finish_capture();
             return status_;
         }
         return std::unexpected(bld::Err::erno(errno, "waitpid WNOHANG failed"));
@@ -2591,10 +2851,10 @@ auto bld::Proc::try_wait() -> std::expected<Status, bld::Err>
 
     if (res > 0) {
         update_status(wstatus);
-        // Join only once the child is done. Stopped/continued children may
-        // resume writing, so their readers must keep draining.
+        // Finish only once the child is done. Stopped/continued children may
+        // resume writing, so their pipes must keep being pumped.
         if (status_.state == State::exited || status_.state == State::signaled) {
-            join_drain();
+            finish_capture();
         }
     }
 
@@ -2699,6 +2959,102 @@ auto bld::details::read_fd(int fd, void *buf, unsigned int count) -> int
 #endif
 }
 
+auto bld::details::write_fd(int fd, const void *buf, unsigned int count) -> int
+{
+#ifdef _WIN32
+    return ::_write(fd, buf, count);
+#else
+    return static_cast<int>(::write(fd, buf, count));
+#endif
+}
+
+auto bld::details::set_nonblocking(int fd) -> void
+{
+    if (fd < 0) {
+        return;
+    }
+#ifdef _WIN32
+    // CRT pipes have no O_NONBLOCK: callers use PeekNamedPipe to avoid
+    // blocking _read instead. Nothing to set here.
+    (void)fd;
+#else
+    int flags = ::fcntl(fd, F_GETFL, 0);
+    if (flags != -1) {
+        ::fcntl(fd, F_SETFL, flags | O_NONBLOCK);
+    }
+#endif
+}
+
+auto bld::details::sleep_ms(int ms) -> void
+{
+    if (ms <= 0) {
+        return;
+    }
+#ifdef _WIN32
+    ::Sleep(static_cast<DWORD>(ms));
+#else
+    struct timespec ts;
+    ts.tv_sec = ms / 1000;
+    ts.tv_nsec = static_cast<long>((ms % 1000) * 1000000L);
+    ::nanosleep(&ts, nullptr);
+#endif
+}
+
+// Single-threaded pipe pump: read everything currently available without
+// blocking. True => EOF (or fatal error): the pipe is done.
+auto bld::details::pump_fd_nonblocking(int fd, std::string &out) -> bool
+{
+    if (fd < 0) {
+        return true;
+    }
+#ifdef _WIN32
+    HANDLE h = reinterpret_cast<HANDLE>(::_get_osfhandle(fd));
+    if (h == INVALID_HANDLE_VALUE) {
+        return true;
+    }
+    char buf[4096];
+    while (true) {
+        DWORD avail = 0;
+        if (!::PeekNamedPipe(h, nullptr, 0, nullptr, &avail, nullptr)) {
+            // Broken/closed pipe => EOF. Anything left was already read.
+            return true;
+        }
+        if (avail == 0) {
+            return false;
+        }
+        DWORD want = avail < sizeof(buf) ? avail : static_cast<DWORD>(sizeof(buf));
+        int n = ::_read(fd, buf, static_cast<unsigned int>(want));
+        if (n > 0) {
+            out.append(buf, static_cast<std::size_t>(n));
+            continue;
+        }
+        if (n == 0) {
+            return true;
+        }
+        return false;
+    }
+#else
+    char buf[4096];
+    while (true) {
+        ssize_t n = ::read(fd, buf, sizeof(buf));
+        if (n > 0) {
+            out.append(buf, static_cast<std::size_t>(n));
+            continue;
+        }
+        if (n == 0) {
+            return true;
+        }
+        if (errno == EINTR) {
+            continue;
+        }
+        if (errno == EAGAIN || errno == EWOULDBLOCK) {
+            return false;
+        }
+        return true;
+    }
+#endif
+}
+
 auto bld::Proc::spawn(const Exec_spec &spec, Proc_gid gid) -> std::expected<Proc, Err>
 {
     if (spec.cmd.empty()) {
@@ -2710,15 +3066,16 @@ auto bld::Proc::spawn(const Exec_spec &spec, Proc_gid gid) -> std::expected<Proc
     const auto &cmd = spec.cmd;
     const auto &cfg = spec.cfg;
     // String capture (out_str/err_str/out_err_str): borrowed string* slots are
-    // piped below; reader threads owned by the Proc drain them. Separate output
+    // piped below; the parent keeps the read ends and pumps them
+    // single-threaded in wait()/wait_any()/capture_execute. Separate output
     // stays separate: only out_err_str (which sets merge_err_and_out) merges.
     std::string *cap_out = io_str(cfg.io_out);
     std::string *cap_err = io_str(cfg.io_err);
-    // One pipe + one reader when both slots name the same string (out_err_str).
+    // One pipe when both slots name the same string (out_err_str).
     bool cap_merged = cap_out != nullptr && cap_out == cap_err;
     if (cap_merged && !cfg.merge_err_and_out) {
-        // Two readers appending to one string would race; out_err_str{s} is the
-        // merged form (this state is only reachable with a hand-built config).
+        // A single string cannot hold two separate streams without merging;
+        // out_err_str{s} is the merged form (only reachable hand-built).
         return std::unexpected(Err::erc(
             std::errc::invalid_argument, "same string captures both stdout and stderr without merging; use out_err_str{s}"));
     }
@@ -2786,8 +3143,9 @@ auto bld::Proc::spawn(const Exec_spec &spec, Proc_gid gid) -> std::expected<Proc
     // Note: cfg.io_* Shared_fd alternatives stay alive via spec copy in Proc.
     //
     // String-capture pipes. The write ends override eff_out/eff_err below; the
-    // read ends are drained by reader threads owned by the returned Proc. The
-    // parent closes its write-end copies right after spawning so readers see EOF.
+    // read ends are kept by the returned Proc and pumped single-threaded.
+    // The parent closes its write-end copies right after spawning so pumps
+    // see EOF when the child exits.
     int cap_pipe_out[2]{-1, -1}, cap_pipe_err[2]{-1, -1};
     bool want_out_cap = cap_out != nullptr;
     bool want_err_cap = cap_err != nullptr && !cap_merged; // merged err flows through the stdout pipe
@@ -2799,7 +3157,9 @@ auto bld::Proc::spawn(const Exec_spec &spec, Proc_gid gid) -> std::expected<Proc
     };
     auto close_cap_writes = [&]() {
         details::close_fd(cap_pipe_out[1]);
+        cap_pipe_out[1] = -1;
         details::close_fd(cap_pipe_err[1]);
+        cap_pipe_err[1] = -1;
     };
     if (want_out_cap) {
         if (auto res = details::make_pipe(cap_pipe_out, "stdout"); !res) {
@@ -2814,76 +3174,109 @@ auto bld::Proc::spawn(const Exec_spec &spec, Proc_gid gid) -> std::expected<Proc
         }
         eff_err = Fd_view{cap_pipe_err[1]};
     }
-    // Starts reader threads on a freshly spawned Proc. Called once, right
-    // before returning, on both platform branches.
-    auto start_drains = [&](Proc &p) {
+    // Attaches capture pipes to a freshly spawned Proc. Called once, right
+    // before returning, on both platform branches. Read ends become
+    // non-blocking so the single-threaded pumps never stall the scheduler.
+    auto attach_capture = [&](Proc &p) {
         if (want_out_cap) {
-            p.drain_threads_.emplace_back([fd = cap_pipe_out[0], target = cap_out]() {
-                char buf[4096];
-                while (true) {
-                    int n = details::read_fd(fd, buf, sizeof(buf));
-                    if (n > 0) {
-                        target->append(buf, static_cast<std::size_t>(n));
-                    } else {
-                        break;
-                    }
-                }
-                details::close_fd(fd);
-            });
-            p.drain_out_ = cap_out;
+            details::set_nonblocking(cap_pipe_out[0]);
+            p.cap_out_fd_ = cap_pipe_out[0];
+            p.cap_out_ = cap_out;
+            cap_pipe_out[0] = -1; // ownership moved to Proc
         }
         if (want_err_cap) {
-            p.drain_threads_.emplace_back([fd = cap_pipe_err[0], target = cap_err]() {
-                char buf[4096];
-                while (true) {
-                    int n = details::read_fd(fd, buf, sizeof(buf));
-                    if (n > 0) {
-                        target->append(buf, static_cast<std::size_t>(n));
-                    } else {
-                        break;
-                    }
-                }
-                details::close_fd(fd);
-            });
-            p.drain_err_ = cap_err;
+            details::set_nonblocking(cap_pipe_err[0]);
+            p.cap_err_fd_ = cap_pipe_err[0];
+            p.cap_err_ = cap_err;
+            cap_pipe_err[0] = -1; // ownership moved to Proc
         }
     };
 #ifdef _WIN32
     std::string cmd_str = cmd.str();
     std::string cwd_str{cfg.cwd};
 
-    STARTUPINFOA si;
-    ZeroMemory(&si, sizeof(si));
-    si.cb = sizeof(si);
-    si.dwFlags = STARTF_USESTDHANDLES;
+    STARTUPINFOEXA siex;
+    ZeroMemory(&siex, sizeof(siex));
+    siex.StartupInfo.cb = sizeof(siex);
+    siex.StartupInfo.dwFlags = STARTF_USESTDHANDLES;
     auto to_handle = [](Fd_view f, HANDLE std_h) -> HANDLE {
         if (!f.is_valid() || f.val == STDIN_FILENO || f.val == STDOUT_FILENO || f.val == STDERR_FILENO) {
             return std_h;
         }
         return reinterpret_cast<HANDLE>(_get_osfhandle(f.val));
     };
-    si.hStdInput = to_handle(eff_in, GetStdHandle(STD_INPUT_HANDLE));
-    si.hStdOutput = to_handle(eff_out, GetStdHandle(STD_OUTPUT_HANDLE));
+    siex.StartupInfo.hStdInput = to_handle(eff_in, GetStdHandle(STD_INPUT_HANDLE));
+    siex.StartupInfo.hStdOutput = to_handle(eff_out, GetStdHandle(STD_OUTPUT_HANDLE));
     if (cfg.merge_err_and_out) {
-        si.hStdError = si.hStdOutput;
+        siex.StartupInfo.hStdError = siex.StartupInfo.hStdOutput;
     } else {
-        si.hStdError = to_handle(eff_err, GetStdHandle(STD_ERROR_HANDLE));
+        siex.StartupInfo.hStdError = to_handle(eff_err, GetStdHandle(STD_ERROR_HANDLE));
+    }
+
+    // Exact handle inheritance: without this, the child (and any grandchild
+    // it spawns, e.g. `cmd /c sort`) inherits EVERY inheritable handle —
+    // including the parent's write end of the child's own stdin pipe — so a
+    // program reading stdin to EOF never sees EOF and hangs. POSIX gets this
+    // via CLOEXEC; here the attribute list restricts inheritance to the
+    // three std handles. Falls back to plain STARTUPINFO if unavailable.
+    HANDLE inherit_list[3]{nullptr, nullptr, nullptr};
+    int inherit_count = 0;
+    for (HANDLE h : {siex.StartupInfo.hStdInput, siex.StartupInfo.hStdOutput, siex.StartupInfo.hStdError}) {
+        if (h != nullptr) {
+            bool dup = false;
+            for (int i = 0; i < inherit_count; ++i) {
+                if (inherit_list[i] == h) {
+                    dup = true;
+                    break;
+                }
+            }
+            if (!dup) {
+                inherit_list[inherit_count++] = h;
+            }
+        }
+    }
+    for (int i = 0; i < inherit_count; ++i) {
+        ::SetHandleInformation(inherit_list[i], HANDLE_FLAG_INHERIT, HANDLE_FLAG_INHERIT);
+    }
+    bool use_attr_list = false;
+    if (inherit_count > 0) {
+        SIZE_T attr_size = 0;
+        ::InitializeProcThreadAttributeList(nullptr, 1, 0, &attr_size);
+        siex.lpAttributeList = static_cast<LPPROC_THREAD_ATTRIBUTE_LIST>(::HeapAlloc(::GetProcessHeap(), 0, attr_size));
+        if (siex.lpAttributeList != nullptr
+            && ::InitializeProcThreadAttributeList(siex.lpAttributeList, 1, 0, &attr_size)
+            && ::UpdateProcThreadAttribute(
+                siex.lpAttributeList, 0, PROC_THREAD_ATTRIBUTE_HANDLE_LIST, inherit_list,
+                static_cast<SIZE_T>(inherit_count) * sizeof(HANDLE), nullptr, nullptr)) {
+            use_attr_list = true;
+        } else {
+            if (siex.lpAttributeList != nullptr) {
+                ::HeapFree(::GetProcessHeap(), 0, siex.lpAttributeList);
+                siex.lpAttributeList = nullptr;
+            }
+        }
     }
 
     PROCESS_INFORMATION pi;
     ZeroMemory(&pi, sizeof(pi));
 
-    if (!CreateProcessA(
-            nullptr,
-            cmd_str.data(),
-            nullptr,
-            nullptr,
-            TRUE,
-            CREATE_SUSPENDED,
-            nullptr,
-            cwd_str.empty() ? nullptr : cwd_str.c_str(),
-            &si,
-            &pi)) {
+    BOOL created = ::CreateProcessA(
+        nullptr,
+        cmd_str.data(),
+        nullptr,
+        nullptr,
+        TRUE,
+        CREATE_SUSPENDED | (use_attr_list ? EXTENDED_STARTUPINFO_PRESENT : 0),
+        nullptr,
+        cwd_str.empty() ? nullptr : cwd_str.c_str(),
+        &siex.StartupInfo,
+        &pi);
+    if (siex.lpAttributeList != nullptr) {
+        ::DeleteProcThreadAttributeList(siex.lpAttributeList);
+        ::HeapFree(::GetProcessHeap(), 0, siex.lpAttributeList);
+        siex.lpAttributeList = nullptr;
+    }
+    if (!created) {
         close_cap_pipes();
         return std::unexpected(Err::erno(GetLastError(), "CreateProcess failed").with_payload(cmd));
     }
@@ -2892,9 +3285,9 @@ auto bld::Proc::spawn(const Exec_spec &spec, Proc_gid gid) -> std::expected<Proc
     }
     ::ResumeThread(pi.hThread);
     CloseHandle(pi.hThread);
-    // Parent drops its write-end copies so readers see EOF at child exit.
+    // Parent drops its write-end copies so pumps see EOF at child exit.
     // (The child inherits its own duplicates; they close when it exits.
-    // Readers are joined only after reaping/exit-observe, so EOF is exact.)
+    // Pumps finish only after reaping/exit-observe, so EOF is exact.)
     close_cap_writes();
     Proc p;
     p.id_ = pi.hProcess;
@@ -2904,7 +3297,7 @@ auto bld::Proc::spawn(const Exec_spec &spec, Proc_gid gid) -> std::expected<Proc
         p.spec.cfg.label = cmd_str;
     }
     p.status_ = Status{.state = State::running};
-    start_drains(p);
+    attach_capture(p);
     return p;
 #else
     P_id pid = ::fork();
@@ -2941,7 +3334,7 @@ auto bld::Proc::spawn(const Exec_spec &spec, Proc_gid gid) -> std::expected<Proc
         close_if_needed(eff_in);
         close_if_needed(eff_out);
         close_if_needed(eff_err);
-        // String-capture read ends belong to the parent's reader threads.
+        // String-capture read ends belong to the parent's pumps.
         if (cap_pipe_out[0] >= 0) {
             ::close(cap_pipe_out[0]);
         }
@@ -2959,7 +3352,7 @@ auto bld::Proc::spawn(const Exec_spec &spec, Proc_gid gid) -> std::expected<Proc
     } else {
         ::setpgid(pid, gid.val);
     }
-    // Parent drops its write-end copies so readers see EOF at child exit.
+    // Parent drops its write-end copies so pumps see EOF at child exit.
     close_cap_writes();
     Proc p;
     p.id_ = pid;
@@ -2973,7 +3366,7 @@ auto bld::Proc::spawn(const Exec_spec &spec, Proc_gid gid) -> std::expected<Proc
         p.spec.cfg.label = cmd.str();
     }
     p.status_ = Status{.state = State::running};
-    start_drains(p);
+    attach_capture(p);
     return p;
 #endif
 }
@@ -3208,28 +3601,37 @@ auto bld::Proc_group::wait_any() -> std::expected<Proc_id, Err>
         return std::unexpected(Err::erc(std::errc::no_child_process, "Proc_group empty"));
     }
 #ifdef _WIN32
-    std::vector<HANDLE> handles;
-    std::vector<Proc_id> ids;
-    for (auto &slot : hive_) {
-        if (slot.id != 0 && slot.proc.is_running()) {
-            handles.push_back(static_cast<HANDLE>(slot.proc.pid()));
-            ids.push_back(slot.id);
+    // Pump every member's capture pipes while waiting: a blocking
+    // WaitForMultipleObjects(INFINITE) would let a sibling's pipe fill and
+    // deadlock the child that is ready to exit.
+    while (true) {
+        std::vector<HANDLE> handles;
+        std::vector<Proc_id> ids;
+        for (auto &slot : hive_) {
+            if (slot.id != 0 && slot.proc.is_running()) {
+                slot.proc.pump_capture_nonblocking();
+                handles.push_back(static_cast<HANDLE>(slot.proc.pid()));
+                ids.push_back(slot.id);
+            }
         }
+        if (handles.empty()) {
+            return std::unexpected(Err::erc(std::errc::no_child_process, "No running procs"));
+        }
+        DWORD batch = static_cast<DWORD>(std::min(handles.size(), static_cast<std::size_t>(MAXIMUM_WAIT_OBJECTS)));
+        DWORD res = ::WaitForMultipleObjects(batch, handles.data(), FALSE, 10);
+        if (res >= WAIT_OBJECT_0 && res < WAIT_OBJECT_0 + batch) {
+            Proc_id fid = ids[res - WAIT_OBJECT_0];
+            auto st = get(fid).value().get().wait();
+            if (!st) {
+                return std::unexpected(st.error());
+            }
+            return fid;
+        }
+        if (res == WAIT_FAILED) {
+            return std::unexpected(Err::erno(GetLastError(), "WaitForMultipleObjects failed"));
+        }
+        // WAIT_TIMEOUT: loop and pump again.
     }
-    if (handles.empty()) {
-        return std::unexpected(Err::erc(std::errc::no_child_process, "No running procs"));
-    }
-    DWORD batch = static_cast<DWORD>(std::min(handles.size(), static_cast<std::size_t>(MAXIMUM_WAIT_OBJECTS)));
-    DWORD res = ::WaitForMultipleObjects(batch, handles.data(), FALSE, INFINITE);
-    if (res < WAIT_OBJECT_0 || res >= WAIT_OBJECT_0 + batch) {
-        return std::unexpected(Err::erno(GetLastError(), "WaitForMultipleObjects failed"));
-    }
-    Proc_id fid = ids[res - WAIT_OBJECT_0];
-    auto st = get(fid).value().get().wait();
-    if (!st) {
-        return std::unexpected(st.error());
-    }
-    return fid;
 #else
     bool any_running = false;
     for (auto &slot : hive_) {
@@ -3241,20 +3643,79 @@ auto bld::Proc_group::wait_any() -> std::expected<Proc_id, Err>
     if (!any_running) {
         return std::unexpected(Err::erc(std::errc::no_child_process, "No running procs"));
     }
-    while (true) {
-        int wstatus = 0;
-        pid_t pid = ::waitpid(-gid_.val, &wstatus, 0);
-        if (pid == -1) {
-            if (errno == EINTR) {
-                continue;
+    bool any_capture = false;
+    for (auto &slot : hive_) {
+        if (slot.id != 0 && slot.proc.is_running() && slot.proc.has_capture()) {
+            any_capture = true;
+            break;
+        }
+    }
+    if (!any_capture) {
+        while (true) {
+            int wstatus = 0;
+            pid_t pid = ::waitpid(-gid_.val, &wstatus, 0);
+            if (pid == -1) {
+                if (errno == EINTR) {
+                    continue;
+                }
+                return std::unexpected(Err::erno(errno, "waitpid on group failed"));
             }
+            for (auto &slot : hive_) {
+                if (slot.id != 0 && slot.proc.pid() == pid) {
+                    slot.proc.status_ = Proc::parse_status(wstatus);
+                    return slot.id;
+                }
+            }
+        }
+    }
+    // With string capture anywhere in the group: pump every member while
+    // polling for exits so no pipe fills and deadlocks a sibling.
+    while (true) {
+        for (auto &slot : hive_) {
+            if (slot.id != 0 && slot.proc.is_running()) {
+                slot.proc.pump_capture_nonblocking();
+            }
+        }
+        int wstatus = 0;
+        pid_t pid = ::waitpid(-gid_.val, &wstatus, WNOHANG);
+        if (pid > 0) {
+            for (auto &slot : hive_) {
+                if (slot.id != 0 && slot.proc.pid() == pid) {
+                    slot.proc.status_ = Proc::parse_status(wstatus);
+                    return slot.id;
+                }
+            }
+            continue;
+        }
+        if (pid == -1 && errno != EINTR) {
             return std::unexpected(Err::erno(errno, "waitpid on group failed"));
         }
+        struct pollfd pfds[64];
+        int n = 0;
         for (auto &slot : hive_) {
-            if (slot.id != 0 && slot.proc.pid() == pid) {
-                slot.proc.status_ = Proc::parse_status(wstatus);
-                return slot.id;
+            if (slot.id == 0 || !slot.proc.is_running() || n >= 64) {
+                continue;
             }
+            if (slot.proc.cap_out_fd_ >= 0) {
+                pfds[n].fd = slot.proc.cap_out_fd_;
+                pfds[n].events = POLLIN;
+                pfds[n].revents = 0;
+                ++n;
+                if (n >= 64) {
+                    break;
+                }
+            }
+            if (slot.proc.cap_err_fd_ >= 0 && slot.proc.cap_err_fd_ != slot.proc.cap_out_fd_) {
+                pfds[n].fd = slot.proc.cap_err_fd_;
+                pfds[n].events = POLLIN;
+                pfds[n].revents = 0;
+                ++n;
+            }
+        }
+        if (n == 0) {
+            details::sleep_ms(1);
+        } else {
+            ::poll(pfds, static_cast<nfds_t>(n), 10);
         }
     }
 #endif
@@ -3741,7 +4202,7 @@ auto bld::Plan::mark_compile_command(std::string_view task) -> void
 {
     compile_commands.insert(std::string{task});
 }
-auto bld::use_threads::operator()(Run_config &cfg) const -> void
+auto bld::jobs::operator()(Run_config &cfg) const -> void
 {
     cfg.use_threads = value;
 }
@@ -3758,6 +4219,14 @@ auto bld::keep_going::operator()(Run_config &cfg) const -> void
     cfg.failure_policy = Failure_policy::keep_going;
 }
 auto bld::dry_run::operator()(Run_config &cfg) const -> void
+{
+    cfg.dry_run = true;
+}
+auto bld::dry_run::operator()(Proc_config &cfg) const -> void
+{
+    cfg.dry_run = true;
+}
+auto bld::dry_run::operator()(Capture_config &cfg) const -> void
 {
     cfg.dry_run = true;
 }
@@ -3820,6 +4289,20 @@ auto bld::details::execute(const bld::Cmd &cmd, const Proc_config &cfg, std::sou
     log_slot("input", cfg.io_in, cmd);
     log_slot("output", cfg.io_out, cmd);
     log_slot("error", cfg.io_err, cmd);
+    if (cfg.dry_run) {
+        // Preview only: no cwd validation, no spawn, no side effects.
+        // The dummy Proc reports exited/0 so status checks see success.
+        bld::log::i("dry run (would execute {:?})", cmd);
+        Exec_spec dry_spec;
+        dry_spec.cmd = cmd;
+        dry_spec.cfg = cfg;
+        if (dry_spec.cfg.label.empty()) {
+            dry_spec.cfg.label = cmd.str();
+        }
+        Proc dry_proc;
+        dry_proc.spec = std::move(dry_spec);
+        return dry_proc;
+    }
     bld::log::i("Executing command: {:?}", cmd);
 
     Exec_spec spec;
@@ -3852,19 +4335,18 @@ auto bld::details::capture_execute(const bld::Cmd &cmd, bld::Capture_config &cap
     // validate_capture_configs). Guard hand-built Capture_config too:
     // io_in slot and in_str are mutually exclusive.
     if (!cap_cfg.in_str.empty() && io_is_set(cap_cfg.io_in)) {
+        bld::log::e("capture {:?}: conflicting stdin routing (at most one of in_fd/in_file/lazy_in_file/in_str)", cmd);
         return std::unexpected(
             bld::Err::erc(
                 std::errc::invalid_argument,
                 "Conflicting stdin routing for capture: use at most one of in_fd/in_file/lazy_in_file/in_str"));
     }
 
-    auto write_fd = [](int fd, const void *buf, unsigned int count) -> int {
-#ifdef _WIN32
-        return ::_write(fd, buf, count);
-#else
-        return static_cast<int>(::write(fd, buf, count));
-#endif
-    };
+    if (cap_cfg.dry_run) {
+        // Preview only: no pipes, no spawn, empty output.
+        bld::log::i("dry run (would capture {:?}, {} stdin bytes)", cmd, cap_cfg.in_str.size());
+        return std::string{};
+    }
 
     int pipe_out[2]{-1, -1}, pipe_in[2]{-1, -1};
     Proc_config run_cfg{};
@@ -3896,10 +4378,12 @@ auto bld::details::capture_execute(const bld::Cmd &cmd, bld::Capture_config &cap
     auto proc_res = bld::details::execute(cmd, run_cfg, loc);
 
     // The parent must immediately close the child's ends of the pipes,
-    // otherwise the read loop below will block forever waiting for EOF.
+    // otherwise the pump loop below never sees EOF.
     details::close_fd(pipe_out[1]);
+    pipe_out[1] = -1;
     if (!cap_cfg.in_str.empty()) {
         details::close_fd(pipe_in[0]);
+        pipe_in[0] = -1;
     }
 
     if (!proc_res) {
@@ -3910,43 +4394,123 @@ auto bld::details::capture_execute(const bld::Cmd &cmd, bld::Capture_config &cap
         return std::unexpected(proc_res.error());
     }
 
+    // Single-threaded pump: interleave stdin writes, stdout reads and
+    // child reaping so large inputs+outputs never deadlock (no threads).
     auto &proc = *proc_res;
     std::string merged;
-    std::vector<std::thread> io_threads;
-
-    io_threads.emplace_back([fd = pipe_out[0], &merged]() {
-        char buf[4096];
-        while (true) {
-            int bytes = details::read_fd(fd, buf, sizeof(buf));
-            if (bytes > 0) {
-                merged.append(buf, static_cast<std::size_t>(bytes));
-            } else {
-                break;
-            }
-        }
-        details::close_fd(fd);
-    });
-
-    if (!cap_cfg.in_str.empty()) {
-        io_threads.emplace_back([fd = pipe_in[1], str = cap_cfg.in_str, write_fd]() {
-            std::size_t written = 0;
-            while (written < str.size()) {
-                int bytes = write_fd(fd, str.data() + written, static_cast<unsigned int>(str.size() - written));
-                if (bytes > 0) {
-                    written += static_cast<std::size_t>(bytes);
-                } else if (bytes == -1 && errno != EINTR && errno != EAGAIN) {
-                    break;
-                }
-            }
-            details::close_fd(fd);
-        });
+    const bool have_in = !cap_cfg.in_str.empty();
+    std::size_t written = 0;
+    bool in_closed = !have_in;
+    bool out_eof = false;
+    bool child_done = false;
+    bld::Proc::Status child_status{};
+    details::set_nonblocking(pipe_out[0]);
+    if (have_in) {
+        details::set_nonblocking(pipe_in[1]);
     }
-
-    // Join threads to ensure all I/O is perfectly drained before waiting on PID
-    for (auto &t : io_threads) {
-        if (t.joinable()) {
-            t.join();
+    auto close_in = [&]() {
+        if (pipe_in[1] >= 0) {
+            details::close_fd(pipe_in[1]);
+            pipe_in[1] = -1;
         }
+        in_closed = true;
+    };
+    auto close_out = [&]() {
+        if (pipe_out[0] >= 0) {
+            details::close_fd(pipe_out[0]);
+            pipe_out[0] = -1;
+        }
+        out_eof = true;
+    };
+    while (!out_eof || !in_closed || !child_done) {
+        // Drain output first so the child never stalls on a full pipe
+        // while we are trying to feed it stdin (matters on Windows where
+        // _write can block: pipe_out was just drained, giving room).
+        if (!out_eof) {
+            if (details::pump_fd_nonblocking(pipe_out[0], merged)) {
+                close_out();
+            }
+        }
+        if (!in_closed) {
+#ifdef _WIN32
+            // CRT pipes are blocking: feed in small chunks so a full pipe
+            // stalls for at most one chunk while the child catches up.
+            // True non-blocking stdin would need overlapped I/O.
+            constexpr unsigned int chunk = 4096;
+            std::size_t left = cap_cfg.in_str.size() - written;
+            unsigned int want = left < chunk ? static_cast<unsigned int>(left) : chunk;
+            int n = details::write_fd(pipe_in[1], cap_cfg.in_str.data() + written, want);
+            if (n > 0) {
+                written += static_cast<std::size_t>(n);
+            } else if (n == 0) {
+                close_in();
+            } else if (errno == EPIPE || errno == EINVAL) {
+                close_in(); // child closed stdin / exited
+            }
+            if (written >= cap_cfg.in_str.size()) {
+                close_in(); // child sees EOF on stdin
+            }
+#else
+            while (written < cap_cfg.in_str.size()) {
+                unsigned int left = static_cast<unsigned int>(cap_cfg.in_str.size() - written);
+                int n = details::write_fd(pipe_in[1], cap_cfg.in_str.data() + written, left);
+                if (n > 0) {
+                    written += static_cast<std::size_t>(n);
+                    continue;
+                }
+                if (n == -1 && errno == EINTR) {
+                    continue;
+                }
+                if (n == -1 && (errno == EAGAIN || errno == EWOULDBLOCK)) {
+                    break; // pipe full: read more output, retry next round
+                }
+                break; // EPIPE (child exited) or fatal: stop feeding
+            }
+            if (written >= cap_cfg.in_str.size()) {
+                close_in(); // child sees EOF on stdin
+            }
+#endif
+        }
+        if (!child_done) {
+            auto st = proc.try_wait();
+            if (!st) {
+                close_out();
+                close_in();
+                return std::unexpected(std::move(st.error()).with_payload(std::move(merged)));
+            }
+            if (!proc.is_running()) {
+                child_done = true;
+                child_status = *st;
+            }
+        }
+        if (out_eof && in_closed && child_done) {
+            break;
+        }
+#ifndef _WIN32
+        if (!out_eof || !in_closed) {
+            struct pollfd pfds[2];
+            int n = 0;
+            if (!out_eof) {
+                pfds[n].fd = pipe_out[0];
+                pfds[n].events = POLLIN;
+                pfds[n].revents = 0;
+                ++n;
+            }
+            if (!in_closed) {
+                pfds[n].fd = pipe_in[1];
+                pfds[n].events = POLLOUT;
+                pfds[n].revents = 0;
+                ++n;
+            }
+            ::poll(pfds, static_cast<nfds_t>(n), 10);
+        } else if (!child_done) {
+            details::sleep_ms(1);
+        }
+#else
+        if (!out_eof || !in_closed || !child_done) {
+            details::sleep_ms(1);
+        }
+#endif
     }
 
     if (cap_cfg.normalize_crlf) {
@@ -3955,13 +4519,17 @@ auto bld::details::capture_execute(const bld::Cmd &cmd, bld::Capture_config &cap
 
     auto status = proc.wait();
     if (!status) {
+        bld::log::e("capture {:?}: wait failed: {}", cmd, status.error());
         return std::unexpected(std::move(status.error()).with_payload(std::move(merged)));
     }
+    (void)child_status;
     if (status->code != 0) {
+        bld::log::e("capture {:?}: exited with code {}", cmd, status->code);
         auto err = bld::Err::erc(std::errc::io_error, std::format("command {:?} exited with code {}", cmd, status->code));
         err.payload = std::move(merged);
         return std::unexpected(std::move(err));
     }
+    bld::log::d("capture {:?}: {} bytes", cmd, merged.size());
     return merged;
 }
 
@@ -4162,83 +4730,57 @@ auto bld::rebuild_this_when_needed_ext(int argc, char **argv, std::vector<std::s
 
 auto bld::wait_all(std::span<bld::Proc> procs) -> std::expected<std::size_t, bld::Err>
 {
+    // Single-threaded pump: round-robin try_wait() (each pumps its own
+    // capture pipes) so concurrent out_str/err_str captures never deadlock
+    // on a full pipe while another child is being reaped.
 #ifdef _WIN32
-    std::vector<HANDLE> handles;
-    std::vector<bld::Proc *> proc_ptrs; // Keep a parallel array to know which Proc finished
-
+    std::vector<bld::Proc *> pending;
     for (auto &proc : procs) {
         if (proc.is_running() && proc.pid() != nullptr) {
-            handles.push_back(static_cast<HANDLE>(proc.pid()));
-            proc_ptrs.push_back(&proc);
+            pending.push_back(&proc);
         }
     }
-
-    const std::size_t total = handles.size();
+    const std::size_t total = pending.size();
     if (total == 0) {
         return 0;
     }
-
     bld::log::i("Waiting for {} processes, asynchronously", total);
     std::size_t completed = 0;
     bool has_errors = false;
-
-    // Windows only allows waiting on up to MAXIMUM_WAIT_OBJECTS handles at once.
-    // Wait in chunks so wait_all works with any number of processes.
-    constexpr std::size_t max_wait_batch = static_cast<std::size_t>(MAXIMUM_WAIT_OBJECTS);
-    while (!handles.empty()) {
-        const DWORD batch = static_cast<DWORD>(std::min(handles.size(), max_wait_batch));
-        // Wait for ANY process to finish (bWaitAll = FALSE)
-        DWORD wait_res = ::WaitForMultipleObjects(batch, handles.data(), FALSE, INFINITE);
-
-        if (wait_res >= WAIT_OBJECT_0 && wait_res < WAIT_OBJECT_0 + batch) {
-            DWORD idx = wait_res - WAIT_OBJECT_0;
-            bld::Proc *p = proc_ptrs[idx];
-            HANDLE h = handles[idx];
-
-            DWORD exit_code = 0;
-            ::GetExitCodeProcess(h, &exit_code);
-
-            p->status_ = bld::Proc::Status{bld::Proc::State::exited, static_cast<int>(exit_code)};
-            ::CloseHandle(h);
-            p->id_ = nullptr; // Clear the PID/Handle
-
-            completed++;
-            int percentage = static_cast<int>((completed * 100) / total);
-
-            if (exit_code != 0) {
-                bld::log::e("[{:>3}%] Process '{}' failed: exited with code {}", percentage, p->spec.cfg.label, exit_code);
-                has_errors = true;
-            } else {
-                bld::log::i("[{:>3}%] Process '{}': completed.", percentage, p->spec.cfg.label);
+    while (!pending.empty()) {
+        bool progressed = false;
+        for (auto it = pending.begin(); it != pending.end();) {
+            bld::Proc *p = *it;
+            auto st = p->try_wait();
+            if (!st) {
+                return std::unexpected(std::move(st.error()));
             }
-
-            // Remove the finished handle by swapping with the last element and popping
-            handles[idx] = handles.back();
-            handles.pop_back();
-            proc_ptrs[idx] = proc_ptrs.back();
-            proc_ptrs.pop_back();
-
-        } else if (wait_res == WAIT_FAILED) {
-            bld::log::e("Error in waiting for procs.");
-            return std::unexpected(bld::Err::erno(GetLastError(), "WaitForMultipleObjects failed").with_payload(completed));
-        } else {
-            bld::log::e("Unexpected wait result.");
-            return std::unexpected(
-                bld::Err::erc(std::errc::operation_canceled, "WaitForMultipleObjects returned unexpected status").with_payload(completed));
+            if (!p->is_running()) {
+                ++completed;
+                int percentage = static_cast<int>((completed * 100) / total);
+                if (p->status_code() != 0) {
+                    bld::log::e("[{:>3}%] Process '{}' failed: exited with code {}", percentage, p->spec.cfg.label, p->status_code());
+                    has_errors = true;
+                } else {
+                    bld::log::i("[{:>3}%] Process '{}': completed.", percentage, p->spec.cfg.label);
+                }
+                it = pending.erase(it);
+                progressed = true;
+            } else {
+                ++it;
+            }
+        }
+        if (!pending.empty() && !progressed) {
+            details::sleep_ms(1);
         }
     }
-
     if (has_errors) {
         return std::unexpected(bld::Err::erc(std::errc::operation_canceled, "One or more async processes failed").with_payload(completed));
     }
-
     return completed;
 
 #else
     std::size_t remaining{0};
-    std::size_t completed{0};
-    bool has_errors = false;
-
     for (const auto &proc : procs) {
         if (proc.is_running()) {
             remaining++;
@@ -4248,49 +4790,44 @@ auto bld::wait_all(std::span<bld::Proc> procs) -> std::expected<std::size_t, bld
     if (total == 0) {
         return {};
     }
-
     bld::log::i("Waiting for {} processes, asynchronously", total);
+    std::size_t completed{0};
+    bool has_errors = false;
     while (remaining > 0) {
-        int wstatus = 0;
-        pid_t pid = ::waitpid(-1, &wstatus, 0);
-
-        if (pid > 0) {
-            auto status = bld::Proc::parse_status(wstatus);
-
-            for (auto &proc : procs) {
-                if (proc.pid() == pid && proc.is_running()) {
-                    proc.status_ = status;
-                    remaining--;
-
-                    completed = total - remaining;
-                    int percentage = static_cast<int>((completed * 100) / total);
-
-                    if (status.code != 0) {
-                        bld::log::e("[{:>3}%] Process '{}' failed (pid: {}): exited with code {}", percentage, proc.spec.cfg.label, pid, status.code);
-                        has_errors = true;
-                    } else {
-                        bld::log::i("[{:>3}%] Process '{}' (pid: {}): completed.", percentage, proc.spec.cfg.label, pid);
-                    }
-
-                    break;
-                }
-            }
-        } else if (pid == -1) {
-            if (errno == EINTR) {
+        bool progressed = false;
+        for (auto &proc : procs) {
+            if (!proc.is_running()) {
                 continue;
             }
-            if (errno == ECHILD) {
-                break;
+            auto st = proc.try_wait();
+            if (!st) {
+                return std::unexpected(std::move(st.error()));
             }
-            bld::log::e("Error in waiting for procs.");
-            return std::unexpected(bld::Err::erno(errno, "waitpid failed in wait_all").with_payload(completed));
+            if (!proc.is_running()) {
+                remaining--;
+                completed = total - remaining;
+                int percentage = static_cast<int>((completed * 100) / total);
+                if (st->code != 0) {
+                    bld::log::e(
+                        "[{:>3}%] Process '{}' failed (pid: {}): exited with code {}",
+                        percentage,
+                        proc.spec.cfg.label,
+                        proc.pid(),
+                        st->code);
+                    has_errors = true;
+                } else {
+                    bld::log::i("[{:>3}%] Process '{}' (pid: {}): completed.", percentage, proc.spec.cfg.label, proc.pid());
+                }
+                progressed = true;
+            }
+        }
+        if (remaining > 0 && !progressed) {
+            details::sleep_ms(1);
         }
     }
-
     if (has_errors) {
         return std::unexpected(bld::Err::erc(std::errc::operation_canceled, "One or more async processes failed").with_payload(completed));
     }
-
     return completed;
 #endif
 }
@@ -4723,11 +5260,11 @@ auto run_tasks(std::span<bld::Task> tasks, const bld::Run_config &cfg) -> std::e
             return std::unexpected(Err::erc(std::errc::invalid_argument, std::format("task '{}' has an empty command", t.name)));
         }
     }
-    // Threads schedule tasks, async cap limits live child procs.
-    // Effective width = min(resolved threads, resolved async cap).
-    std::size_t thread_budget = resolve_thread_count(cfg.use_threads);
-    std::size_t async_cap = resolve_async_cap(cfg.max_async, thread_budget);
-    std::size_t width = thread_budget < async_cap ? thread_budget : async_cap;
+    // Single-threaded scheduler: up to <width> child processes live at once.
+    // Effective width = min(resolved parallel width, resolved async cap).
+    std::size_t parallel_budget = resolve_parallel_width(cfg.use_threads);
+    std::size_t async_cap = resolve_async_cap(cfg.max_async, parallel_budget);
+    std::size_t width = parallel_budget < async_cap ? parallel_budget : async_cap;
     if (width == 0) {
         width = 1;
     }
@@ -4877,6 +5414,7 @@ auto run_tasks(std::span<bld::Task> tasks, const bld::Run_config &cfg) -> std::e
                 result.tasks[i].state = bld::Task_state::skipped;
                 result.tasks[i].message = "up to date";
                 ++result.skipped;
+                bld::log::d("task '{}': skipped (up to date)", tasks[i].name);
             }
         }
     }
@@ -4913,6 +5451,19 @@ auto run_tasks(std::span<bld::Task> tasks, const bld::Run_config &cfg) -> std::e
         }
         return active.size();
     };
+    // Progress so far: terminal tasks (ran/failed/skipped/cancelled) over all
+    // tasks, as a 0-100 percentage in wait_all's "[ 50%]" style.
+    std::size_t cancelled = 0;
+    auto progress_pct = [&]() -> int {
+        if (tasks.empty()) {
+            return 100;
+        }
+        std::size_t settled = result.ran + result.failed + result.skipped + cancelled;
+        if (settled > tasks.size()) {
+            settled = tasks.size();
+        }
+        return static_cast<int>((settled * 100) / tasks.size());
+    };
     while (cursor < queue.size() || !active.empty()) {
         while (!stop && active.size() < width && cursor < queue.size()) {
             const auto i = queue[cursor++];
@@ -4924,6 +5475,7 @@ auto run_tasks(std::span<bld::Task> tasks, const bld::Run_config &cfg) -> std::e
                 result.tasks[i].state = bld::Task_state::skipped;
                 result.tasks[i].message = "dry run";
                 ++result.skipped;
+                bld::log::i("[{:>3}%] Task '{}': dry run (would execute {:?})", progress_pct(), tasks[i].name, tasks[i].spec.cmd);
                 release(i);
                 continue;
             }
@@ -4932,12 +5484,14 @@ auto run_tasks(std::span<bld::Task> tasks, const bld::Run_config &cfg) -> std::e
                 result.tasks[i].state = bld::Task_state::failed;
                 result.tasks[i].message = pid.error().msg;
                 ++result.failed;
+                bld::log::e("[{:>3}%] Task '{}': spawn failed: {}", progress_pct(), tasks[i].name, pid.error().msg);
                 if (cfg.failure_policy == bld::Failure_policy::stop) {
                     stop = true;
                 }
                 continue;
             }
             result.tasks[i].state = bld::Task_state::running;
+            bld::log::d("task '{}': spawned {:?}", tasks[i].name, tasks[i].spec.cmd);
             active.push_back(Active{i, *pid, std::chrono::steady_clock::now()});
         }
         if (active.empty()) {
@@ -4945,10 +5499,12 @@ auto run_tasks(std::span<bld::Task> tasks, const bld::Run_config &cfg) -> std::e
         }
         auto done = group.wait_any();
         if (!done) {
+            bld::log::e("scheduler: wait failed: {}", done.error().msg);
             for (auto &entry : active) {
                 result.tasks[entry.index].state = bld::Task_state::failed;
                 result.tasks[entry.index].message = done.error().msg;
                 ++result.failed;
+                bld::log::e("[{:>3}%] Task '{}' failed: {}", progress_pct(), tasks[entry.index].name, done.error().msg);
                 group.remove(entry.pid);
             }
             active.clear();
@@ -4966,6 +5522,7 @@ auto run_tasks(std::span<bld::Task> tasks, const bld::Run_config &cfg) -> std::e
             result.tasks[entry.index].state = bld::Task_state::failed;
             result.tasks[entry.index].message = got.error().msg;
             ++result.failed;
+            bld::log::e("[{:>3}%] Task '{}': lost proc: {}", progress_pct(), tasks[entry.index].name, got.error().msg);
             stop = cfg.failure_policy == bld::Failure_policy::stop;
             continue;
         }
@@ -4976,6 +5533,7 @@ auto run_tasks(std::span<bld::Task> tasks, const bld::Run_config &cfg) -> std::e
             result.tasks[entry.index].state = bld::Task_state::failed;
             result.tasks[entry.index].message = status.error().msg;
             ++result.failed;
+            bld::log::e("[{:>3}%] Task '{}': wait failed: {}", progress_pct(), tasks[entry.index].name, status.error().msg);
             stop = cfg.failure_policy == bld::Failure_policy::stop;
             continue;
         }
@@ -4986,25 +5544,32 @@ auto run_tasks(std::span<bld::Task> tasks, const bld::Run_config &cfg) -> std::e
             item.state = bld::Task_state::failed;
             item.message = std::format("exited with status {}", status->code);
             ++result.failed;
+            bld::log::e("[{:>3}%] Task '{}' failed: {}", progress_pct(), tasks[entry.index].name, item.message);
             if (cfg.failure_policy == bld::Failure_policy::stop) {
                 stop = true;
             }
         } else {
             item.state = bld::Task_state::succeeded;
             ++result.ran;
+            bld::log::i("[{:>3}%] Task '{}': completed in {}ms.", progress_pct(), tasks[entry.index].name, item.elapsed.count());
             release(entry.index);
         }
     }
-    for (auto &item : result.tasks) {
+    for (std::size_t ci = 0; ci < result.tasks.size(); ++ci) {
+        auto &item = result.tasks[ci];
         if (item.state == bld::Task_state::pending) {
             item.state = bld::Task_state::cancelled;
             item.message = "not scheduled after an earlier failure";
+            ++cancelled;
+            bld::log::w("[{:>3}%] Task '{}': cancelled (not scheduled after an earlier failure)", progress_pct(), tasks[ci].name);
         }
     }
     if (!result.ok()) {
+        bld::log::e("run: {} ran, {} skipped, {} failed", result.ran, result.skipped, result.failed);
         return std::unexpected(
             bld::Err::erc(std::errc::operation_canceled, std::format("{} task(s) failed", result.failed)).with_payload(std::move(result)));
     }
+    bld::log::i("run: {} ran, {} skipped, {} failed", result.ran, result.skipped, result.failed);
     return result;
 }
 
@@ -5057,9 +5622,9 @@ auto run_plan(Plan &plan, const Run_config &cfg) -> std::expected<Run_result, Er
             return std::unexpected(Err::erc(std::errc::invalid_argument, std::format("task '{}' has an empty command", t.name)));
         }
     }
-    std::size_t thread_budget = resolve_thread_count(cfg.use_threads);
-    std::size_t async_cap = resolve_async_cap(cfg.max_async, thread_budget);
-    std::size_t width = thread_budget < async_cap ? thread_budget : async_cap;
+    std::size_t parallel_budget = resolve_parallel_width(cfg.use_threads);
+    std::size_t async_cap = resolve_async_cap(cfg.max_async, parallel_budget);
+    std::size_t width = parallel_budget < async_cap ? parallel_budget : async_cap;
     if (width == 0) {
         width = 1;
     }
@@ -5177,6 +5742,7 @@ auto run_plan(Plan &plan, const Run_config &cfg) -> std::expected<Run_result, Er
             result.tasks[i].state = Task_state::skipped;
             result.tasks[i].message = "up to date";
             ++result.skipped;
+            bld::log::d("task '{}': skipped (up to date)", tasks[i].name);
         }
     }
     std::vector<std::size_t> remaining = indegree, queue;
@@ -5212,6 +5778,19 @@ auto run_plan(Plan &plan, const Run_config &cfg) -> std::expected<Run_result, Er
         }
         return active.size();
     };
+    // Progress so far: terminal tasks (ran/failed/skipped/cancelled) over all
+    // tasks, as a 0-100 percentage in wait_all's "[ 50%]" style.
+    std::size_t cancelled = 0;
+    auto progress_pct = [&]() -> int {
+        if (tasks.empty()) {
+            return 100;
+        }
+        std::size_t settled = result.ran + result.failed + result.skipped + cancelled;
+        if (settled > tasks.size()) {
+            settled = tasks.size();
+        }
+        return static_cast<int>((settled * 100) / tasks.size());
+    };
     while (cursor < queue.size() || !active.empty()) {
         while (!stop && active.size() < width && cursor < queue.size()) {
             auto i = queue[cursor++];
@@ -5223,6 +5802,7 @@ auto run_plan(Plan &plan, const Run_config &cfg) -> std::expected<Run_result, Er
                 result.tasks[i].state = Task_state::skipped;
                 result.tasks[i].message = "dry run";
                 ++result.skipped;
+                bld::log::i("[{:>3}%] Task '{}': dry run (would execute {:?})", progress_pct(), tasks[i].name, tasks[i].spec.cmd);
                 release(i);
                 continue;
             }
@@ -5231,12 +5811,14 @@ auto run_plan(Plan &plan, const Run_config &cfg) -> std::expected<Run_result, Er
                 result.tasks[i].state = Task_state::failed;
                 result.tasks[i].message = pid.error().msg;
                 ++result.failed;
+                bld::log::e("[{:>3}%] Task '{}': spawn failed: {}", progress_pct(), tasks[i].name, pid.error().msg);
                 if (cfg.failure_policy == Failure_policy::stop) {
                     stop = true;
                 }
                 continue;
             }
             result.tasks[i].state = Task_state::running;
+            bld::log::d("task '{}': spawned {:?}", tasks[i].name, tasks[i].spec.cmd);
             active.push_back(Active{i, *pid, std::chrono::steady_clock::now()});
         }
         if (active.empty()) {
@@ -5244,10 +5826,12 @@ auto run_plan(Plan &plan, const Run_config &cfg) -> std::expected<Run_result, Er
         }
         auto done = group.wait_any();
         if (!done) {
+            bld::log::e("scheduler: wait failed: {}", done.error().msg);
             for (auto &entry : active) {
                 result.tasks[entry.index].state = Task_state::failed;
                 result.tasks[entry.index].message = done.error().msg;
                 ++result.failed;
+                bld::log::e("[{:>3}%] Task '{}' failed: {}", progress_pct(), tasks[entry.index].name, done.error().msg);
                 group.remove(entry.pid);
             }
             active.clear();
@@ -5265,6 +5849,7 @@ auto run_plan(Plan &plan, const Run_config &cfg) -> std::expected<Run_result, Er
             result.tasks[entry.index].state = Task_state::failed;
             result.tasks[entry.index].message = got.error().msg;
             ++result.failed;
+            bld::log::e("[{:>3}%] Task '{}': lost proc: {}", progress_pct(), tasks[entry.index].name, got.error().msg);
             stop = cfg.failure_policy == Failure_policy::stop;
             continue;
         }
@@ -5275,6 +5860,7 @@ auto run_plan(Plan &plan, const Run_config &cfg) -> std::expected<Run_result, Er
             result.tasks[entry.index].state = Task_state::failed;
             result.tasks[entry.index].message = st.error().msg;
             ++result.failed;
+            bld::log::e("[{:>3}%] Task '{}': wait failed: {}", progress_pct(), tasks[entry.index].name, st.error().msg);
             stop = cfg.failure_policy == Failure_policy::stop;
             continue;
         }
@@ -5285,25 +5871,32 @@ auto run_plan(Plan &plan, const Run_config &cfg) -> std::expected<Run_result, Er
             it.state = Task_state::failed;
             it.message = std::format("exited with status {}", st->code);
             ++result.failed;
+            bld::log::e("[{:>3}%] Task '{}' failed: {}", progress_pct(), tasks[entry.index].name, it.message);
             if (cfg.failure_policy == Failure_policy::stop) {
                 stop = true;
             }
         } else {
             it.state = Task_state::succeeded;
             ++result.ran;
+            bld::log::i("[{:>3}%] Task '{}': completed in {}ms.", progress_pct(), tasks[entry.index].name, it.elapsed.count());
             release(entry.index);
         }
     }
-    for (auto &it : result.tasks) {
+    for (std::size_t ci = 0; ci < result.tasks.size(); ++ci) {
+        auto &it = result.tasks[ci];
         if (it.state == Task_state::pending) {
             it.state = Task_state::cancelled;
             it.message = "not scheduled after an earlier failure";
+            ++cancelled;
+            bld::log::w("[{:>3}%] Task '{}': cancelled (not scheduled after an earlier failure)", progress_pct(), tasks[ci].name);
         }
     }
     if (!result.ok()) {
+        bld::log::e("run: {} ran, {} skipped, {} failed", result.ran, result.skipped, result.failed);
         return std::unexpected(
             Err::erc(std::errc::operation_canceled, std::format("{} task(s) failed", result.failed)).with_payload(std::move(result)));
     }
+    bld::log::i("run: {} ran, {} skipped, {} failed", result.ran, result.skipped, result.failed);
     return result;
 }
 } // namespace bld::details

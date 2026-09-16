@@ -60,6 +60,13 @@ bld::log::e("Something failed");
 bld::log::d("verbose detail");          // hidden unless min level is lowered
 bld::log::set_min_level(bld::Logger::Level::dbg);
 bld::log::i(std::cerr, "to a specific stream");
+
+// Indent nested sections (RAII scope restores the level):
+bld::log::i("building app");
+{
+    bld::log::indent_scope nest;
+    bld::log::i("compiling foo.cpp");   // INFO:   compiling foo.cpp
+}
 ```
 
 ### Running commands
@@ -94,6 +101,10 @@ if (auto log = bld::Owned_Fd::open("build.log", bld::Open_mode::write)) {
 std::string out, err, merged;
 bld::run(gcc, bld::out_str{out}, bld::err_str{err});
 bld::run(gcc, bld::out_err_str{merged});
+
+// dry_run: log-only preview, spawns nothing (also on capture(),
+// per-Task, and batch runs — reported as success / "dry run" skips):
+bld::run(gcc, bld::dry_run{});
 ```
 
 ### Capturing output
@@ -111,6 +122,9 @@ bld::capture(bld::Cmd{"dir"});
 
 // ...except when you pass raw_crlf{} to keep the bytes as-is:
 bld::capture(bld::Cmd{"dir"}, bld::raw_crlf{});
+
+// dry_run: logs what would run, spawns nothing, returns empty success:
+bld::capture(bld::Cmd{"git", "status"}, bld::dry_run{});
 ```
 
 ### Incremental dependency plan
@@ -126,7 +140,7 @@ build.needs("main", "main.o");
 build.produces("main", "main");
 
 // The second task depends on main.o because it declares main.o as an input.
-auto result = bld::run(build, bld::use_threads{8});
+auto result = bld::run(build, bld::jobs{8});
 ```
 
 ### Config
@@ -172,14 +186,15 @@ std::vector<bld::Task> tasks;
 tasks.emplace_back(bld::Cmd{"g++", "-c", "a.cpp", "-o", "a.o"});
 tasks.emplace_back(bld::Cmd{"g++", "-c", "b.cpp", "-o", "b.o"});
 
-// Threads schedule tasks, async cap limits live procs (both via Proc_group).
-// use_threads{nullopt} => max-1; <=0 => max+i; >0 => capped by max.
-// max_async{0} => follow threads; >0 => absolute proc cap.
-auto res = bld::run(tasks, bld::use_threads{4}, bld::max_async{8});
+// Single-threaded scheduler: up to <width> child processes live at once.
+// jobs{nullopt} => max-1; <=0 => max+i; >0 => capped by max.
+// max_async{0} => follow jobs width; >0 => absolute proc cap.
+// (`use_threads` is a deprecated alias of `jobs`.)
+auto res = bld::run(tasks, bld::jobs{4}, bld::max_async{8});
 
 // Export explicitly marked compile_command() tasks, or execute an existing database directly.
 bld::run(build, bld::write_compile_commands{"compile_commands.json"});
-bld::run(bld::compile_commands("build/compile_commands.json"), bld::use_threads{8});
+bld::run(bld::compile_commands("build/compile_commands.json"), bld::jobs{8});
 
 // span<Task> runs all by default; add deduce_dependency to build a DAG
 // from Task.inputs/outputs/after. Plan always uses its own graph.
@@ -189,7 +204,7 @@ std::vector<bld::Task> chain{std::move(a), std::move(b)};
 bld::run(chain, bld::deduce_dependency{});
 ```
 
-Wrong configs fail fast: duplicates (`label` twice, `use_threads` twice) are
+Wrong configs fail fast: duplicates (`label` twice, `jobs` twice) are
 compile errors; bad combinations (deps without `deduce_dependency`,
 `deduce_dependency` with a `Plan`, empty commands, cycles, self-deps, missing
 `cwd`) are runtime `Err`s naming the culprit.
@@ -222,6 +237,7 @@ g++ -std=c++23 -I. examples/hello.cpp -o hello
 | `examples/config.cpp` | Options, types, choices, `--help`, proxy reads |
 | `examples/tasks.cpp` | Parallel task batches, failure handling |
 | `examples/build_system.cpp` | A small real incremental build of several files |
+| `examples/elegant.cpp` | The showcase: self-rebuilding script, options, indented logs, parallel incremental plan, capture — start here |
 
 ## TODO
 

@@ -56,7 +56,7 @@ int main(int argc, char *argv[])
     build.needs_from("app", {"demo_build/main.o", "demo_build/util.o"});
     build.produces("app", "demo_build/app");
 
-    if (auto res = bld::run(build, bld::use_threads{4}, bld::write_compile_commands{"demo_build/compile_commands.json"}); !res) {
+    if (auto res = bld::run(build, bld::jobs{4}, bld::write_compile_commands{"demo_build/compile_commands.json"}); !res) {
         bld::log::e("build failed: {}", res.error());
         return EXIT_FAILURE;
     }
