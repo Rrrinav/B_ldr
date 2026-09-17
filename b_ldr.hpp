@@ -1394,8 +1394,8 @@ public:
         std::vector<std::string> choices{};
     };
 
-    std::unordered_map<std::string_view, value_type> data{};
-    std::flat_map<std::string_view, Option> options{};
+    std::unordered_map<std::string, value_type> data{};
+    std::flat_map<std::string, Option> options{};
 
     static auto get() -> Config &;
     Config(const Config &) = delete;
@@ -1409,7 +1409,7 @@ public:
     struct Proxy
     {
         const Config *cfg;
-        std::string_view key;
+        std::string key;
 
         operator bool() const;
         operator std::string() const;
@@ -1418,6 +1418,9 @@ public:
         operator std::vector<std::string>() const;
     };
     auto operator[](std::string_view key) const -> Proxy;
+
+    /// Strips leading '-' characters so "jobs", "-jobs", "--jobs" are one key.
+    static auto normalize_key(std::string_view key) -> std::string;
 
     /// Result of parse(). When help_requested is true, the caller should exit with EXIT_SUCCESS.
     struct Parse_outcome
@@ -1438,10 +1441,10 @@ private:
 } // namespace bld
 
 template <>
-struct std::formatter<std::unordered_map<std::string_view, bld::Config::value_type>>
+struct std::formatter<std::unordered_map<std::string, bld::Config::value_type>>
 {
     constexpr auto parse(std::format_parse_context &ctx) -> std::format_parse_context::iterator;
-    auto format(const std::unordered_map<std::string_view, bld::Config::value_type> &m, std::format_context &ctx) const
+    auto format(const std::unordered_map<std::string, bld::Config::value_type> &m, std::format_context &ctx) const
         -> std::format_context::iterator;
 };
 
@@ -1646,6 +1649,11 @@ template <detail::Valid_visitor V>
 [[nodiscard]] auto is_file(std::string_view path) noexcept -> bool;
 [[nodiscard]] auto is_symlink(std::string_view path) noexcept -> bool;
 [[nodiscard]] auto is_empty(std::string_view path) noexcept -> std::expected<bool, bld::Err>;
+
+// True when both paths resolve to the same file or directory, regardless of
+// spelling (relative vs absolute, "./x" vs "x", symlinks, hard links).
+// Missing/unresolvable paths report false, never throw.
+[[nodiscard]] auto same_file(std::string_view a, std::string_view b) noexcept -> bool;
 
 template <typename... Paths>
     requires(std::convertible_to<Paths, std::string_view> && ...)
@@ -2054,7 +2062,7 @@ constexpr auto formatter<bld::Proc>::parse(format_parse_context &ctx) -> format_
     return it;
 }
 
-constexpr auto formatter<unordered_map<string_view, bld::Config::value_type>>::parse(format_parse_context &ctx) -> format_parse_context::iterator
+constexpr auto formatter<unordered_map<string, bld::Config::value_type>>::parse(format_parse_context &ctx) -> format_parse_context::iterator
 {
     auto it = ctx.begin();
     return it;
@@ -2283,14 +2291,16 @@ auto is_outdated(std::string_view target, const Range &sources) -> bool
 template <typename T>
 auto Config::get_val(std::string_view key) const -> std::expected<T, bld::Err>
 {
-    auto it = data.find(key);
+    std::string nkey = Config::normalize_key(key);
+    auto it = data.find(nkey);
     if (it == data.end()) {
-        return std::unexpected(bld::Err::erc(std::errc::invalid_argument, std::format("Configuration key '{}' not found", key)));
+        return std::unexpected(bld::Err::erc(std::errc::invalid_argument, std::format("Configuration key '{}' not found", nkey)));
     }
     if (auto *p = std::get_if<T>(&it->second)) {
         return *p;
     }
-    return std::unexpected(bld::Err::erc(std::errc::invalid_argument, std::format("Configuration key '{}' has mismatched type", key)));
+    return std::unexpected(
+        bld::Err::erc(std::errc::invalid_argument, std::format("Configuration key '{}' has mismatched type", nkey)));
 }
 
 } // namespace bld
@@ -5745,6 +5755,15 @@ auto run_plan(Plan &plan, const Run_config &cfg) -> std::expected<Run_result, Er
 } // namespace bld::details
 
 // IMPL SECTION 06 — Config (bld::Config)
+auto bld::Config::normalize_key(std::string_view key) -> std::string
+{
+    std::size_t i = 0;
+    while (i < key.size() && key[i] == '-') {
+        ++i;
+    }
+    return std::string{key.substr(i)};
+}
+
 auto bld::Config::get() -> Config &
 {
     static Config instance;
@@ -5753,13 +5772,56 @@ auto bld::Config::get() -> Config &
 
 auto bld::Config::operator[](std::string_view key) const -> Proxy
 {
-    return Proxy{this, key};
+    return Proxy{this, normalize_key(key)};
 }
 
 auto bld::Config::add_option(std::string_view flag, val_t type, std::string_view desc, value_type def, std::vector<std::string> valid_choices)
     -> Config &
 {
-    options[flag] = Option{type, std::string(desc), std::move(def), std::move(valid_choices)};
+    std::string nkey = normalize_key(flag);
+    // Coerce a mismatched default (e.g. omitted def defaults to bool false)
+    // into a sensible default for the declared type instead of storing a
+    // value that later reads would reject as a type mismatch.
+    bool matches = false;
+    switch (type) {
+    case Bool:
+        matches = std::holds_alternative<bool>(def);
+        break;
+    case Int:
+        matches = std::holds_alternative<int>(def);
+        break;
+    case Double:
+        matches = std::holds_alternative<double>(def);
+        break;
+    case String:
+        matches = std::holds_alternative<std::string>(def);
+        break;
+    case String_arr:
+        matches = std::holds_alternative<std::vector<std::string>>(def);
+        break;
+    }
+    if (!matches) {
+        switch (type) {
+        case Bool:
+            def = false;
+            break;
+        case Int:
+            def = 0;
+            break;
+        case Double:
+            def = 0.0;
+            break;
+        case String:
+            def = std::string{};
+            break;
+        case String_arr:
+            def = std::vector<std::string>{};
+            break;
+        }
+        bld::log::w("Config: default for option '{}' mismatched declared type; using type default.", nkey);
+    }
+    options[nkey] = Option{type, std::string(desc), std::move(def), std::move(valid_choices)};
+    bld::log::d("Config: registered option '{}'.", nkey);
     return *this;
 }
 
@@ -5782,16 +5844,81 @@ namespace bld::details {
     }
     return "unknown";
 }
+
+// Trims ASCII whitespace (used for numeric/bool CLI values).
+[[nodiscard]] inline auto config_trim(std::string_view s) noexcept -> std::string_view
+{
+    std::size_t b = 0;
+    while (b < s.size() && (s[b] == ' ' || s[b] == '\t' || s[b] == '\n' || s[b] == '\r' || s[b] == '\f' || s[b] == '\v')) {
+        ++b;
+    }
+    std::size_t e = s.size();
+    while (e > b && (s[e - 1] == ' ' || s[e - 1] == '\t' || s[e - 1] == '\n' || s[e - 1] == '\r' || s[e - 1] == '\f' || s[e - 1] == '\v')) {
+        --e;
+    }
+    return s.substr(b, e - b);
+}
+
+// Case-insensitive bool parsing: true/1/yes/y <-> false/0/no/n.
+[[nodiscard]] inline auto config_parse_bool(std::string_view s) -> std::optional<bool>
+{
+    auto t = config_trim(s);
+    // Lowercase into a small buffer (bool words are short).
+    char buf[8]{};
+    if (t.size() >= sizeof(buf)) {
+        return std::nullopt;
+    }
+    for (std::size_t i = 0; i < t.size(); ++i) {
+        char c = t[i];
+        buf[i] = static_cast<char>(c >= 'A' && c <= 'Z' ? c - 'A' + 'a' : c);
+    }
+    std::string_view l{buf, t.size()};
+    if (l == "true" || l == "1" || l == "yes" || l == "y") {
+        return true;
+    }
+    if (l == "false" || l == "0" || l == "no" || l == "n") {
+        return false;
+    }
+    return std::nullopt;
+}
+
+// True when `s` looks like a number (allows leading -/+, digits, '.') so a
+// space-separated value like "-5" isn't mistaken for a flag.
+[[nodiscard]] inline auto config_looks_like_number(std::string_view s) noexcept -> bool
+{
+    auto t = config_trim(s);
+    if (t.empty()) {
+        return false;
+    }
+    std::size_t i = 0;
+    if (t[0] == '-' || t[0] == '+') {
+        i = 1;
+    }
+    bool any_digit = false;
+    bool any_dot = false;
+    for (; i < t.size(); ++i) {
+        char c = t[i];
+        if (c >= '0' && c <= '9') {
+            any_digit = true;
+        } else if (c == '.' && !any_dot) {
+            any_dot = true;
+        } else {
+            return false;
+        }
+    }
+    return any_digit;
+}
 } // namespace bld::details
 
 auto bld::Config::print_help(std::string_view prog_name, std::string_view specific_opt) const -> void
 {
     std::string help_text;
+    std::string nspec = specific_opt.empty() ? std::string{} : normalize_key(specific_opt);
 
-    if (!specific_opt.empty() && options.contains(specific_opt)) {
-        const auto &opt = options.at(specific_opt);
+    if (!nspec.empty() && options.find(nspec) != options.end()) {
+        const auto &opt = options.at(nspec);
         std::string_view type_str = bld::details::config_type_name(opt.type);
-        std::format_to(std::back_inserter(help_text), "Option: {}\n", specific_opt);
+        std::format_to(std::back_inserter(help_text), "Option: {}\n", nspec);
         std::format_to(std::back_inserter(help_text), "  Type: {}\n", type_str);
         std::format_to(std::back_inserter(help_text), "  Desc: {}", opt.description);
         if (!opt.choices.empty()) {
@@ -5803,7 +5930,7 @@ auto bld::Config::print_help(std::string_view prog_name, std::string_view specif
     }
 
     if (!specific_opt.empty()) {
-        bld::log::w("Option '{}' is not registered. Showing general help.", specific_opt);
+        bld::log::w("Option '{}' is not registered. Showing general help.", nspec.empty() ? specific_opt : nspec);
     }
 
     std::format_to(std::back_inserter(help_text), "Usage: {} [options]\nOptions:", prog_name);
@@ -5820,6 +5947,12 @@ auto bld::Config::print_help(std::string_view prog_name, std::string_view specif
             def_str = std::format("{}", *p);
         } else if (auto *p = std::get_if<std::string>(&opt.default_val); p) {
             def_str = std::format("\"{}\"", *p);
+        } else if (auto *p = std::get_if<std::vector<std::string>>(&opt.default_val); p) {
+            if (p->empty()) {
+                def_str = "[]";
+            } else {
+                def_str = std::format("[{}]", bld::str::join(*p, ", "));
+            }
         }
 
         std::format_to(std::back_inserter(help_text), "\n  {:<15} [{:<8}] : {}", flag, type_str, opt.description);
@@ -5837,101 +5970,188 @@ auto bld::Config::print_help(std::string_view prog_name, std::string_view specif
 
 auto bld::Config::parse(int argc, char *argv[]) -> std::expected<Parse_outcome, bld::Err>
 {
-    std::span<char *> args{argv, static_cast<std::size_t>(argc)};
-    std::string_view prog_name = args.empty() ? "bld" : args[0];
+    if (argc < 0) {
+        return std::unexpected(bld::Err::erc(std::errc::invalid_argument, "Config::parse received negative argc"));
+    }
+    std::size_t nargs = argc <= 0 ? 0 : static_cast<std::size_t>(argc);
+    std::span<char *> args{argv, nargs};
+    std::string_view prog_name = args.empty() || args[0] == nullptr ? "bld" : std::string_view{args[0]};
 
-    for (auto i{1uz}; i < static_cast<std::size_t>(argc); ++i) {
-        std::string_view curr = args[i];
-        if (curr == "-h" || curr == "--help") {
-            std::string_view specific = "";
-            if (i > 1 && args[i - 1][0] != '-') {
-                specific = args[i - 1];
-            } else if (i + 1 < args.size() && args[i + 1][0] != '-') {
-                specific = args[i + 1];
+    auto arg_view = [&](std::size_t i) -> std::string_view {
+        return args[i] == nullptr ? std::string_view{} : std::string_view{args[i]};
+    };
+
+    // Help detection first (never errors): -h/--help/help, with optional
+    // `=opt` or trailing/leading option name for focused help.
+    for (std::size_t i = 1; i < nargs; ++i) {
+        std::string_view curr = arg_view(i);
+        auto eq = curr.find('=');
+        std::string_view head = eq == std::string_view::npos ? curr : curr.substr(0, eq);
+        std::string nhead = normalize_key(head);
+        if (nhead == "h" || nhead == "help") {
+            std::string specific;
+            if (eq != std::string_view::npos) {
+                specific = normalize_key(curr.substr(eq + 1));
+            } else if (i + 1 < nargs) {
+                std::string_view nxt = arg_view(i + 1);
+                if (!nxt.empty() && nxt[0] != '-') {
+                    specific = normalize_key(nxt);
+                }
+            }
+            if (specific.empty() && i > 1) {
+                std::string_view prv = arg_view(i - 1);
+                if (!prv.empty() && prv[0] != '-' && prv.find('=') == std::string_view::npos) {
+                    std::string cand = normalize_key(prv);
+                    if (options.find(cand) != options.end()) {
+                        specific = std::move(cand);
+                    }
+                }
             }
             print_help(prog_name, specific);
+            bld::log::d("Config: help requested (specific='{}').", specific);
             return Parse_outcome{.help_requested = true};
         }
     }
 
+    data.clear();
     for (const auto &[flag, opt] : options) {
         data[flag] = opt.default_val;
     }
-
-    for (auto i{1uz}; i < static_cast<std::size_t>(argc); ++i) {
-        std::string_view curr = args[i];
-        auto eq_idx = curr.find_first_of('=');
-
-        if (eq_idx == std::string_view::npos) {
-            data[curr] = true;
-            continue;
-        }
-
-        std::string_view key = curr.substr(0, eq_idx);
-        std::string_view val = curr.substr(eq_idx + 1);
-
-        if (options.contains(key)) {
-            val_t expected_type = options[key].type;
-
-            // Shared integer/double parsing (differ only in type + message noun).
-            auto assign_num = [&]<typename T>(std::string_view article_noun) -> std::expected<void, bld::Err> {
-                T v{};
-                auto [p, ec] = std::from_chars(val.data(), val.data() + val.size(), v);
-                if (ec == std::errc{} && p == val.data() + val.size()) {
-                    data[key] = v;
-                    return {};
-                }
-                return std::unexpected(
-                    bld::Err::erc(std::errc::invalid_argument, std::format("Option '{}' expects {}, got '{}'", key, article_noun, val)));
-            };
-
-            if (expected_type == Bool) {
-                data[key] = (val == "true" || val == "1");
-            } else if (expected_type == Int) {
-                if (auto r = assign_num.template operator()<int>("an integer"); !r) {
-                    return std::unexpected(std::move(r.error()));
-                }
-            } else if (expected_type == Double) {
-                if (auto r = assign_num.template operator()<double>("a double"); !r) {
-                    return std::unexpected(std::move(r.error()));
-                }
-            } else if (expected_type == String) {
-                std::string string_val(val);
-                if (!options[key].choices.empty()) {
-                    auto &ch = options[key].choices;
-                    if (std::find(ch.begin(), ch.end(), string_val) == ch.end()) {
-                        return std::unexpected(
-                            bld::Err::erc(std::errc::invalid_argument, std::format("Invalid choice '{}' for option '{}'.", string_val, key)));
-                    }
-                }
-                data[key] = std::move(string_val);
-            } else if (expected_type == String_arr) {
-                if (!std::holds_alternative<std::vector<std::string>>(data[key])) {
-                    data[key] = std::vector<std::string>{};
-                }
-                std::get<std::vector<std::string>>(data[key]).push_back(std::string(val));
+    // Reset accumulated String_arr defaults so repeated parses don't append
+    // to leftovers (data was just rebuilt from defaults, but be explicit).
+    for (const auto &[flag, opt] : options) {
+        if (opt.type == String_arr) {
+            data[flag] = std::vector<std::string>{};
+            if (auto *p = std::get_if<std::vector<std::string>>(&opt.default_val); p && !p->empty()) {
+                data[flag] = *p;
             }
-            continue;
         }
+    }
 
-        auto try_num = [&]<typename T>() -> std::optional<T> {
+    auto assign_typed = [&](const std::string &nkey, std::string_view val) -> std::expected<void, bld::Err> {
+        auto oit = options.find(nkey);
+        if (oit == options.end()) {
+            return std::unexpected(
+                bld::Err::erc(std::errc::invalid_argument, std::format("Unknown option '{}'.", nkey)));
+        }
+        val_t expected_type = oit->second.type;
+
+        auto assign_num = [&]<typename T>(std::string_view noun) -> std::expected<void, bld::Err> {
+            std::string_view t = bld::details::config_trim(val);
             T v{};
-            auto [p, ec] = std::from_chars(val.data(), val.data() + val.size(), v);
-            if (ec == std::errc{} && p == val.data() + val.size()) {
-                return v;
+            auto [p, ec] = std::from_chars(t.data(), t.data() + t.size(), v);
+            if (ec == std::errc{} && p == t.data() + t.size()) {
+                data[nkey] = v;
+                bld::log::d("Config: '{}' = {} ({}).", nkey, val, noun);
+                return {};
             }
-            return std::nullopt;
+            return std::unexpected(
+                bld::Err::erc(std::errc::invalid_argument, std::format("Option '{}' expects {}, got '{}'", nkey, noun, val)));
         };
-        if (auto v = try_num.template operator()<int>()) {
-            data[key] = *v;
+
+        if (expected_type == Bool) {
+            if (auto b = bld::details::config_parse_bool(val)) {
+                data[nkey] = *b;
+                bld::log::d("Config: '{}' = {}.", nkey, *b ? "true" : "false");
+                return {};
+            }
+            return std::unexpected(
+                bld::Err::erc(std::errc::invalid_argument, std::format("Option '{}' expects a bool, got '{}'", nkey, val)));
+        } else if (expected_type == Int) {
+            return assign_num.template operator()<int>("an integer");
+        } else if (expected_type == Double) {
+            return assign_num.template operator()<double>("a double");
+        } else if (expected_type == String) {
+            std::string sval(val);
+            if (!oit->second.choices.empty()) {
+                const auto &ch = oit->second.choices;
+                if (std::find(ch.begin(), ch.end(), sval) == ch.end()) {
+                    return std::unexpected(
+                        bld::Err::erc(std::errc::invalid_argument, std::format("Invalid choice '{}' for option '{}'.", sval, nkey)));
+                }
+            }
+            data[nkey] = sval;
+            bld::log::d("Config: '{}' = '{}'.", nkey, sval);
+            return {};
+        } else if (expected_type == String_arr) {
+            if (!std::holds_alternative<std::vector<std::string>>(data[nkey])) {
+                data[nkey] = std::vector<std::string>{};
+            }
+            std::get<std::vector<std::string>>(data[nkey]).push_back(std::string(val));
+            bld::log::d("Config: '{}' += '{}'.", nkey, val);
+            return {};
+        }
+        return std::unexpected(bld::Err::erc(std::errc::invalid_argument, std::format("Option '{}' has unknown type", nkey)));
+    };
+
+    for (std::size_t i = 1; i < nargs; ++i) {
+        std::string_view curr = arg_view(i);
+        if (curr.empty()) {
             continue;
         }
-        if (auto v = try_num.template operator()<double>()) {
-            data[key] = *v;
+        if (curr == "--") {
+            continue;
+        }
+        auto eq_idx = curr.find('=');
+
+        if (eq_idx != std::string_view::npos) {
+            std::string nkey = normalize_key(curr.substr(0, eq_idx));
+            std::string_view val = curr.substr(eq_idx + 1);
+            if (nkey.empty()) {
+                return std::unexpected(bld::Err::erc(std::errc::invalid_argument, std::format("Malformed option '{}'.", curr)));
+            }
+            if (options.find(nkey) == options.end()) {
+                return std::unexpected(bld::Err::erc(std::errc::invalid_argument, std::format("Unknown option '{}'.", nkey)));
+            }
+            if (auto r = assign_typed(nkey, val); !r) {
+                return std::unexpected(std::move(r.error()));
+            }
             continue;
         }
 
-        data[key] = std::string(val);
+        // No '=': either a bare bool flag or `key value` for value options.
+        std::string nkey = normalize_key(curr);
+        if (nkey.empty()) {
+            return std::unexpected(bld::Err::erc(std::errc::invalid_argument, std::format("Malformed option '{}'.", curr)));
+        }
+        auto oit = options.find(nkey);
+        if (oit == options.end()) {
+            return std::unexpected(bld::Err::erc(std::errc::invalid_argument, std::format("Unknown option '{}'.", nkey)));
+        }
+        if (oit->second.type == Bool) {
+            data[nkey] = true;
+            bld::log::d("Config: '{}' = true.", nkey);
+            continue;
+        }
+        // Value option with space-separated value: `jobs 8`, `--mode release`.
+        if (i + 1 >= nargs) {
+            return std::unexpected(
+                bld::Err::erc(std::errc::invalid_argument, std::format("Option '{}' expects a value, got nothing.", nkey)));
+        }
+        std::string_view nxt = arg_view(i + 1);
+        bool nxt_is_flag = false;
+        if (!nxt.empty() && nxt[0] == '-') {
+            // A leading '-' still counts as a value when it parses as a
+            // number (e.g. `jobs -5`); otherwise it is the next flag.
+            auto neq = nxt.find('=');
+            std::string_view nhead = neq == std::string_view::npos ? nxt : nxt.substr(0, neq);
+            std::string nn = normalize_key(nhead);
+            if (nn == "h" || nn == "help") {
+                nxt_is_flag = true;
+            } else if (options.find(nn) != options.end()) {
+                nxt_is_flag = true;
+            } else if (!bld::details::config_looks_like_number(nxt)) {
+                nxt_is_flag = true;
+            }
+        }
+        if (nxt_is_flag) {
+            return std::unexpected(
+                bld::Err::erc(std::errc::invalid_argument, std::format("Option '{}' expects a value, got '{}'.", nkey, nxt)));
+        }
+        ++i;
+        if (auto r = assign_typed(nkey, nxt); !r) {
+            return std::unexpected(std::move(r.error()));
+        }
     }
 
     return Parse_outcome{};
@@ -5939,35 +6159,20 @@ auto bld::Config::parse(int argc, char *argv[]) -> std::expected<Parse_outcome, 
 
 bld::Config::Proxy::operator bool() const
 {
-    auto it = cfg->data.find(key);
-    if (it == cfg->data.end()) {
-        return false;
+    if (auto res = cfg->get_val<bool>(key)) {
+        return *res;
+    } else {
+        throw std::runtime_error(std::format("Config error: {}", res.error().msg));
     }
-    if (auto *b = std::get_if<bool>(&it->second)) {
-        return *b;
-    }
-    return true;
 }
 
 bld::Config::Proxy::operator std::string() const
 {
-    auto it = cfg->data.find(key);
-    if (it == cfg->data.end()) {
-        throw std::runtime_error(std::format("Config error: '{}' not found", key));
+    if (auto res = cfg->get_val<std::string>(key)) {
+        return *res;
+    } else {
+        throw std::runtime_error(std::format("Config error: {}", res.error().msg));
     }
-    if (auto *p = std::get_if<std::string>(&it->second)) {
-        return *p;
-    }
-    if (auto *p = std::get_if<int>(&it->second)) {
-        return std::to_string(*p);
-    }
-    if (auto *p = std::get_if<double>(&it->second)) {
-        return std::to_string(*p);
-    }
-    if (auto *p = std::get_if<bool>(&it->second)) {
-        return *p ? "true" : "false";
-    }
-    throw std::runtime_error(std::format("Config error: Type mismatch for '{}'", key));
 }
 
 bld::Config::Proxy::operator int() const
@@ -5997,8 +6202,8 @@ bld::Config::Proxy::operator std::vector<std::string>() const
     }
 }
 
-auto std::formatter<std::unordered_map<std::string_view, bld::Config::value_type>>::format(
-    const std::unordered_map<std::string_view, bld::Config::value_type> &m, std::format_context &ctx) const -> std::format_context::iterator
+auto std::formatter<std::unordered_map<std::string, bld::Config::value_type>>::format(
+    const std::unordered_map<std::string, bld::Config::value_type> &m, std::format_context &ctx) const -> std::format_context::iterator
 {
     auto out = ctx.out();
     for (const auto &[k, v] : m) {
@@ -6210,12 +6415,14 @@ auto bld::fs::make_dir_if_not_exists(std::string_view path, bool create_parents,
     const bool created = create_parents ? fs::create_directories(fs::path{path}, ec) : fs::create_directory(fs::path{path}, ec);
 
     if (ec) {
-        bld::log::w("Error while creating the dir: {}", ec.message());
+        bld::log::w("fs: make_dir_if_not_exists('{}') failed: {}", path, ec.message());
         return false;
     }
 
     if (created) {
-        bld::log::i("Created new dir: {}", path);
+        bld::log::i("fs: created dir '{}'.", path);
+    } else {
+        bld::log::d("fs: dir '{}' already exists.", path);
     }
 
     return created;
@@ -6257,11 +6464,18 @@ inline auto write_content(std::string_view path, std::string_view content, std::
     try {
         std::ofstream file(std::filesystem::path(path), std::ios::out | std::ios::binary | mode);
         if (!file) {
+            bld::log::e("fs: failed to open file for {}: '{}'.", verb, path);
             return std::unexpected(bld::Err::erc(std::errc::io_error, std::format("Failed to open file for {}: '{}'", verb, path)));
         }
         file.write(content.data(), static_cast<std::streamsize>(content.size()));
+        if (!file) {
+            bld::log::e("fs: failed to write {} bytes while {} '{}'.", content.size(), verb, path);
+            return std::unexpected(bld::Err::erc(std::errc::io_error, std::format("Failed to write file '{}'", path)));
+        }
+        bld::log::i("fs: wrote {} byte(s) to '{}' ({}).", content.size(), path, verb);
         return {};
     } catch (const std::exception &e) {
+        bld::log::e("fs: failed {} '{}': {}.", verb, path, e.what());
         return std::unexpected(bld::Err::erc(std::errc::io_error, e.what()));
     }
 }
@@ -6594,6 +6808,12 @@ auto is_symlink(std::string_view path) noexcept -> bool
     return std::filesystem::is_symlink(std::filesystem::path{path}, ec);
 }
 
+auto same_file(std::string_view a, std::string_view b) noexcept -> bool
+{
+    std::error_code ec;
+    return std::filesystem::equivalent(std::filesystem::path{a}, std::filesystem::path{b}, ec);
+}
+
 auto is_empty(std::string_view path) noexcept -> std::expected<bool, bld::Err>
 {
     return detail::wrap_value(
@@ -6621,38 +6841,62 @@ auto last_write_time(std::string_view path) noexcept -> std::expected<std::files
 auto copy_file(std::string_view from, std::string_view to, bool overwrite) noexcept -> std::expected<void, bld::Err>
 {
     auto options = overwrite ? std::filesystem::copy_options::overwrite_existing : std::filesystem::copy_options::none;
-    return detail::wrap_void(
+    auto r = detail::wrap_void(
         [&](std::error_code &ec) { std::filesystem::copy_file(std::filesystem::path{from}, std::filesystem::path{to}, options, ec); },
         "Failed to copy file from '{}' to '{}'",
         from,
         to);
+    if (!r) {
+        bld::log::e("fs: copy_file('{}' -> '{}') failed: {}.", from, to, r.error().msg);
+    } else {
+        bld::log::i("fs: copied '{}' -> '{}'{}.", from, to, overwrite ? " (overwrite)" : "");
+    }
+    return r;
 }
 
 auto rename(std::string_view from, std::string_view to) noexcept -> std::expected<void, bld::Err>
 {
-    return detail::wrap_void(
+    auto r = detail::wrap_void(
         [&](std::error_code &ec) { std::filesystem::rename(std::filesystem::path{from}, std::filesystem::path{to}, ec); },
         "Failed to rename '{}' to '{}'",
         from,
         to);
+    if (!r) {
+        bld::log::e("fs: rename('{}' -> '{}') failed: {}.", from, to, r.error().msg);
+    } else {
+        bld::log::i("fs: renamed '{}' -> '{}'.", from, to);
+    }
+    return r;
 }
 
 auto create_symlink(std::string_view target, std::string_view link) noexcept -> std::expected<void, bld::Err>
 {
-    return detail::wrap_void(
+    auto r = detail::wrap_void(
         [&](std::error_code &ec) { std::filesystem::create_symlink(std::filesystem::path{target}, std::filesystem::path{link}, ec); },
         "Failed to create symlink at '{}'",
         link);
+    if (!r) {
+        bld::log::e("fs: create_symlink('{}' -> '{}') failed: {}.", target, link, r.error().msg);
+    } else {
+        bld::log::i("fs: created symlink '{}' -> '{}'.", link, target);
+    }
+    return r;
 }
 
 auto create_hard_link(std::string_view target, std::string_view link) noexcept -> std::expected<void, bld::Err>
 {
-    return detail::wrap_void(
+    auto r = detail::wrap_void(
         [&](std::error_code &ec) {
             std::filesystem::create_hard_link(std::filesystem::path{target}, std::filesystem::path{link}, ec);
         },
         "Failed to create hard link at '{}'",
         link);
+    if (!r) {
+        bld::log::e("fs: create_hard_link('{}' -> '{}') failed: {}.", target, link, r.error().msg);
+    } else {
+        bld::log::i("fs: created hard link '{}' -> '{}'.", link, target);
+    }
+    return r;
 }
 
 auto read_symlink(std::string_view path) noexcept -> std::expected<std::string, bld::Err>
@@ -6679,10 +6923,16 @@ auto current_path() noexcept -> std::expected<std::string, bld::Err>
 
 auto set_current_path(std::string_view path) noexcept -> std::expected<void, bld::Err>
 {
-    return detail::wrap_void(
+    auto r = detail::wrap_void(
         [&](std::error_code &ec) { std::filesystem::current_path(std::filesystem::path{path}, ec); },
         "Failed to set current path to '{}'",
         path);
+    if (!r) {
+        bld::log::e("fs: set_current_path('{}') failed: {}.", path, r.error().msg);
+    } else {
+        bld::log::i("fs: set current path to '{}'.", path);
+    }
+    return r;
 }
 
 auto absolute(std::string_view path) noexcept -> std::expected<std::string, bld::Err>
@@ -6776,12 +7026,21 @@ template <typename... Paths>
 auto remove(Paths &&...paths) noexcept -> std::expected<void, bld::Err>
 {
     std::error_code ec;
-    auto try_remove = [&ec](std::string_view p) -> bool {
+    bool ok = true;
+    std::string failed;
+    auto try_remove = [&](std::string_view p) {
         std::filesystem::remove_all(std::filesystem::path{p}, ec);
-        return !ec;
+        if (ec) {
+            ok = false;
+            failed = std::string{p};
+            bld::log::e("fs: remove('{}') failed: {}.", p, ec.message());
+        } else {
+            bld::log::i("fs: removed '{}'.", p);
+        }
     };
-    if (!(try_remove(std::forward<Paths>(paths)) && ...)) {
-        return std::unexpected(bld::Err{.err = ec, .msg = "Failed to remove one or more paths"});
+    (try_remove(std::string_view{std::forward<Paths>(paths)}), ...);
+    if (!ok) {
+        return std::unexpected(bld::Err{.err = ec, .msg = std::format("Failed to remove '{}'", failed)});
     }
     return {};
 }
@@ -6791,12 +7050,21 @@ template <typename... Paths>
 auto make_dirs(Paths &&...paths) noexcept -> std::expected<void, bld::Err>
 {
     std::error_code ec;
-    auto try_mkdir = [&ec](std::string_view p) -> bool {
+    bool ok = true;
+    std::string failed;
+    auto try_mkdir = [&](std::string_view p) {
         std::filesystem::create_directories(std::filesystem::path{p}, ec);
-        return !ec;
+        if (ec) {
+            ok = false;
+            failed = std::string{p};
+            bld::log::e("fs: make_dirs('{}') failed: {}.", p, ec.message());
+        } else {
+            bld::log::i("fs: make_dirs ensured dir '{}'.", p);
+        }
     };
-    if (!(try_mkdir(std::forward<Paths>(paths)) && ...)) {
-        return std::unexpected(bld::Err{.err = ec, .msg = "Failed to create one or more directories"});
+    (try_mkdir(std::string_view{std::forward<Paths>(paths)}), ...);
+    if (!ok) {
+        return std::unexpected(bld::Err{.err = ec, .msg = std::format("Failed to create directory '{}'", failed)});
     }
     return {};
 }
@@ -7391,6 +7659,7 @@ auto bld::env::set(std::string_view key, std::string_view value, bool overwrite)
 {
     if (key.empty() || key.find('=') != std::string_view::npos || key.find('\0') != std::string_view::npos
         || value.find('\0') != std::string_view::npos) {
+        bld::log::e("env: set failed: invalid key '{}'.", key);
         return std::unexpected(Err::erc(std::errc::invalid_argument, std::format("invalid env key/value: '{}'", key)));
     }
     std::string k{key};
@@ -7398,26 +7667,31 @@ auto bld::env::set(std::string_view key, std::string_view value, bool overwrite)
     std::lock_guard<std::mutex> lk(detail::mtx());
     if (!overwrite) {
         if (std::getenv(k.c_str()) != nullptr) {
+            bld::log::d("env: set('{}') skipped (already set, overwrite=false).", k);
             return {};
         }
     }
 #ifdef _WIN32
     errno_t err = ::_putenv_s(k.c_str(), v.c_str());
     if (err != 0) {
+        bld::log::e("env: set('{}') failed: {}.", k, std::strerror(err));
         return std::unexpected(Err::erno(err, std::format("setenv failed for '{}'", k)));
     }
 #else
     int rc = ::setenv(k.c_str(), v.c_str(), 1);
     if (rc != 0) {
+        bld::log::e("env: set('{}') failed: {}.", k, std::strerror(errno));
         return std::unexpected(Err::erno(errno, std::format("setenv failed for '{}'", k)));
     }
 #endif
+    bld::log::i("env: set '{}'.", k);
     return {};
 }
 
 auto bld::env::unset(std::string_view key) -> std::expected<void, Err>
 {
     if (key.empty() || key.find('=') != std::string_view::npos || key.find('\0') != std::string_view::npos) {
+        bld::log::e("env: unset failed: invalid key '{}'.", key);
         return std::unexpected(Err::erc(std::errc::invalid_argument, std::format("invalid env key: '{}'", key)));
     }
     std::string k{key};
@@ -7426,6 +7700,7 @@ auto bld::env::unset(std::string_view key) -> std::expected<void, Err>
     // _putenv_s with empty value deletes; also try SetEnvironmentVariable for completeness.
     errno_t err = ::_putenv_s(k.c_str(), "");
     if (err != 0) {
+        bld::log::e("env: unset('{}') failed.", k);
         return std::unexpected(Err::erno(err, std::format("unsetenv failed for '{}'", k)));
     }
     // Ensure OS block is cleared too
@@ -7433,9 +7708,11 @@ auto bld::env::unset(std::string_view key) -> std::expected<void, Err>
 #else
     int rc = ::unsetenv(k.c_str());
     if (rc != 0) {
+        bld::log::e("env: unset('{}') failed: {}.", k, std::strerror(errno));
         return std::unexpected(Err::erno(errno, std::format("unsetenv failed for '{}'", k)));
     }
 #endif
+    bld::log::i("env: unset '{}'.", k);
     return {};
 }
 
