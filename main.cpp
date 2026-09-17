@@ -1,76 +1,60 @@
-#include <unistd.h>
-#include <chrono>
-#include <string>
 #define B_LDR_IMPLEMENTATION
-#define BLD_USE_CONFIG
-#include "./b_ldr.hpp"
+#include "b_ldr.hpp"
 
 auto &cfg = bld::Config::get();
 
+using namespace std::string_view_literals;
+
+const std::string TEST_DIR{"./tests/"};
+
+auto run_tests() -> bool
+{
+    bld::log::i("Building test executable");
+    bld::Cmd cmd{"g++", "-o", "test", TEST_DIR + "main.cpp", "-std=c++23", "-I."};
+#ifdef _WIN32
+#ifdef __GNUC__
+    cmd.push("-lstdc++exp");
+#endif
+#endif
+    if (auto res = bld::run(cmd); !res) {
+        return false;
+    } else {
+#ifdef _WIN32
+        if (auto res_run = bld::run(bld::Cmd{"./test.exe"}); !res_run) {
+            bld::log::e("Test script run failed.");
+            return false;
+        }
+#else
+        if (auto res_run = bld::run(bld::Cmd{"./test"}); !res_run) {
+            bld::log::e("Test script run failed.");
+            return false;
+        }
+#endif
+    }
+
+    bld::log::i("Test script ran successfully.");
+    return true;
+}
+
 int main(int argc, char *argv[])
 {
-  BLD_REBUILD_YOURSELF_ONCHANGE();
-  BLD_HANDLE_ARGS();
+    std::ignore = bld::rebuild_this_when_needed_ext(argc, argv);
+    std::ignore = cfg.parse(argc, argv);
 
-  bld::fs::walk_directory(".", [](bld::fs::Walk_fn_opt& opt) -> bool {
-    if (bld::starts_with(opt.path.string(),"./.git")) opt.action = bld::fs::Walk_act::Ignore;
-    if (opt.path.string() == "./build.conf") opt.action = bld::fs::Walk_act::Stop;
-    std::cout << opt.path.string() << std::endl;
-    return true; // required
-  });
+    bld::time::stamp t1{};
 
-  if (cfg["test"])
-  {
-    bld::log(bld::Log_type::INFO, "Building and running tests...");
-
-    std::string test_target = cfg["test"];
-    auto files = bld::fs::get_all_files_with_name(test_target, "main.cpp", true);
-
-    std::string target = "test";
-
-    auto run = [&] (std::string f) -> void {
-      if (!bld::execute({cfg.compiler, "-o", target, f}))
-        bld::logger::e("Execution failed!");
-      if (!bld::execute({"./" + target}))
-        bld::logger::e("Execution failed!");
-
-      bld::fs::remove(target);
-    };
-
-    bld::time::stamp s;
-    for (auto f: files )
-    {
-      s.reset();
-      run(f);
-      auto elapsed = bld::time::since<double, std::chrono::microseconds>(s);
-      bld::logger::i("Test time: {}microseconds", elapsed);
+    if (cfg["test"] || cfg["-test"]) {
+        if (run_tests()) {
+            bld::log::i("Tests executed in {}", bld::time::format(t1.elapsed()));
+            return EXIT_SUCCESS;
+        } else {
+            return EXIT_FAILURE;
+        }
     }
+
+    bld::time::stamp t2{};
+
+    auto d1 = bld::time::since(t1);
+    bld::log::i("Bootstrap sequence took: {}", bld::time::format(d1));
     return 0;
-  }
-
-  bld::Dep_graph graph{};
-
-  bld::Command main_cmd = {"g++", "main2.cpp", "-o", "main2", "foo.o", "bar.o"};
-  bld::Command foo_cmd  = {"g++", "-c", "foo.cpp", "-o", "foo.o"};
-  bld::Command bar_cmd  = {"g++", "-c", "bar.cpp", "-o", "bar.o"};
-
-  // Add dependencies to graph
-  graph.add_dep({"./main", {"./main2.cpp", "./foo.o", "./bar.o"}, main_cmd});
-
-  graph.add_dep({"./foo.o", {"./foo.cpp"}, foo_cmd});
-  graph.add_dep({"./bar.o", {"./bar.cpp"}, bar_cmd});
-
-  bld::time::stamp start;
-  // Build with specified number of parallel jobs
-  if (!graph.build_parallel("./main2"))
-  {
-    bld::log(bld::Log_type::ERR, "Build failed!");
-    return 1;
-  }
-
-  auto elapsed = bld::time::since<double, std::chrono::microseconds>(start);
-  bld::logger::i("Build time: {}ms", elapsed);
-  bld::logger::i("Build completed successfully!");
-
-  return 0;
 }

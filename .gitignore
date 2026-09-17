@@ -3,3 +3,12 @@ main
 hello
 bld
 **/main
+**/main.old
+*.old
+test
+test_fs
+test_str
+demo_build/
+demo_src/
+demo.txt
+demo/

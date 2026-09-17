@@ -1,133 +1,248 @@
 # Builder (bld)
 
-A simple C++ build system that uses C++ as the scripting language thus doesn't need any new tools to be installed.
-Moreover, it is easier because well, it uses C++ as a scripting language.
+A single-header C++ build system. Your build script is a plain C++ program — no new tools,
+no new languages, no new syntax to learn.
 
-Because [Tsoding](github.com/tsoding) said you should write your own build system.
-
+Because [Tsoding](https://github.com/tsoding) said you should write your own build system.
 
 ## Features
 
-- **Command Execution**: Execute system commands and shell commands with ease.
-- **Logging**: Log messages with different severity levels (INFO, WARNING, ERROR).
-- **Process Management**: Wait for processes to complete and handle their exit statuses.
-- **Output Handling**: Capture and read the output of executed commands.
-- **System Metadata**: Print system metadata including OS, compiler, and architecture information.
-
+- **No dependencies**: one header (`b_ldr.hpp`), include it and go.
+- **Commands & processes**: run programs synchronously or asynchronously, route stdin/stdout/stderr
+  to files or pipes, capture output into strings.
+- **Logging**: leveled logging (`DEBUG`/`INFO`/`WARN`/`ERROR`/`FATAL`) with colors, custom sinks.
+- **Incremental builds**: `bld::is_outdated` and `rebuild_this_when_needed` so your build script
+  recompiles itself when it (or the header) changes.
+- **Unified runs**: execute one command, a parallel task set, an incremental dependency plan, or a
+  `compile_commands.json` file through the same `run` scheduler.
+- **Config parsing**: declare options, get a generated `--help`, read values with `cfg["key"]`.
+- **Filesystem + strings + time + diff testing**: batteries included.
+- **Cross-platform**: Linux/macOS (POSIX) and Windows (MSVC, MinGW, clang-cl).
 
 ## Installation
 
-To use `bld` in your project, include the `bld.hpp` header file and define `B_LDR_IMPLEMENTATION` in one of your source files to include the implementation.
+Drop `b_ldr.hpp` into your project. In **exactly one** translation unit:
 
 ```cpp
 #define B_LDR_IMPLEMENTATION
-#include "bld.hpp"
+#include "b_ldr.hpp"
+```
+
+Compile with C++23:
+
+```bash
+g++ -std=c++23 -I. build.cpp -o build
 ```
 
 ## Usage
 
+### Build script skeleton
+
+Every build script should start by recompiling itself when the script (or `b_ldr.hpp`) changes:
+
+```cpp
+int main(int argc, char *argv[])
+{
+    if (auto res = bld::rebuild_this_when_needed_ext(argc, argv, {"-I."}); !res) {
+        bld::log::e("{}", res.error());
+        return EXIT_FAILURE;
+    }
+    // ... do the actual build ...
+}
+```
+
 ### Logging
 
-Log messages with different severity levels:
-
 ```cpp
-bld::log(bld::Log_type::INFO, "This is an info message.");
-bld::log(bld::Log_type::WARNING, "This is a warning message.");
-bld::log(bld::Log_type::ERROR, "This is an error message.");
-```
+bld::log::i("Building {} targets", 42);
+bld::log::w("This looks suspicious");
+bld::log::e("Something failed");
+bld::log::d("verbose detail");          // hidden unless min level is lowered
+bld::log::set_min_level(bld::Logger::Level::dbg);
+bld::log::i(std::cerr, "to a specific stream");
 
-### Command Execution
-
-Create and execute commands:
-
-```cpp
-bld::Command cmd("ls", "-la");
-int result = bld::execute(cmd);
-```
-
-Execute shell commands:
-
-```cpp
-std::string shell_cmd = "echo Hello, World!";
-int result = bld::execute_shell(shell_cmd);
-```
-
-### Process Output
-
-Capture the output of a command:
-
-```cpp
-std::string output;
-bld::Command cmd("ls", "-la");
-bool success = bld::read_process_output(cmd, output);
-```
-
-Capture the output of a shell command:
-
-```cpp
-std::string output;
-std::string shell_cmd = "echo Hello, World!";
-bool success = bld::read_shell_output(shell_cmd, output);
-```
-
-### incremental
-
-```cpp
-int main(int argc, char *argv[])
+// Indent nested sections (RAII scope restores the level):
+bld::log::i("building app");
 {
-  BLD_REBUILD_YOURSELF_ONCHANGE();
-
-  bld::Dep_graph dg;
-
-  dg.add_dep({"main",
-             {"main.cpp", "./foo.o", "./bar.o"},
-             {"g++", "main.cpp", "-o", "main", "foo.o", "bar.o"}});
-
-  dg.add_dep({"./foo.o",
-             {"foo.cpp"},
-             {"g++", "-c", "foo.cpp", "-o", "foo.o"}});
-
-  dg.add_dep({"./bar.o",
-             {"bar.cpp"},
-             {"g++", "-c", "bar.cpp", "-o", "bar.o"}});
-
-  dg.build_all();
-
-  return 0;
+    bld::log::indent_scope nest;
+    bld::log::i("compiling foo.cpp");   // INFO:   compiling foo.cpp
 }
 ```
+
+### Running commands
+
+```cpp
+bld::Cmd gcc{"g++", "-c", "foo.cpp", "-o", "foo.o"};
+
+if (auto proc = bld::run(gcc); proc && proc->status_code() == 0) {
+    // success
+}
+
+// async: the process keeps running; you control when to wait
+auto proc = bld::run(bld::Cmd{"sleep", "5"}, bld::async{});
+auto status = proc->wait();
+
+// redirect output to a file (no shell involved, opened lazily at spawn time)
+bld::run(gcc, bld::lazy_out_file{"build.log"}, bld::lazy_err_file{"build.err"});
+
+// ...or with an already-open fd (eager). out_file opens now and passes its fd:
+bld::run(gcc, bld::out_file{"build.log"}, bld::err_file{"build.err"});
+
+// raw fds also work:
+bld::run(gcc, bld::out_fd{bld::Fd_view{STDOUT_FILENO}});
+
+// one borrowed fd for merged out+err (like out_err_file, but borrowed):
+if (auto log = bld::Owned_Fd::open("build.log", bld::Open_mode::write)) {
+    bld::run(gcc, bld::out_err_fd{*log});
+}
+
+// ...or capture into strings (borrowed, must outlive the wait).
+// Separate by default; only out_err_str merges:
+std::string out, err, merged;
+bld::run(gcc, bld::out_str{out}, bld::err_str{err});
+bld::run(gcc, bld::out_err_str{merged});
+
+// dry_run: log-only preview, spawns nothing (also on capture(),
+// per-Task, and batch runs — reported as success / "dry run" skips):
+bld::run(gcc, bld::dry_run{});
+```
+
+### Capturing output
+
+```cpp
+// Always merged stdout+stderr, returned as a string on exit 0.
+// Non-zero exit becomes an Err with the merged output as std::string payload.
+auto out = bld::capture(bld::Cmd{"git", "status"});
+if (out) { bld::log::i("{}", *out); }
+
+auto merged = bld::capture(bld::Cmd{"clang", "-x", "c++", "-"}, bld::in_str{"int main(){}"});
+
+// Captured output is always normalized: \r\n -> \n (so Windows text matches "\n"-terminated strings)
+bld::capture(bld::Cmd{"dir"});
+
+// ...except when you pass raw_crlf{} to keep the bytes as-is:
+bld::capture(bld::Cmd{"dir"}, bld::raw_crlf{});
+
+// dry_run: logs what would run, spawns nothing, returns empty success:
+bld::capture(bld::Cmd{"git", "status"}, bld::dry_run{});
+```
+
+### Incremental dependency plan
+
+```cpp
+bld::Plan build;
+build.add("main.o", bld::Cmd{"g++", "-c", "main.cpp", "-o", "main.o"});
+build.needs("main.o", "main.cpp");
+build.produces("main.o", "main.o");
+build.mark_compile_command("main.o");
+build.add("main", bld::Cmd{"g++", "main.o", "-o", "main"});
+build.needs("main", "main.o");
+build.produces("main", "main");
+
+// The second task depends on main.o because it declares main.o as an input.
+auto result = bld::run(build, bld::jobs{8});
+```
+
+### Config
+
+```cpp
+auto &cfg = bld::Config::get();
+cfg.add_option("jobs", bld::Config::Int, "number of parallel jobs", 4)
+   .add_option("mode", bld::Config::String, "build mode", std::string{"debug"},
+               {"debug", "release"})
+   .add_option("verbose", bld::Config::Bool, "verbose output", false);
+
+auto res = cfg.parse(argc, argv);           // never exits the program
+if (!res) { bld::log::e("{}", res.error()); return EXIT_FAILURE; }
+if (res->help_requested) return EXIT_SUCCESS;   // --help was printed
+
+int    jobs    = int(cfg["jobs"]);
+bool   verbose = bool(cfg["verbose"]);
+auto   mode    = std::string(cfg["mode"]);  // throws on missing/mismatched key
+```
+
+Run the script with `./build jobs=8 mode=release verbose`.
+
+### Filesystem
+
+```cpp
+bld::fs::write_file("out.txt", "hello");
+bld::fs::append_file("out.txt", " world");
+auto content = bld::fs::read_file("out.txt");   // expected<std::string>
+
+bld::fs::make_dirs("build/obj", "build/bin");
+
+auto srcs = bld::fs::find_by_ext(".", ".cpp");  // expected<vector<string>>
+auto walk = bld::fs::Dir_walker{"src"}
+    .ext({".cpp", ".hpp"})
+    .skip({"build", ".git"})
+    .collect();                                 // expected<vector<Dir_entry>>
+```
+
+### Unified runs and compile databases
+
+```cpp
+std::vector<bld::Task> tasks;
+tasks.emplace_back(bld::Cmd{"g++", "-c", "a.cpp", "-o", "a.o"});
+tasks.emplace_back(bld::Cmd{"g++", "-c", "b.cpp", "-o", "b.o"});
+
+// Single-threaded scheduler: up to <width> child processes live at once.
+// jobs{nullopt} => max-1; <=0 => max+i; >0 => capped by max.
+// max_async{0} => follow jobs width; >0 => absolute proc cap.
+// (`use_threads` is a deprecated alias of `jobs`.)
+auto res = bld::run(tasks, bld::jobs{4}, bld::max_async{8});
+
+// Export explicitly marked compile_command() tasks, or execute an existing database directly.
+bld::run(build, bld::write_compile_commands{"compile_commands.json"});
+bld::run(bld::compile_commands("build/compile_commands.json"), bld::jobs{8});
+
+// span<Task> runs all by default; add deduce_dependency to build a DAG
+// from Task.inputs/outputs/after. Plan always uses its own graph.
+bld::Task a{bld::Cmd{"sh", "-c", "echo a > a.o"}}; a.produces("a.o");
+bld::Task b{bld::Cmd{"sh", "-c", "cat a.o > b"}}; b.needs("a.o");
+std::vector<bld::Task> chain{std::move(a), std::move(b)};
+bld::run(chain, bld::deduce_dependency{});
+```
+
+Wrong configs fail fast: duplicates (`label` twice, `jobs` twice) are
+compile errors; bad combinations (deps without `deduce_dependency`,
+`deduce_dependency` with a `Plan`, empty commands, cycles, self-deps, missing
+`cwd`) are runtime `Err`s naming the culprit.
+`examples/run.cpp` sections 7–8 demo every one.
+
+### Diff / testing
+
+```cpp
+auto diff = bld::test::compute_diff(old_text, new_text);   // Myers diff
+if (!diff.same) {
+    bld::log::i("{}", diff);   // pretty, colored +/- output
+}
+```
+
+## Examples
+
+Each file in `examples/` is a complete, runnable script. Build any of them with:
+
 ```bash
-$ls
-main.cpp foo.cpp foo.hpp bar.cpp bar.hpp
-
+g++ -std=c++23 -I. examples/hello.cpp -o hello
 ```
 
-### File System
-
-Check if an executable is up-to-date with it's file:
-    This specific example tracks it's own executable file.
-
-```cpp
- // Requires arguments for main function
-int main(int argc, char *argv[])
-{
-  // Check if the executable needs to be rebuilt and restart if necessary
-  BLD_REBUILD_YOURSELF_ONCHANGE();
-}
-```
-
-### System Metadata
-
-Print system metadata:
-
-```cpp
-bld::print_metadata();
-```
+| Example | Shows |
+| --- | --- |
+| `examples/hello.cpp` | Minimal script: rebuild helper, logging, running a command |
+| `examples/logging.cpp` | Levels, colors, `set_min_level`, custom streams/logger |
+| `examples/commands.cpp` | Sync/async runs, exit codes, file redirection |
+| `examples/capture.cpp` | Merged capture, stdin injection (`in_str`/`in_fd`/`in_file`/`lazy_in_file`), default CRLF normalization + `raw_crlf{}` opt-out |
+| `examples/files.cpp` | Reading/writing, directories, `Dir_walker`, find helpers |
+| `examples/config.cpp` | Options, types, choices, `--help`, proxy reads |
+| `examples/tasks.cpp` | Parallel task batches, failure handling |
+| `examples/build_system.cpp` | A small real incremental build of several files |
+| `examples/elegant.cpp` | The showcase: self-rebuilding script, options, indented logs, parallel incremental plan, capture — start here |
 
 ## TODO
 
 - [X] Parallel incremental builds
-- [ ] Fully cross-platform functions
+- [ ] Fully cross-platform functions (progress: header + tests compile under MSVC/MinGW)
 
 ## Author
 
