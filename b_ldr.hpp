@@ -1105,7 +1105,7 @@ auto wait_all(std::span<bld::Proc> procs, Ts &&...) -> std::expected<std::size_t
 struct Plan
 {
     std::vector<Task> tasks;
-    // Plan owns the graph — Task is dumb (name + Exec_spec), Plan manages deps
+    // Plan owns the graph — Task carries name + Exec_spec, Plan manages deps
     std::unordered_map<std::string, std::vector<std::string>> task_inputs;
     std::unordered_map<std::string, std::vector<std::string>> task_outputs;
     std::unordered_map<std::string, std::vector<std::string>> task_after;
@@ -5083,11 +5083,11 @@ inline void append_compile_entry(
 }
 auto write_database(std::span<bld::Task> tasks, std::string_view path) -> std::expected<void, bld::Err>
 {
-    // For span<Task> (dumb Task), treat all as compile commands (no is_compile_command flag)
+        // For span<Task> (Task carries no dep info), treat all as compile commands (no is_compile_command flag)
     std::string json{"[\n"};
     bool first = true;
     for (const auto &task : tasks) {
-        // For dumb Task, inputs/outputs are not in Task, so source/output unknown — use name as file if needed
+        // For span<Task>, inputs/outputs are not in Task, so source/output unknown — use name as file if needed
         append_compile_entry(json, first, task.spec.cfg.cwd, task.name, task.spec.cmd.args_, nullptr);
     }
     json += "\n]\n";

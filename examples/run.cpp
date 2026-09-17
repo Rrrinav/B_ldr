@@ -523,10 +523,10 @@ int main()
         {
             std::vector<bld::Task> tasks;
             bld::Task t;
-            t.name = "oops-empty";
+            t.name = "empty-cmd";
             tasks.push_back(std::move(t));
             auto res = bld::run(tasks);
-            expect_err("7c empty cmd", res, "oops-empty");
+            expect_err("7c empty cmd", res, "empty-cmd");
         }
         // 7d. Duplicate task names.
         {

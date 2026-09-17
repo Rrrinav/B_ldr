@@ -1,5 +1,5 @@
 // showcase.cpp — every b_ldr feature in one file
-// Task is dumb (name + Exec_spec), Plan is smart (graph), Proc is running Task
+// Task carries name + Exec_spec, Plan owns the graph, Proc is a running Task
 // g++ -std=c++23 examples/showcase.cpp -o /tmp/showcase && /tmp/showcase
 
 #define B_LDR_IMPLEMENTATION
@@ -56,7 +56,7 @@ int main(int argc, char *argv[]) {
     //    inputs/outputs/after for run(span, deduce_dependency).
     {
         bld::Plan plan;
-        // Task is dumb: only name + spec (cmd+cfg). No inputs/outputs/after in Task.
+        // Task carries only name + spec (cmd+cfg). No inputs/outputs/after in Task.
         bld::Task a; a.name = "a.o"; a.spec.cmd = bld::Cmd{"sh","-c","echo a > demo_build/a.o"};
         bld::Task b; b.name = "b.o"; b.spec.cmd = bld::Cmd{"sh","-c","echo b > demo_build/b.o"};
         bld::Task app; app.name = "app"; app.spec.cmd = bld::Cmd{"sh","-c","cat demo_build/a.o demo_build/b.o > demo_build/app"};

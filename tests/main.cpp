@@ -835,13 +835,13 @@ auto run_tests() -> int
          []() -> std::expected<void, std::string> {
              std::vector<bld::Task> tasks;
              bld::Task t;
-             t.name = "oops-empty";
+              t.name = "empty-cmd";
              tasks.push_back(std::move(t));
              auto report = bld::run(tasks);
              if (report) {
                  return std::unexpected("empty command unexpectedly succeeded");
              }
-             if (report.error().msg.find("oops-empty") == std::string::npos) {
+              if (report.error().msg.find("empty-cmd") == std::string::npos) {
                  return std::unexpected(std::format("error does not name task: '{}'", report.error().msg));
              }
              return {};
@@ -1083,14 +1083,150 @@ auto run_tests() -> int
              if (!written) {
                  return std::unexpected("failed to write compile_commands.json");
              }
-             auto imported = bld::run(bld::compile_commands(database));
-             if (!imported || imported->ran != 1) {
-                 return std::unexpected("compile_commands.json was not executable as a run input");
-             }
-             return {};
-         }},
+              auto imported = bld::run(bld::compile_commands(database));
+              if (!imported || imported->ran != 1) {
+                  return std::unexpected("compile_commands.json was not executable as a run input");
+              }
+              return {};
+          }},
+         {"compile_commands_json_layout",
+          []() -> std::expected<void, std::string> {
+              const std::string database = "test_sandbox/layout.json";
+              bld::Plan plan;
+              plan.add("unit", true_cmd());
+              plan.needs("unit", "unit.cpp");
+              plan.produces("unit", "unit.o");
+              plan.mark_compile_command("unit");
+              plan.add("other", true_cmd());
+              plan.needs("other", "other.cpp");
+              plan.produces("other", "other.o");
+              // NOTE: "other" is deliberately not marked.
+              auto written = bld::run(plan, bld::force{}, bld::write_compile_commands{database});
+              if (!written) {
+                  return std::unexpected("failed to write layout.json");
+              }
+              auto text = bld::fs::read_file(database);
+              if (!text) {
+                  return std::unexpected("could not read layout.json back");
+              }
+              if (text->find("\"file\":\"unit.cpp\"") == std::string::npos) {
+                  return std::unexpected(std::format("missing file field: '{}'", *text));
+              }
+              if (text->find("\"output\":\"unit.o\"") == std::string::npos) {
+                  return std::unexpected(std::format("missing output field: '{}'", *text));
+              }
+              if (text->find("\"directory\":\".\"") == std::string::npos) {
+                  return std::unexpected(std::format("missing directory field: '{}'", *text));
+              }
+              if (text->find("other.cpp") != std::string::npos) {
+                  return std::unexpected("unmarked task leaked into the database");
+              }
+              return {};
+          }},
+         {"compile_commands_real_roundtrip",
+          []() -> std::expected<void, std::string> {
+              if (!bld::capture(bld::Cmd{"g++", "--version"})) {
+                  return {}; // no compiler on PATH; nothing to prove here
+              }
+              if (!bld::fs::write_file("test_sandbox/cc_a.cpp", "int cc_answer() { return 42; }\n")) {
+                  return std::unexpected("could not write cc_a.cpp");
+              }
+              if (!bld::fs::write_file(
+                      "test_sandbox/cc_main.cpp", "int cc_answer();\nint main() { return cc_answer() == 42 ? 0 : 1; }\n")) {
+                  return std::unexpected("could not write cc_main.cpp");
+              }
+              const std::string database = "test_sandbox/cc_roundtrip.json";
+              bld::Plan plan;
+              plan.add("cc-a", bld::Cmd{"g++", "-c", "test_sandbox/cc_a.cpp", "-o", "test_sandbox/cc_a.o"});
+              plan.needs("cc-a", "test_sandbox/cc_a.cpp");
+              plan.produces("cc-a", "test_sandbox/cc_a.o");
+              plan.mark_compile_command("cc-a");
+              plan.add("cc-main", bld::Cmd{"g++", "-c", "test_sandbox/cc_main.cpp", "-o", "test_sandbox/cc_main.o"});
+              plan.needs("cc-main", "test_sandbox/cc_main.cpp");
+              plan.produces("cc-main", "test_sandbox/cc_main.o");
+              plan.mark_compile_command("cc-main");
+              if (auto built = bld::run(plan, bld::force{}, bld::write_compile_commands{database}); !built) {
+                  return std::unexpected(std::format("plan build failed: {}", built.error()));
+              }
+              if (!bld::fs::exists("test_sandbox/cc_a.o") || !bld::fs::exists("test_sandbox/cc_main.o")) {
+                  return std::unexpected("plan did not produce the object files");
+              }
+              std::error_code ec;
+              fs::remove("test_sandbox/cc_a.o", ec);
+              fs::remove("test_sandbox/cc_main.o", ec);
+              auto rebuilt = bld::run(bld::compile_commands(database), bld::jobs{2});
+              if (!rebuilt || rebuilt->ran != 2) {
+                  return std::unexpected("database run did not rebuild both objects");
+              }
+              if (!bld::fs::exists("test_sandbox/cc_a.o") || !bld::fs::exists("test_sandbox/cc_main.o")) {
+                  return std::unexpected("database run did not produce the object files");
+              }
+              auto linked = bld::run(bld::Cmd{"g++", "test_sandbox/cc_a.o", "test_sandbox/cc_main.o", "-o", "test_sandbox/cc_app"});
+              if (!linked || linked->status_code() != 0) {
+                  return std::unexpected("linking rebuilt objects failed");
+              }
+              auto app = bld::run(bld::Cmd{"test_sandbox/cc_app"});
+              if (!app || app->status_code() != 0) {
+                  return std::unexpected("rebuilt app did not exit 0");
+              }
+              return {};
+          }},
+         {"compile_commands_command_string_form",
+          []() -> std::expected<void, std::string> {
+              const std::string database = "test_sandbox/cmd_form.json";
+              std::string command;
+              for (const auto &arg : true_cmd().args_) {
+                  if (!command.empty()) {
+                      command += ' ';
+                  }
+                  command += arg;
+              }
+              auto w = bld::fs::write_file(
+                  database, std::format("[{{\"directory\": \".\", \"file\": \"f.cpp\", \"command\": \"{}\"}}]", command));
+              if (!w) {
+                  return std::unexpected("could not write test db");
+              }
+              auto loaded = bld::details::load_compile_commands(bld::compile_commands(database));
+              if (!loaded || loaded->empty()) {
+                  return std::unexpected("command-string entry failed to load");
+              }
+              if ((*loaded)[0].spec.cmd.args_ != true_cmd().args_) {
+                  return std::unexpected("command string was not split into argv correctly");
+              }
+              auto res = bld::run(bld::compile_commands(database));
+              if (!res || res->ran != 1) {
+                  return std::unexpected("command-string database did not run");
+              }
+              return {};
+          }},
+         {"compile_commands_missing_file",
+          []() -> std::expected<void, std::string> {
+              auto res = bld::run(bld::compile_commands("test_sandbox/does-not-exist.json"));
+              if (res) {
+                  return std::unexpected("missing database unexpectedly ran");
+              }
+              return {};
+          }},
+         {"compile_commands_malformed",
+          []() -> std::expected<void, std::string> {
+              if (!bld::fs::write_file("test_sandbox/bad.json", "not json")) {
+                  return std::unexpected("could not write test db");
+              }
+              auto bad = bld::details::load_compile_commands(bld::compile_commands("test_sandbox/bad.json"));
+              if (bad || bad.error().msg.find("array") == std::string::npos) {
+                  return std::unexpected("non-array JSON should fail naming the array");
+              }
+              if (!bld::fs::write_file("test_sandbox/nofile.json", "[{\"directory\": \".\", \"arguments\": [\"true\"]}]")) {
+                  return std::unexpected("could not write test db");
+              }
+              auto nofile = bld::details::load_compile_commands(bld::compile_commands("test_sandbox/nofile.json"));
+              if (nofile || nofile.error().msg.find("requires file") == std::string::npos) {
+                  return std::unexpected("entry without file should fail naming the requirement");
+              }
+              return {};
+          }},
 
-        {"task_batch_staggered_scheduler",
+         {"task_batch_staggered_scheduler",
          []() -> std::expected<void, std::string> {
              std::vector<bld::Task> execution_list;
              execution_list.emplace_back(bld::Cmd_loc{sleep_cmd()});
