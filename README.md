@@ -80,14 +80,19 @@ if (auto proc = bld::run(gcc); proc && proc->status_code() == 0) {
 auto proc = bld::run(bld::Cmd{"sleep", "5"}, bld::async{});
 auto status = proc->wait();
 
-// redirect output (no shell involved)
-bld::run(gcc, bld::lazy_out_file{"build.log"}, bld::lazy_err_file{"build.err"});
-bld::run(gcc, bld::out_file{"build.log"}, bld::err_file{"build.err"});
+// redirect output (no shell involved): one struct per stream, each taking a
+// borrowed fd, a lazy path, an eager io_out::open(...) value, or io_out_err{...}
+// for merged stdout+stderr
+bld::run(gcc, bld::io_out{"build.log"}, bld::io_err{"build.err"});
+bld::run(gcc, bld::io_out_err{"build.log"});
 
 // capture into strings (borrowed, must outlive the wait)
 std::string out, err, merged;
-bld::run(gcc, bld::out_str{out}, bld::err_str{err});
-bld::run(gcc, bld::out_err_str{merged});
+bld::run(gcc, bld::io_out{&out}, bld::io_err{&err});
+bld::run(gcc, bld::io_out_err{&merged});
+
+// feed stdin from a string (fed while waiting, then EOF)
+bld::run(bld::Cmd{"cat"}, bld::in_str{"hello"});
 
 // dry_run: log-only preview, spawns nothing
 bld::run(gcc, bld::dry_run{});
@@ -97,7 +102,7 @@ bld::run(gcc, bld::dry_run{});
 
 ```cpp
 // Merged stdout+stderr, returned as a string on exit 0.
-// Non-zero exit becomes an Err carrying the output as payload.
+// Non-zero exit becomes an Err carrying the output in Err::output.
 auto out = bld::capture(bld::Cmd{"git", "status"});
 if (out) { bld::log::i("{}", *out); }
 

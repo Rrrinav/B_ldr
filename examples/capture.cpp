@@ -4,13 +4,11 @@
 //   bld::capture(cmd) -> expected<string, Err>  (merged output, exit 0 only)
 // Optional stdin modifiers:
 //   in_str{text}    feed text to the child's stdin
-//   in_fd{fd}       stdin from an open fd
-//   in_file{...}    stdin from an open file
-//   lazy_in_file{p} stdin from a path, opened at spawn time
+//   io_in{...}      stdin from a borrowed fd, a path, or an eager io_in::open
 //   label{...}      label for logging
 //   raw_crlf{}      keep "\r\n" as-is (default normalizes to "\n").
 // Non-zero exit becomes an unexpected Err with the merged output
-// attached as std::string payload.
+// in Err::output.
 
 #define B_LDR_IMPLEMENTATION
 #include "../b_ldr.hpp"

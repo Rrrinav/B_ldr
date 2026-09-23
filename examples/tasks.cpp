@@ -26,8 +26,7 @@ int main()
 
     auto bad = bld::run(fragile, bld::jobs{2});
     if (!bad) {
-        const auto &report = std::any_cast<const bld::Run_result &>(bad.error().payload);
-        bld::log::e("run failed after {} task(s): {}", report.ran, bad.error());
+        bld::log::e("run failed: {}", bad.error());
     }
 
     // jobs{nullopt} (default) => max-1. Positive => capped by max.

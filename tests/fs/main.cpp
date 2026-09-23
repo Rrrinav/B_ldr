@@ -76,19 +76,19 @@ auto test_read_write_append_remove() -> TestSuite
     auto nested = SANDBOX + "nested_dir_missing/rw_test3.txt";
 
     auto w_res = bld::fs::write_file(file1, "Hello");
-    suite.expect(w_res.has_value(), "write_file failed");
+    suite.expect(w_res, "write_file failed");
 
     auto r_res = bld::fs::read_file(file1);
     suite.expect(r_res.has_value() && *r_res == "Hello", "read_file returned incorrect content");
 
     auto a_res = bld::fs::append_file(file1, " World");
-    suite.expect(a_res.has_value(), "append_file failed");
+    suite.expect(a_res, "append_file failed");
 
     r_res = bld::fs::read_file(file1);
     suite.expect(r_res.has_value() && *r_res == "Hello World", "read_file returned incorrect content after append");
 
     a_res = bld::fs::append_file(file2, "New Append");
-    suite.expect(a_res.has_value(), "append_file to new file failed");
+    suite.expect(a_res, "append_file to new file failed");
     r_res = bld::fs::read_file(file2);
     suite.expect(r_res.has_value() && *r_res == "New Append", "append_file did not create valid new file");
 
@@ -99,7 +99,7 @@ auto test_read_write_append_remove() -> TestSuite
     suite.expect(r_res.has_value() && r_res->size() == 11 && *r_res == bin_data, "binary write/read failed");
 
     auto bad_w = bld::fs::write_file(nested, "fail");
-    suite.expect(!bad_w.has_value(), "write_file should fail if parent directory does not exist");
+    suite.expect(!bad_w, "write_file should fail if parent directory does not exist");
 
     auto bad_r = bld::fs::read_file("non_existent_file_123.txt");
     suite.expect(!bad_r.has_value(), "read_file should fail on missing file");
@@ -108,7 +108,7 @@ auto test_read_write_append_remove() -> TestSuite
     suite.expect(!bad_dir_r.has_value(), "read_file should fail when target is a directory");
 
     auto rm_var_res = bld::fs::remove(file1, file2, "fake_file_that_does_not_exist.txt");
-    suite.expect(rm_var_res.has_value(), "variadic remove failed (should succeed even if some are missing)");
+    suite.expect(rm_var_res, "variadic remove failed (should succeed even if some are missing)");
     suite.expect(!bld::fs::exists(file1) && !bld::fs::exists(file2), "files still exist after variadic remove");
 
     return suite;
@@ -124,7 +124,7 @@ auto test_dir_walker() -> TestSuite
     std::string sub_dir = dir2 + "/sub";
 
     auto md_res = bld::fs::make_dirs(dir1, sub_dir);
-    suite.expect(md_res.has_value(), "make_dirs failed to set up test environment");
+    suite.expect(md_res, "make_dirs failed to set up test environment");
 
     std::ignore = bld::fs::write_file(dir1 + "/file1.txt", "a");
     std::ignore = bld::fs::write_file(dir1 + "/file2.cpp", "b");
@@ -190,6 +190,133 @@ auto test_dir_walker() -> TestSuite
     return suite;
 }
 
+auto test_copy_rename_links() -> TestSuite
+{
+    TestSuite suite{.function = "copy_rename_links"};
+
+    auto src = SANDBOX + "link_src.txt";
+    auto copy = SANDBOX + "link_copy.txt";
+    auto moved = SANDBOX + "link_moved.txt";
+    std::ignore = bld::fs::write_file(src, "payload");
+
+    suite.expect(bld::fs::copy_file(src, copy), "copy_file failed");
+    auto back = bld::fs::read_file(copy);
+    suite.expect(back.has_value() && *back == "payload", "copied content mismatch");
+    suite.expect(!bld::fs::copy_file(src, copy), "copy without overwrite should fail when dest exists");
+    suite.expect(bld::fs::copy_file(src, copy, true), "copy with overwrite failed");
+
+    suite.expect(bld::fs::rename(copy, moved), "rename failed");
+    suite.expect(!bld::fs::exists(copy) && bld::fs::exists(moved), "rename did not move the file");
+
+    suite.expect(bld::fs::same_file(src, src), "same path should be same file");
+    suite.expect(bld::fs::same_file(src, "./" + src), "relative spelling should be same file");
+    suite.expect(!bld::fs::same_file(src, moved), "different files reported as same");
+    suite.expect(!bld::fs::same_file(src, SANDBOX + "missing.txt"), "missing file should not be same");
+    suite.expect(!bld::fs::same_file("", ""), "empty paths should not be same");
+
+#ifndef _WIN32
+    auto link = SANDBOX + "link_sym";
+    auto hard = SANDBOX + "link_hard";
+    // NOTE: symlink targets resolve relative to the link's own directory.
+    suite.expect(bld::fs::create_symlink("link_src.txt", link), "create_symlink failed");
+    suite.expect(bld::fs::is_symlink(link), "is_symlink missed the link");
+    suite.expect(!bld::fs::is_symlink(src), "is_symlink false positive on regular file");
+    auto target = bld::fs::read_symlink(link);
+    suite.expect(target.has_value() && target->find("link_src.txt") != std::string::npos, "read_symlink target wrong");
+    suite.expect(bld::fs::same_file(link, src), "symlink should be same file as target");
+    suite.expect(bld::fs::create_hard_link(src, hard), "create_hard_link failed");
+    suite.expect(bld::fs::same_file(hard, src), "hard link should be same file as target");
+#endif
+    return suite;
+}
+
+auto test_file_queries() -> TestSuite
+{
+    TestSuite suite{.function = "file_queries"};
+
+    auto sized = SANDBOX + "sized.txt";
+    auto empty = SANDBOX + "empty.txt";
+    std::ignore = bld::fs::write_file(sized, "12345");
+    std::ignore = bld::fs::write_file(empty, "");
+
+    auto sz = bld::fs::file_size(sized);
+    suite.expect(sz.has_value() && *sz == 5, "file_size wrong");
+    suite.expect(!bld::fs::file_size(SANDBOX + "missing.txt").has_value(), "file_size should fail on missing file");
+
+    auto e1 = bld::fs::is_empty(empty);
+    auto e2 = bld::fs::is_empty(sized);
+    suite.expect(e1.has_value() && *e1, "empty file not reported empty");
+    suite.expect(e2.has_value() && !*e2, "non-empty file reported empty");
+
+    suite.expect(bld::fs::last_write_time(sized).has_value(), "last_write_time failed");
+    suite.expect(!bld::fs::last_write_time(SANDBOX + "missing.txt").has_value(), "last_write_time should fail on missing");
+
+    auto cwd = bld::fs::current_path();
+    suite.expect(cwd.has_value() && !cwd->empty(), "current_path failed");
+    auto abs = bld::fs::absolute(sized);
+    suite.expect(abs.has_value() && abs->ends_with(sized), "absolute wrong");
+    suite.expect(bld::fs::canonical(".").has_value(), "canonical('.') failed");
+    suite.expect(!bld::fs::canonical(SANDBOX + "missing.txt").has_value(), "canonical should fail on missing");
+    auto rel = bld::fs::relative("/a/b/c", "/a/b");
+    suite.expect(rel.has_value() && *rel == "c", "relative('/a/b/c','/a/b') should be 'c'");
+
+    // Pure path utilities (no filesystem access).
+    suite.expect(bld::fs::stem("src/main.cpp") == "main", "stem wrong");
+    suite.expect(bld::fs::name("src/main.cpp") == "main.cpp", "name wrong");
+    suite.expect(bld::fs::extension("src/main.cpp") == ".cpp", "extension wrong");
+    suite.expect(bld::fs::parent_dir("src/main.cpp") == "src", "parent_dir wrong");
+    suite.expect(bld::fs::is_absolute("/a/b"), "is_absolute missed absolute path");
+    suite.expect(bld::fs::is_relative("a/b"), "is_relative missed relative path");
+    suite.expect(bld::fs::join("a", "b", "c.o") == "a/b/c.o", "join wrong");
+    suite.expect(bld::fs::is_dir(SANDBOX), "is_dir missed sandbox");
+    suite.expect(bld::fs::is_file(sized), "is_file missed regular file");
+    suite.expect(!bld::fs::is_file(SANDBOX), "is_file false positive on directory");
+    return suite;
+}
+
+auto test_walker_advanced() -> TestSuite
+{
+    TestSuite suite{.function = "walker_advanced"};
+
+    auto root = SANDBOX + "adv/";
+    std::ignore = bld::fs::make_dirs(root + "sub");
+    std::ignore = bld::fs::write_file(root + "a.txt", "a");
+    std::ignore = bld::fs::write_file(root + ".hidden", "h");
+    std::ignore = bld::fs::write_file(root + "sub/b.txt", "b");
+
+    auto hidden = bld::fs::Dir_walker{root}.include_hidden(true).collect();
+    suite.expect(hidden.has_value() && hidden->size() == 3, "include_hidden(true) should find 3 files");
+
+    auto cnt = bld::fs::Dir_walker{root}.count();
+    suite.expect(cnt.has_value() && *cnt == 2, "count should be 2 without hidden");
+
+    auto any = bld::fs::Dir_walker{root}.any();
+    auto none = bld::fs::Dir_walker{root}.none();
+    suite.expect(any.has_value() && *any, "any should be true");
+    suite.expect(none.has_value() && !*none, "none should be false");
+    auto none_empty = bld::fs::Dir_walker{root}.where([](const bld::fs::Dir_entry &) { return false; }).none();
+    suite.expect(none_empty.has_value() && *none_empty, "none should be true when nothing matches");
+
+    auto paths = bld::fs::Dir_walker{root}.collect_paths();
+    suite.expect(paths.has_value() && paths->size() == 2, "collect_paths should find 2 paths");
+
+    auto sub = bld::fs::Dir_walker{root}.subdir("sub").collect();
+    suite.expect(sub.has_value() && sub->size() == 1, "subdir should find 1 file");
+
+    // Regression: extensions without a leading dot must match too.
+    auto no_dot = bld::fs::Dir_walker{root}.ext({"txt"}).collect();
+    auto with_dot = bld::fs::Dir_walker{root}.ext({".txt"}).collect();
+    suite.expect(no_dot.has_value() && with_dot.has_value() && no_dot->size() == with_dot->size() && no_dot->size() == 2,
+                 "ext without dot should match ext with dot");
+
+    auto missing = bld::fs::Dir_walker{SANDBOX + "nope/"}.collect();
+    suite.expect(!missing.has_value(), "walker on missing root should fail");
+
+    auto all = bld::fs::find_all_files(root);
+    suite.expect(all.has_value() && all->size() == 2, "find_all_files should find 2 files");
+    return suite;
+}
+
 int main(int argc, char *argv[])
 {
     if (auto res = bld::rebuild_this_when_needed_ext(argc, argv, {"-I."}); !res) {
@@ -207,6 +334,12 @@ int main(int argc, char *argv[])
     suite = test_read_write_append_remove();
     suite.serialize(out);
     suite = test_dir_walker();
+    suite.serialize(out);
+    suite = test_copy_rename_links();
+    suite.serialize(out);
+    suite = test_file_queries();
+    suite.serialize(out);
+    suite = test_walker_advanced();
     suite.serialize(out);
 
     std::filesystem::remove_all(SANDBOX);

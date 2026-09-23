@@ -16,20 +16,19 @@
 //   cwd{"dir"}              child working dir, must exist (at most one)
 //   dry_run{}               log-only preview: log what would run, spawn nothing
 //                           (also on capture() and per-Task in batches)
-//   out_fd{fd} / err_fd / in_fd          borrowed fds (Fd_view; Owned_Fd converts implicitly)
-//   out_err_fd{fd}                       one borrowed fd for out+err (merges)
-//   out_file / err_file / in_file        eager files (Shared_fd, lifetime-safe)
-//   out_err_file                         one eager file for out+err (merges)
-//   out_str{s} / err_str{s} / out_err_str{s}  capture into strings (borrowed,
-//                           must outlive wait; only out_err_str merges)
-//   lazy_out_file{p} / lazy_err_file / lazy_in_file / lazy_out_err_file
-//                           paths, opened lazily at spawn (at most one per stream)
-//   pipe{.out,.err,.in,.merge_err_and_out}  monolithic routing, mixes with nothing
-//   Rules: <=1 of each in/out/err group, pipe mixes with nothing, no in_str here.
+//   io_in{...}              stdin: borrowed fd, lazy path, or eager io_in::open
+//   in_str{text}            stdin content: fed synchronously, then EOF
+//                           (empty behaves like unset, like capture())
+//   io_out{...}             stdout: borrowed fd, lazy path, eager io_out::open,
+//                           or capture string via io_out{&s} (borrowed,
+//                           must outlive wait)
+//   io_err{...}             stderr: same shapes as io_out
+//   io_out_err{...}            one route for merged stdout+stderr (implies merging)
+//   Rules: <=1 of each; io_out_err conflicts with io_out/io_err; io_in conflicts
+//   with in_str.
 //
 // RUN MODIFIERS (whole batch only — Run_modifier_c, consume Run_config):
 //   jobs{[opt]int}         nullopt=>max-1; <=0=>max+i; >0=>capped by max
-//                           (use_threads is a deprecated alias)
 //   max_async{n}            0=>follow jobs width; >0=>absolute live-proc cap
 //   deduce_dependency{}     span<Task>: build DAG from Task inputs/outputs/after
 //   keep_going{}            run all possible despite failures (default: stop)
@@ -71,14 +70,6 @@ auto show_result(const char *tag, std::expected<bld::Run_result, bld::Err> &res)
 {
     if (!res) {
         bld::log::e("{} failed: {}", tag, res.error());
-        if (auto *r = std::any_cast<bld::Run_result>(&res.error().payload)) {
-            for (std::size_t i = 0; i < r->tasks.size(); ++i) {
-                const auto &t = r->tasks[i];
-                if (t.state == bld::Task_state::failed) {
-                    bld::log::e("  task[{}] state={} msg={}", i, task_state_name(t.state), t.message);
-                }
-            }
-        }
     } else {
         bld::log::i("{} ran={} skipped={} failed={}", tag, res->ran, res->skipped, res->failed);
         for (auto &t : res->tasks) {
@@ -113,7 +104,7 @@ auto expect_proc_err(const char *tag, std::expected<bld::Proc, bld::Err> &res, s
 
 int main()
 {
-    bld::fs::make_dirs("demo_build").value(); // ensure output dir exists
+    std::ignore = bld::fs::make_dirs("demo_build"); // ensure output dir exists
 
     // 1. Single command — sync, returns Proc.
     {
@@ -132,73 +123,81 @@ int main()
         }
     }
 
-    // 1c. Every output routing: fd (borrowed), file (shared), lazy (path), merged.
+    // 1c. Every output routing: borrowed fd, lazy path, eager open, merged.
     {
-        // out_fd borrows a raw fd; err goes to a lazy path file.
+        // io_out borrows a raw fd; err goes to a lazy path file.
         auto owned = bld::Owned_Fd::open("demo_build/1c_out.txt", bld::Open_mode::write).value();
         if (auto proc = bld::run(
                 bld::Cmd{"sh", "-c", "echo hello; echo err >&2"},
                 bld::label{"with-fd"},
-                bld::out_fd{owned},
-                bld::lazy_err_file{"demo_build/1c_err.txt"});
+                bld::io_out{owned},
+                bld::io_err{"demo_build/1c_err.txt"});
             !proc) {
             bld::log::e("1c fd+lazy failed: {}", proc.error());
         }
 
-        // out_file opens eagerly (Shared_fd keeps it alive through the run).
-        if (auto f = bld::out_file::open("demo_build/1c_eager.txt"); !f) {
+        // io_out::open opens eagerly (the io value keeps the fd alive).
+        if (auto f = bld::io_out::open("demo_build/1c_eager.txt"); !f) {
             bld::log::e("1c eager open failed: {}", f.error());
         } else if (auto proc = bld::run(bld::Cmd{"echo", "eager"}, *f); !proc) {
             bld::log::e("1c eager run failed: {}", proc.error());
         }
 
-        // out_err_file merges out+err into one eager file.
-        if (auto proc = bld::run(bld::Cmd{"sh", "-c", "echo o; echo e >&2"}, bld::out_err_file{"demo_build/1c_both.txt"}); !proc) {
+        // io_out_err merges out+err into one file (lazy path version).
+        if (auto proc = bld::run(bld::Cmd{"sh", "-c", "echo o; echo e >&2"}, bld::io_out_err{"demo_build/1c_both.txt"}); !proc) {
             bld::log::e("1c merged file failed: {}", proc.error());
         }
-        // lazy_out_err_file is the path (lazy) version of the same.
-        if (auto proc = bld::run(bld::Cmd{"sh", "-c", "echo o; echo e >&2"}, bld::lazy_out_err_file{"demo_build/1c_both_lazy.txt"});
-            !proc) {
-            bld::log::e("1c merged lazy failed: {}", proc.error());
+        // io_out_err from an eager open.
+        if (auto f = bld::io_out_err::open("demo_build/1c_both_eager.txt"); !f) {
+            bld::log::e("1c merged eager open failed: {}", f.error());
+        } else if (auto proc = bld::run(bld::Cmd{"sh", "-c", "echo o; echo e >&2"}, *f); !proc) {
+            bld::log::e("1c merged eager failed: {}", proc.error());
         }
-        // out_err_fd is the borrowed-fd version: one fd gets both streams.
+        // io_out_err from a borrowed fd: one fd gets both streams.
         {
             auto both = bld::Owned_Fd::open("demo_build/1c_both_fd.txt", bld::Open_mode::write).value();
             if (auto proc = bld::run(
-                    bld::Cmd{"sh", "-c", "echo o; echo e >&2"}, bld::out_err_fd{both});
+                    bld::Cmd{"sh", "-c", "echo o; echo e >&2"}, bld::io_out_err{both});
                 !proc) {
                 bld::log::e("1c merged fd failed: {}", proc.error());
             }
         }
     }
 
-    // 1d. Every input routing: in_fd, in_file, lazy_in_file.
+    // 1d. Every input routing: eager open, lazy path, borrowed fd, string content.
     {
-        bld::fs::write_file("demo_build/in.txt", "from file\n").value();
-        if (auto f = bld::in_file::open("demo_build/in.txt"); !f) {
-            bld::log::e("1d in_file open failed: {}", f.error());
+        std::ignore = bld::fs::write_file("demo_build/in.txt", "from file\n");
+        if (auto f = bld::io_in::open("demo_build/in.txt"); !f) {
+            bld::log::e("1d io_in open failed: {}", f.error());
         } else if (auto proc = bld::run(bld::Cmd{"cat"}, *f); !proc) {
-            bld::log::e("1d in_file failed: {}", proc.error());
+            bld::log::e("1d io_in failed: {}", proc.error());
         }
-        if (auto proc = bld::run(bld::Cmd{"cat"}, bld::lazy_in_file{"demo_build/in.txt"}); !proc) {
+        if (auto proc = bld::run(bld::Cmd{"cat"}, bld::io_in{"demo_build/in.txt"}); !proc) {
             bld::log::e("1d lazy_in failed: {}", proc.error());
         }
         auto owned = bld::Owned_Fd::open("demo_build/in.txt", bld::Open_mode::read).value();
-        if (auto proc = bld::run(bld::Cmd{"cat"}, bld::in_fd{owned}); !proc) {
+        if (auto proc = bld::run(bld::Cmd{"cat"}, bld::io_in{owned}); !proc) {
             bld::log::e("1d in_fd failed: {}", proc.error());
+        }
+        // in_str feeds literal content (fed synchronously, then EOF).
+        std::string from_str;
+        if (auto proc = bld::run(bld::Cmd{"cat"}, bld::in_str{"from string\n"}, bld::io_out{&from_str}); !proc) {
+            bld::log::e("1d in_str failed: {}", proc.error());
+        } else {
+            bld::log::i("1d in_str out='{}'", bld::str::trim(from_str));
         }
     }
 
-    // 1e. pipe — monolithic routing; merge_err_and_out folds stderr into stdout.
+    // 1e. Direct fd routing; io_out_err folds stderr into stdout.
     {
-        if (auto proc = bld::run(bld::Cmd{"echo", "piped"}, bld::pipe{.out = bld::Fd_view{STDOUT_FILENO}}); !proc) {
-            bld::log::e("1e pipe failed: {}", proc.error());
+        if (auto proc = bld::run(bld::Cmd{"echo", "piped"}, bld::io_out{bld::Fd_view{STDOUT_FILENO}}); !proc) {
+            bld::log::e("1e io_out failed: {}", proc.error());
         }
         if (auto proc = bld::run(
                 bld::Cmd{"sh", "-c", "echo o; echo e >&2"},
-                bld::pipe{.out = bld::Fd_view{STDOUT_FILENO}, .merge_err_and_out = true});
+                bld::io_out_err{bld::Fd_view{STDOUT_FILENO}});
             !proc) {
-            bld::log::e("1e merged pipe failed: {}", proc.error());
+            bld::log::e("1e merged io_out_err failed: {}", proc.error());
         }
     }
 
@@ -218,7 +217,7 @@ int main()
                 bld::log::i("1f wait_all ok {}", *waited);
             }
         }
-        // wait_all with a failing proc reports an error (with count payload).
+        // wait_all with a failing proc reports an error.
         {
             auto ok = bld::run(bld::Cmd{"true"}, bld::async{});
             auto bad = bld::run(bld::Cmd{"false"}, bld::async{});
@@ -248,12 +247,12 @@ int main()
         }
     }
 
-    // 1h. out_str / err_str / out_err_str — capture into strings via run().
+    // 1h. io_out{&s} / io_err{&s} / io_out_err{&s} — capture into strings via run().
     //    The strings are borrowed: they must outlive wait()/reap. Output stays
-    //    separate by default; only out_err_str merges (like out_err_file).
+    //    separate by default; only io_out_err merges.
     {
         std::string out, err;
-        if (auto proc = bld::run(bld::Cmd{"sh", "-c", "echo to-stdout && echo to-stderr >&2"}, bld::out_str{out}, bld::err_str{err});
+        if (auto proc = bld::run(bld::Cmd{"sh", "-c", "echo to-stdout && echo to-stderr >&2"}, bld::io_out{&out}, bld::io_err{&err});
             !proc) {
             bld::log::e("1h split failed: {}", proc.error());
         } else {
@@ -261,7 +260,7 @@ int main()
         }
 
         std::string merged;
-        if (auto proc = bld::run(bld::Cmd{"sh", "-c", "echo a && echo b >&2"}, bld::out_err_str{merged}); !proc) {
+        if (auto proc = bld::run(bld::Cmd{"sh", "-c", "echo a && echo b >&2"}, bld::io_out_err{&merged}); !proc) {
             bld::log::e("1h merged failed: {}", proc.error());
         } else {
             bld::log::i("1h merged='{}'", bld::str::trim(merged));
@@ -269,7 +268,7 @@ int main()
 
         // Works detached too: capture pipes live in the Proc, pumped on wait().
         std::string late;
-        if (auto proc = bld::run(bld::Cmd{"sh", "-c", "sleep 0.1; echo late"}, bld::async{}, bld::out_str{late})) {
+        if (auto proc = bld::run(bld::Cmd{"sh", "-c", "sleep 0.1; echo late"}, bld::async{}, bld::io_out{&late})) {
             std::ignore = proc->wait();
             bld::log::i("1h async out='{}'", bld::str::trim(late));
         }
@@ -278,7 +277,7 @@ int main()
         {
             std::string bout;
             std::vector<bld::Task> tasks;
-            tasks.emplace_back(bld::Cmd{"echo", "batched"}, bld::out_str{bout});
+            tasks.emplace_back(bld::Cmd{"echo", "batched"}, bld::io_out{&bout});
             if (auto res = bld::run(tasks, bld::jobs{2}); !res) {
                 bld::log::e("1h batch failed: {}", res.error());
             } else {
@@ -335,7 +334,7 @@ int main()
     {
         std::vector<bld::Task> tasks;
         tasks.emplace_back(bld::Cmd{"sh", "-c", "pwd"}, bld::label{"pwd-task"}, bld::cwd{"demo_build"});
-        tasks.emplace_back(bld::Cmd{"sh", "-c", "echo hi > demo_build/2c.txt"}, bld::lazy_out_file{"demo_build/2c_extra.txt"});
+        tasks.emplace_back(bld::Cmd{"sh", "-c", "echo hi > demo_build/2c.txt"}, bld::io_out{"demo_build/2c_extra.txt"});
         auto res = bld::run(tasks, bld::jobs{4}, bld::keep_going{});
         show_result("2c per-task config", res);
     }
@@ -458,10 +457,9 @@ int main()
             // infer_outputs parses "-o <file>" into Task.outputs; false leaves them empty.
             // The Plan-written db above already carries explicit "output" keys, so
             // craft one entry without it to show the difference.
-            bld::fs::write_file(
+            std::ignore = bld::fs::write_file(
                 "demo_build/infer_cc.json",
-                "[{\"directory\": \".\", \"file\": \"a.cpp\", \"arguments\": [\"g++\", \"-c\", \"a.cpp\", \"-o\", \"a.o\"]}]")
-                .value();
+                "[{\"directory\": \".\", \"file\": \"a.cpp\", \"arguments\": [\"g++\", \"-c\", \"a.cpp\", \"-o\", \"a.o\"]}]");
             auto with = bld::details::load_compile_commands(bld::compile_commands("demo_build/infer_cc.json", true));
             auto without = bld::details::load_compile_commands(bld::compile_commands("demo_build/infer_cc.json", false));
             if (with && without) {
@@ -597,13 +595,13 @@ int main()
         }
         // 7j. Eager open of a missing file (lazy form fails at spawn instead).
         {
-            auto f = bld::in_file::open("demo_build/nope.txt");
+            auto f = bld::io_in::open("demo_build/nope.txt");
             if (!f) {
                 bld::log::i("7j eager open correctly failed: {}", f.error());
             } else {
                 bld::log::e("7j eager open UNEXPECTED SUCCESS");
             }
-            auto res = bld::run(bld::Cmd{"cat"}, bld::lazy_in_file{"demo_build/nope.txt"});
+            auto res = bld::run(bld::Cmd{"cat"}, bld::io_in{"demo_build/nope.txt"});
             expect_proc_err("7j lazy open at spawn", res, "nope.txt");
         }
         // 7k. Plan unknown after-dependency.
@@ -618,21 +616,19 @@ int main()
 
     // 8. Compile-time errors (uncomment to see the guided messages; none build).
     //    Each fires a static_assert naming the right modifier set.
-    //   bld::run(tasks, bld::out_fd{...});            // io routing is per-Task, not a Run modifier
+    //   bld::run(tasks, bld::io_out{"x"});          // io routing is per-Task, not a Run modifier
     //   bld::run(cmd, bld::jobs{2});           // jobs is a Run modifier, not per-process
-    //   bld::capture(cmd, bld::out_fd{...});          // capture has no out_* modifiers (merged string)
+    //   bld::capture(cmd, bld::io_out{"x"});        // capture has no out routing (merged string)
     //   tasks.emplace_back(cmd, bld::jobs{2}); // Task takes Proc modifiers, not Run modifiers
     //   grp.run_new(cmd, bld::keep_going{});          // run_new takes Proc modifiers, not Run modifiers
     //   bld::run(tasks, bld::jobs{2}, bld::jobs{3}); // duplicate flag
     //   bld::run(cmd, bld::label{"a"}, bld::label{"b"});           // duplicate label
     //   bld::run(cmd, bld::cwd{"a"}, bld::cwd{"b"});               // duplicate cwd
     //   bld::run(cmd, bld::async{}, bld::async{});                 // duplicate async
-    //   bld::run(cmd, bld::out_fd{f}, bld::out_file{...});         // two out routes
-    //   bld::run(cmd, bld::out_str{s}, bld::out_file{...});         // two out routes (str counts too)
-    //   bld::run(cmd, bld::out_err_fd{f}, bld::err_file{...});      // out_err_fd counts as err too
-    //   bld::run(cmd, bld::pipe{...}, bld::out_fd{f});             // pipe mixes with nothing
-    //   bld::run(cmd, bld::pipe{...}, bld::out_str{s});            // pipe mixes with nothing (str too)
-    //   bld::run(cmd, bld::in_str{"hi"});             // in_str is capture-only
+    //   bld::run(cmd, bld::io_out{"a"}, bld::io_out{"b"});         // two out routes
+    //   bld::run(cmd, bld::io_out{&s}, bld::io_out_err{"b"});         // io_out_err conflicts with io_out
+    //   bld::run(cmd, bld::io_out_err{fd}, bld::io_err{"e"});         // io_out_err conflicts with io_err
+    //   bld::run(cmd, bld::io_in{"a"}, bld::in_str{"b"});         // two stdin routes
     //   bld::wait_all(procs, bld::keep_going{});      // wait_all takes no modifiers
 
     return 0;

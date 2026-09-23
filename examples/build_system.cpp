@@ -24,21 +24,21 @@ int main(int argc, char *argv[])
     }
 
     // Create the toy project if it doesn't exist yet.
-    if (auto res = bld::fs::make_dirs("demo_src", "demo_build"); !res) {
-        bld::log::e("mkdir failed: {}", res.error());
+    if (!bld::fs::make_dirs("demo_src", "demo_build")) {
+        bld::log::e("mkdir failed");
         return EXIT_FAILURE;
     }
     if (!bld::fs::exists("demo_src/main.cpp")) {
-        if (auto w1 = bld::fs::write_file("demo_src/main.cpp", "#include \"util.hpp\"\nint main() { return util() + 1; }\n"); !w1) {
-            bld::log::e("write failed: {}", w1.error());
+        if (!bld::fs::write_file("demo_src/main.cpp", "#include \"util.hpp\"\nint main() { return util() + 1; }\n")) {
+            bld::log::e("write failed");
             return EXIT_FAILURE;
         }
-        if (auto w2 = bld::fs::write_file("demo_src/util.hpp", "#pragma once\nint util();\n"); !w2) {
-            bld::log::e("write failed: {}", w2.error());
+        if (!bld::fs::write_file("demo_src/util.hpp", "#pragma once\nint util();\n")) {
+            bld::log::e("write failed");
             return EXIT_FAILURE;
         }
-        if (auto w3 = bld::fs::write_file("demo_src/util.cpp", "#include \"util.hpp\"\nint util() { return 41; }\n"); !w3) {
-            bld::log::e("write failed: {}", w3.error());
+        if (!bld::fs::write_file("demo_src/util.cpp", "#include \"util.hpp\"\nint util() { return 41; }\n")) {
+            bld::log::e("write failed");
             return EXIT_FAILURE;
         }
     }

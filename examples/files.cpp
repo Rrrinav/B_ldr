@@ -9,12 +9,12 @@
 int main()
 {
     // Write / read / append. Binary-safe.
-    if (auto res = bld::fs::write_file("demo.txt", "hello"); !res) {
-        bld::log::e("write failed: {}", res.error());
+    if (!bld::fs::write_file("demo.txt", "hello")) {
+        bld::log::e("write failed");
         return EXIT_FAILURE;
     }
-    if (auto res = bld::fs::append_file("demo.txt", " world"); !res) {
-        bld::log::e("append failed: {}", res.error());
+    if (!bld::fs::append_file("demo.txt", " world")) {
+        bld::log::e("append failed");
         return EXIT_FAILURE;
     }
     auto content = bld::fs::read_file("demo.txt");
@@ -27,12 +27,12 @@ int main()
     bld::log::i("stem of 'src/main.cpp' is '{}'", bld::fs::stem("src/main.cpp"));
 
     // Directories. make_dirs creates parents too; remove removes anything (files or trees).
-    if (auto res = bld::fs::make_dirs("demo/sub"); !res) {
-        bld::log::e("mkdir failed: {}", res.error());
+    if (!bld::fs::make_dirs("demo/sub")) {
+        bld::log::e("mkdir failed");
         return EXIT_FAILURE;
     }
-    if (auto res = bld::fs::write_file("demo/sub/note.txt", "hi"); !res) {
-        bld::log::e("write failed: {}", res.error());
+    if (!bld::fs::write_file("demo/sub/note.txt", "hi")) {
+        bld::log::e("write failed");
         return EXIT_FAILURE;
     }
     bld::log::i("demo/sub/note.txt exists: {}", bld::fs::exists("demo/sub/note.txt"));

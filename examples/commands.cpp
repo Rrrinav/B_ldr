@@ -3,10 +3,10 @@
 // bld::run always returns std::expected<bld::Proc, bld::Err>.
 // By default it waits for the process and you get a Proc holding the final status.
 // With bld::async{} it returns immediately and you call wait() yourself.
-// Output streams can be redirected to files with out_file / err_file / in_file
-// (eager, via Shared_fd — shared ownership, lifetime-safe) or
-// lazy_out_file / lazy_err_file / lazy_in_file (path stored in Proc_config
-// io_out/io_err/io_in slots, opened at spawn time). Raw fds use out_fd / err_fd / in_fd.
+// Output streams route through io_out / io_err / io_out_err: each takes a
+// borrowed fd, a lazy path (opened at spawn time into the io_out/io_err/io_in
+// slots), an eager io_out::open(...) value, or — for capture — a string via
+// io_out{&s}. Stdin routes through io_in the same way.
 
 #define B_LDR_IMPLEMENTATION
 #include "../b_ldr.hpp"
@@ -34,7 +34,7 @@ int main()
     }
 
     // Redirect stdout and stderr to files. Paths must already have their parent dirs.
-    auto redirected = bld::run(bld::Cmd{"g++", "--version"}, bld::lazy_out_file{"gcc_version.txt"});
+    auto redirected = bld::run(bld::Cmd{"g++", "--version"}, bld::io_out{"gcc_version.txt"});
     if (redirected) {
         bld::log::i("wrote gcc_version.txt");
         std::filesystem::remove("gcc_version.txt");
