@@ -198,6 +198,32 @@ auto test_walk() -> TestSuite
         suite.expect(!ctl.failed() && n == 3, "not_name adaptor failed");
     }
 
+    // glob adaptor (portable * and ? matching, case-sensitive).
+    {
+        bld::fs::Controller ctl;
+        std::size_t n = 0;
+        for (const auto &e : bld::fs::walk_dir(root, ctl) | bld::fs::glob("file?.txt", "*.hpp")) {
+            if (e.is_file()) {
+                ++n;
+            }
+        }
+        suite.expect(!ctl.failed() && n == 3, "glob adaptor failed");
+    }
+
+    // with_filter adaptor, incl. a capturing predicate.
+    {
+        bld::fs::Controller ctl;
+        std::string want = ".cpp";
+        std::size_t n = 0;
+        for (const auto &e :
+             bld::fs::walk_dir(root, ctl) | bld::fs::with_filter([&](const auto &x) { return x.extension() == want; })) {
+            if (e.is_file()) {
+                ++n;
+            }
+        }
+        suite.expect(!ctl.failed() && n == 2, "with_filter adaptor failed");
+    }
+
     // 6. Dynamic dont_recurse: dir2's branch is never visited nor descended.
     std::vector<std::string> pruned;
     bld::fs::Controller prune_ctl;

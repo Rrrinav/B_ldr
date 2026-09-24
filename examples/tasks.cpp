@@ -29,8 +29,8 @@ int main()
         bld::log::e("run failed: {}", bad.error());
     }
 
-    // jobs{nullopt} (default) => max-1. Positive => capped by max.
-    // Add inputs/outputs + deduce_dependency to make this same call graph-aware.
+    // jobs{} (default) => max-1. jobs{n} => exactly n, clamped to the machine.
+    // Add inputs/outputs to make this same call graph-aware (auto-ordered).
     bld::log::i("default parallelism would be {} procs", bld::max_parallel_count());
 
     return EXIT_SUCCESS;

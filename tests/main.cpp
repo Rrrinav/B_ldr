@@ -1061,7 +1061,7 @@ auto run_tests() -> int
              }
              return {};
          }},
-        {"span_deduce_dependency_builds_graph",
+        {"span_tasks_build_graph",
          []() -> std::expected<void, std::string> {
              std::vector<bld::Task> tasks;
              bld::Task a{true_cmd()};
@@ -1072,27 +1072,15 @@ auto run_tests() -> int
              b.needs("test_sandbox/dedup.out");
              tasks.push_back(std::move(a));
              tasks.push_back(std::move(b));
-             auto report = bld::run(tasks, bld::jobs{2}, bld::deduce_dependency{});
+             auto report = bld::run(tasks, bld::jobs{2});
              if (!report || report->ran != 2) {
-                 return std::unexpected("deduce_dependency did not run the 2-task chain");
+                 return std::unexpected("span tasks did not run the 2-task chain");
              }
              return {};
          }},
-        {"plan_rejects_deduce_dependency_flag",
+        {"span_deps_auto_graph",
          []() -> std::expected<void, std::string> {
-             bld::Plan plan;
-             plan.add("x", true_cmd());
-             auto report = bld::run(plan, bld::deduce_dependency{});
-             if (report) {
-                 return std::unexpected("run(Plan, deduce_dependency) unexpectedly succeeded");
-             }
-             if (report.error().msg.find("deduce_dependency") == std::string::npos) {
-                 return std::unexpected(std::format("wrong error: '{}'", report.error().msg));
-             }
-             return {};
-         }},
-        {"span_deps_without_deduce_rejected",
-         []() -> std::expected<void, std::string> {
+             // Declared deps build the graph automatically; no flag needed.
              std::vector<bld::Task> tasks;
              bld::Task a{true_cmd()};
              a.name = "a";
@@ -1103,11 +1091,8 @@ auto run_tests() -> int
              tasks.push_back(std::move(a));
              tasks.push_back(std::move(b));
              auto report = bld::run(tasks, bld::jobs{2});
-             if (report) {
-                 return std::unexpected("deps without deduce unexpectedly succeeded");
-             }
-             if (report.error().msg.find("deduce_dependency") == std::string::npos) {
-                 return std::unexpected(std::format("wrong error: '{}'", report.error().msg));
+             if (!report || report->ran != 2) {
+                 return std::unexpected("declared deps did not auto-build the graph");
              }
              return {};
          }},
@@ -1133,7 +1118,7 @@ auto run_tests() -> int
              a.name = "self";
              a.after_dep("self");
              tasks.push_back(std::move(a));
-             auto report = bld::run(tasks, bld::deduce_dependency{});
+             auto report = bld::run(tasks);
              if (report) {
                  return std::unexpected("self-dependency unexpectedly succeeded");
              }
@@ -1155,7 +1140,7 @@ auto run_tests() -> int
              b.needs("test_sandbox/cyc_a");
              tasks.push_back(std::move(a));
              tasks.push_back(std::move(b));
-             auto report = bld::run(tasks, bld::deduce_dependency{});
+             auto report = bld::run(tasks);
              if (report) {
                  return std::unexpected("cycle unexpectedly succeeded");
              }
@@ -1181,20 +1166,18 @@ auto run_tests() -> int
               if (max == 0) {
                   return std::unexpected("max_parallel_count is 0");
               }
-              if (bld::resolve_parallel_width(std::nullopt) != bld::resolve_parallel_width(-1)) {
-                  return std::unexpected("default should equal -1");
+              std::size_t def = max <= 1 ? 1 : max - 1;
+              if (bld::resolve_parallel_width(std::nullopt) != def) {
+                  return std::unexpected("default should be max - 1");
               }
-              if (bld::resolve_parallel_width(0) != max) {
-                  return std::unexpected("0 should resolve to max");
+              if (bld::resolve_parallel_width(0) != 1) {
+                  return std::unexpected("0 should clamp to 1");
               }
               if (bld::resolve_parallel_width(1) != 1) {
                   return std::unexpected("1 should resolve to 1");
               }
               if (bld::resolve_parallel_width(1000000) != max) {
                   return std::unexpected("huge value should be capped by max");
-              }
-              if (bld::resolve_parallel_width(-static_cast<int>(max) - 100) != 1) {
-                  return std::unexpected("extreme negative should clamp to 1");
               }
               if (bld::resolve_async_cap(0, 4) != 4) {
                   return std::unexpected("max_async 0 should follow parallel width");

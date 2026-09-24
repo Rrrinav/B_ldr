@@ -51,9 +51,8 @@ int main(int argc, char *argv[]) {
         // Always spawn via grp.run_new() so children join grp.gid().
     }
 
-    // 4. Plan — dependency graph lives in Plan (plus Task-local deps for span+deduce).
-    //    Plan owns inputs/outputs/after/compile_command; Task carries its own
-    //    inputs/outputs/after for run(span, deduce_dependency).
+    // 4. Plan — dependency graph lives in Plan (plus Task-local deps, which
+    //    run(span) orders automatically whenever any task declares them).
     {
         bld::Plan plan;
         // Task carries only name + spec (cmd+cfg). No inputs/outputs/after in Task.

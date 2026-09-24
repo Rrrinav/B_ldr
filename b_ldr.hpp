@@ -562,9 +562,9 @@ struct Task
 {
     std::string name;
     Exec_spec spec;
-    // Local dependency info used only when run(span<Task>) is given
-    // deduce_dependency. Plan keeps its own external maps; Task carries
-    // its own here so a bare span can also form a graph.
+    // Local dependency info; run(span<Task>) builds a graph from it
+    // automatically whenever any task declares deps, so a bare span can
+    // also form a graph. Plan keeps its own external maps.
     std::vector<std::string> inputs;
     std::vector<std::string> outputs;
     std::vector<std::string> after;
@@ -698,7 +698,7 @@ private:
     "io_in, io_out, io_err, io_out_err, in_str. " \
     "Run modifiers go to run(batch,...); raw_crlf goes to capture()."
 #define B_LDR_RUN_MODIFIERS_MSG \
-    "API ERROR: bad modifier for run(batch). Run modifiers: jobs, max_async, deduce_dependency, " \
+    "API ERROR: bad modifier for run(batch). Run modifiers: jobs, max_async, " \
     "keep_going, dry_run, force, write_compile_commands. Put io/label/cwd on the Task. " \
     "No run(span<Proc>): use wait_all(procs)."
 #define B_LDR_CAPTURE_MODIFIERS_MSG \
@@ -1043,10 +1043,9 @@ struct Run_config
     // child processes. The scheduler itself is single-threaded — it spawns
     // processes (fork/CreateProcess) and reaps them via Proc_group::wait_any.
     // No worker threads are spawned; the count is a process budget, not threads.
-    //  nullopt       => max_parallel_count() - 1 (leave one core free), clamped >= 1.
-    //  value <= 0    => max_parallel_count() + value, clamped >= 1 (0 => max).
-    //  value  > 0    => min(value, max_parallel_count()).
-    std::optional<int> jobs{std::nullopt};
+    //  nullopt => max_parallel_count() - 1 (leave one core free), min 1.
+    //  value   => exactly that many, clamped to [1, max_parallel_count()].
+    std::optional<std::size_t> jobs{std::nullopt};
     // Cap on concurrently running async child processes (Proc_group size).
     //  0 => follow resolved parallel width (coupled default, old behaviour).
     //  >0 => absolute cap (may exceed CPU count for I/O-bound procs).
@@ -1055,9 +1054,6 @@ struct Run_config
     bool dry_run{false};
     bool force{false};
     std::string write_compile_commands;
-    // For run(span<Task>): false => run all tasks independently;
-    // true => build a dependency graph from Task.inputs/outputs/after.
-    bool deduce_dependency{false};
 };
 // Number of CPUs available for parallel child processes.
 // NOTE: <thread> is implementation-only; this calls details::cpu_count()
@@ -1070,20 +1066,15 @@ namespace details {
     std::size_t m = details::cpu_count();
     return m == 0 ? 1 : m;
 }
-// Resolves the concurrency width for the scheduler.
-[[nodiscard]] inline auto resolve_parallel_width(std::optional<int> jobs_val) -> std::size_t
+// Resolves the concurrency width for the scheduler: default is max - 1
+// (leave one core free), explicit values clamp to [1, max].
+[[nodiscard]] inline auto resolve_parallel_width(std::optional<std::size_t> jobs_val) -> std::size_t
 {
     std::size_t max_procs = max_parallel_count();
-    int v = jobs_val.value_or(-1);
-    if (v <= 0) {
-        long resolved = static_cast<long>(max_procs) + static_cast<long>(v);
-        if (resolved < 1) {
-            resolved = 1;
-        }
-        return static_cast<std::size_t>(resolved);
+    if (!jobs_val.has_value()) {
+        return max_procs <= 1 ? 1 : max_procs - 1;
     }
-    std::size_t want = static_cast<std::size_t>(v);
-    return want < max_procs ? want : max_procs;
+    return std::clamp(*jobs_val, std::size_t{1}, max_procs);
 }
 [[nodiscard]] inline auto resolve_async_cap(std::size_t max_async_val, std::size_t resolved_width) -> std::size_t
 {
@@ -1092,14 +1083,13 @@ namespace details {
     }
     return max_async_val;
 }
-// Run modifier: cap on concurrently running child processes.
+// Run modifier: cap on concurrently running child processes. jobs{n} means
+// exactly n (clamped to the machine); jobs{} means max - 1.
 struct jobs
 {
-    std::optional<int> value{std::nullopt};
+    std::optional<std::size_t> value{std::nullopt};
     jobs() = default;
-    explicit jobs(int v) : value(v)
-    {}
-    explicit jobs(std::optional<int> v) : value(v)
+    explicit jobs(std::size_t v) : value(v)
     {}
     auto operator()(Run_config &cfg) const -> void;
 };
@@ -1108,10 +1098,6 @@ struct max_async
     std::size_t value{0};
     explicit max_async(std::size_t v) : value(v)
     {}
-    auto operator()(Run_config &cfg) const -> void;
-};
-struct deduce_dependency
-{
     auto operator()(Run_config &cfg) const -> void;
 };
 struct keep_going
@@ -1154,39 +1140,32 @@ auto load_compile_commands(const bld::Compilation_database &database) -> std::ex
 template <typename T>
 concept Run_modifier_c = requires(T &&modifier, Run_config &cfg) { modifier(cfg); };
 
-template <typename T>
-constexpr bool is_jobs_mod_v = std::is_same_v<std::remove_cvref_t<T>, jobs>;
-template <typename T>
-constexpr bool is_max_async_mod_v = std::is_same_v<std::remove_cvref_t<T>, max_async>;
-template <typename T>
-constexpr bool is_keep_going_mod_v = std::is_same_v<std::remove_cvref_t<T>, keep_going>;
+// Shared with the proc/capture validators below (dry_run applies everywhere).
 template <typename T>
 constexpr bool is_dry_run_mod_v = std::is_same_v<std::remove_cvref_t<T>, dry_run>;
-template <typename T>
-constexpr bool is_force_mod_v = std::is_same_v<std::remove_cvref_t<T>, force>;
-template <typename T>
-constexpr bool is_deduce_mod_v = std::is_same_v<std::remove_cvref_t<T>, deduce_dependency>;
-template <typename T>
-constexpr bool is_write_db_mod_v = std::is_same_v<std::remove_cvref_t<T>, write_compile_commands>;
+
+namespace details {
+// Same-type duplicates rejected generically: at most one of each run
+// modifier per call (replaces one trait + counter per modifier type).
+template <typename... Ts>
+struct distinct_modifiers;
+template <>
+struct distinct_modifiers<> : std::true_type
+{};
+template <typename T, typename... Rest>
+struct distinct_modifiers<T, Rest...>
+    : std::bool_constant<
+          (!std::is_same_v<std::remove_cvref_t<T>, std::remove_cvref_t<Rest>> && ...)
+          && distinct_modifiers<Rest...>::value>
+{};
+} // namespace details
 template <typename... Options>
 constexpr auto validate_run_options() -> void
 {
     // NOTE: modifier-category is asserted inline by every caller
     // (run span/Plan/db) via B_LDR_RUN_MODIFIERS_MSG.
-    constexpr int jobs_count = (is_jobs_mod_v<Options> + ... + 0);
-    constexpr int async_count = (is_max_async_mod_v<Options> + ... + 0);
-    constexpr int keep_going_count = (is_keep_going_mod_v<Options> + ... + 0);
-    constexpr int dry_run_count = (is_dry_run_mod_v<Options> + ... + 0);
-    constexpr int force_count = (is_force_mod_v<Options> + ... + 0);
-    constexpr int deduce_count = (is_deduce_mod_v<Options> + ... + 0);
-    constexpr int write_db_count = (is_write_db_mod_v<Options> + ... + 0);
-    static_assert(jobs_count <= 1, "API ERROR: duplicate jobs (at most one per run).");
-    static_assert(async_count <= 1, "API ERROR: duplicate max_async (at most one per run).");
-    static_assert(keep_going_count <= 1, "API ERROR: duplicate keep_going (at most one per run).");
-    static_assert(dry_run_count <= 1, "API ERROR: duplicate dry_run (at most one per run).");
-    static_assert(force_count <= 1, "API ERROR: duplicate force (at most one per run).");
-    static_assert(deduce_count <= 1, "API ERROR: duplicate deduce_dependency (at most one per run).");
-    static_assert(write_db_count <= 1, "API ERROR: duplicate write_compile_commands (at most one per run).");
+    static_assert(
+        details::distinct_modifiers<Options...>::value, "API ERROR: duplicate run modifier (at most one of each per run).");
 }
 // NOTE: io routing and friends are per-task (Proc_config) modifiers, enforced by
 // static_assert inside validate_run_options: passing them to a batch run fails with
@@ -1499,6 +1478,35 @@ private:
 // Domain filters as pipeable adaptors: only what carries domain knowledge
 // lives here (dot-insensitive multi extensions, filename exclusion).
 // Everything else is std::views at the call site.
+namespace detail {
+// Portable filename glob: '*' spans any run (including empty), '?'
+// spans exactly one character. Case-sensitive, like the filesystem.
+// Lives up here (not with the other detail helpers) so the adaptors below
+// can name it.
+[[nodiscard]] inline auto glob_match(std::string_view pat, std::string_view s) noexcept -> bool
+{
+    std::size_t px = 0, sx = 0, star = std::string_view::npos, ss = 0;
+    while (sx < s.size()) {
+        if (px < pat.size() && (pat[px] == '?' || pat[px] == s[sx])) {
+            ++px;
+            ++sx;
+        } else if (px < pat.size() && pat[px] == '*') {
+            star = px++;
+            ss = sx;
+        } else if (star != std::string_view::npos) {
+            px = star + 1;
+            sx = ++ss;
+        } else {
+            return false;
+        }
+    }
+    while (px < pat.size() && pat[px] == '*') {
+        ++px;
+    }
+    return px == pat.size();
+}
+} // namespace detail
+
 struct only_extensions_t : std::ranges::range_adaptor_closure<only_extensions_t>
 {
     std::vector<std::string> want{};
@@ -1575,6 +1583,48 @@ struct only_dirs_t : std::ranges::range_adaptor_closure<only_dirs_t>
     }
 };
 inline constexpr only_dirs_t only_dirs{};
+// A predicate in library vocabulary: range | with_filter(pred) is
+// views::filter without leaving the bld::fs pipe chain.
+template <typename P>
+struct with_filter_t : std::ranges::range_adaptor_closure<with_filter_t<P>>
+{
+    P pred{};
+    template <std::ranges::input_range R>
+    auto operator()(R &&r) const
+    {
+        // Copy (never capture this): the adaptor is usually a temporary.
+        return std::forward<R>(r) | std::views::filter([p = pred](const Dir_entry &e) { return p(e); });
+    }
+};
+template <typename P>
+    requires std::predicate<P, const Dir_entry &>
+[[nodiscard]] auto with_filter(P &&pred) -> with_filter_t<std::decay_t<P>>
+{
+    return with_filter_t<std::decay_t<P>>{{}, std::forward<P>(pred)};
+}
+// Filename glob (* and ? wildcards, case-sensitive) as a pipeable adaptor:
+// walk_dir(...) | glob("*.cpp", "test_?.hpp"). Portable matcher, no fnmatch.
+struct glob_t : std::ranges::range_adaptor_closure<glob_t>
+{
+    std::vector<std::string> pats{};
+    template <std::ranges::input_range R>
+    auto operator()(R &&r) const
+    {
+        return std::forward<R>(r) | std::views::filter([p = pats](const Dir_entry &e) {
+                   return std::ranges::any_of(p, [&](const std::string &pat) { return detail::glob_match(pat, e.filename()); });
+               });
+    }
+};
+template <typename... Pats>
+    requires(std::convertible_to<Pats, std::string_view> && ...)
+[[nodiscard]] auto glob(Pats &&...pats) -> glob_t
+{
+    return glob_t{.pats = {std::string{pats}...}};
+}
+[[nodiscard]] inline auto glob(const std::vector<std::string> &pats) -> glob_t
+{
+    return glob_t{.pats = pats};
+}
 
 // "src/main.cpp" -> "main"
 [[nodiscard]] auto stem(std::string_view path) noexcept -> std::string;
@@ -4219,10 +4269,6 @@ auto bld::max_async::operator()(Run_config &cfg) const -> void
 {
     cfg.max_async = value;
 }
-auto bld::deduce_dependency::operator()(Run_config &cfg) const -> void
-{
-    cfg.deduce_dependency = true;
-}
 auto bld::keep_going::operator()(Run_config &cfg) const -> void
 {
     cfg.failure_policy = Failure_policy::keep_going;
@@ -5150,7 +5196,7 @@ auto load_compile_commands(const bld::Compilation_database &database) -> std::ex
         task.name = file_name;
         task.spec.cmd.args_ = std::move(arguments);
         task.spec.cfg.cwd = std::move(directory);
-        // Record file-level deps so run(tasks, deduce_dependency{}) can order them.
+        // Record file-level deps so run(tasks) can order them automatically.
         task.inputs.push_back(file_name);
         if (!output.empty()) {
             task.outputs.push_back(std::move(output));
@@ -5421,8 +5467,8 @@ inline auto run_schedule(
 
 auto run_tasks(std::span<bld::Task> tasks, const bld::Run_config &cfg) -> std::expected<bld::Run_result, bld::Err>
 {
-    // span<Task>: run all of them by default (independent, no graph).
-    // With deduce_dependency, build a DAG from Task.inputs/outputs/after.
+    // span<Task>: no declared deps => run everything independently;
+    // any inputs/outputs/after => build the DAG automatically.
     // Waiting is done via Proc_group (procs owned by the group).
     if (!cfg.write_compile_commands.empty()) {
         auto written = write_database(tasks, cfg.write_compile_commands);
@@ -5446,7 +5492,10 @@ auto run_tasks(std::span<bld::Task> tasks, const bld::Run_config &cfg) -> std::e
     std::size_t width = resolve_sched_width(cfg);
     std::vector<std::vector<std::size_t>> children(tasks.size());
     std::vector<std::size_t> indegree(tasks.size(), 0);
-    if (cfg.deduce_dependency) {
+    const bool graph = std::ranges::any_of(tasks, [](const bld::Task &t) {
+        return !t.inputs.empty() || !t.outputs.empty() || !t.after.empty();
+    });
+    if (graph) {
         std::unordered_map<std::string, std::size_t> producers, names;
         for (std::size_t i = 0; i < tasks.size(); ++i) {
             if (!names.emplace(tasks[i].name, i).second) {
@@ -5490,47 +5539,16 @@ auto run_tasks(std::span<bld::Task> tasks, const bld::Run_config &cfg) -> std::e
                 edge(it->second, i);
             }
         }
-    } else {
-        // else: all independent, no edges — but declared deps would be silently
-        // ignored (and mis-ordered), which is almost certainly a bug.
-        std::unordered_map<std::string, std::size_t> producers, names;
-        for (std::size_t i = 0; i < tasks.size(); ++i) {
-            names.emplace(tasks[i].name, i);
-            for (auto &out : tasks[i].outputs) {
-                producers.emplace(out, i);
-            }
-        }
-        for (std::size_t i = 0; i < tasks.size(); ++i) {
-            for (auto &in : tasks[i].inputs) {
-                if (auto it = producers.find(in); it != producers.end() && it->second != i) {
-                    return std::unexpected(Err::erc(
-                        std::errc::invalid_argument,
-                        std::format(
-                            "task '{}' needs '{}' produced by '{}', but deduce_dependency is not set "
-                            "(pass bld::deduce_dependency{{}} or use bld::Plan)",
-                            tasks[i].name,
-                            in,
-                            tasks[it->second].name)));
-                }
-            }
-            if (!tasks[i].after.empty()) {
-                return std::unexpected(Err::erc(
-                    std::errc::invalid_argument,
-                    std::format(
-                        "task '{}' declares after-dependencies, but deduce_dependency is not set "
-                        "(pass bld::deduce_dependency{{}} or use bld::Plan)",
-                        tasks[i].name)));
-            }
-        }
     }
+    // No declared deps anywhere: independent run-all, everything dirty.
     auto topo_res = topo_sort(children, indegree);
     if (!topo_res) {
         return std::unexpected(std::move(topo_res.error()));
     }
     auto topo = std::move(*topo_res);
-    // Dirty: run-all mode always dirty; deduce mode honours is_outdated + force.
+    // Dirty: run-all mode always dirty; graph mode honours is_outdated + force.
     std::vector<bool> dirty(tasks.size(), false);
-    if (!cfg.deduce_dependency) {
+    if (!graph) {
         std::fill(dirty.begin(), dirty.end(), true);
     } else if (cfg.force) {
         std::fill(dirty.begin(), dirty.end(), true);
@@ -5584,12 +5602,7 @@ auto run_tasks(std::span<bld::Task> tasks, const bld::Run_config &cfg) -> std::e
 
 auto run_plan(Plan &plan, const Run_config &cfg) -> std::expected<Run_result, Err>
 {
-    // Plan always builds its own graph from needs/produces/after —
-    // deduce_dependency is a span<Task>-only flag and passing it here is a bug.
-    if (cfg.deduce_dependency) {
-        return std::unexpected(Err::erc(
-            std::errc::invalid_argument, "deduce_dependency applies to run(span<Task>) only; bld::Plan always uses its own dependency graph"));
-    }
+    // Plan always builds its own graph from needs/produces/after.
     auto &tasks = plan.tasks;
     if (!cfg.write_compile_commands.empty()) {
         auto written = write_database(plan, cfg.write_compile_commands);

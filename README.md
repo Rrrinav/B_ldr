@@ -187,17 +187,16 @@ auto res = bld::run(tasks, bld::jobs{4}, bld::max_async{8});
 bld::run(build, bld::write_compile_commands{"compile_commands.json"});
 bld::run(bld::compile_commands("build/compile_commands.json"), bld::jobs{8});
 
-// span<Task> runs all by default; deduce_dependency builds a DAG
-// from Task.inputs/outputs/after. Plan always uses its own graph.
+// span<Task> with no declared deps runs everything in parallel; any
+// inputs/outputs/after builds a DAG automatically. Plan always graphs.
 bld::Task a{bld::Cmd{"sh", "-c", "echo a > a.o"}}; a.produces("a.o");
 bld::Task b{bld::Cmd{"sh", "-c", "cat a.o > b"}}; b.needs("a.o");
 std::vector<bld::Task> chain{std::move(a), std::move(b)};
-bld::run(chain, bld::deduce_dependency{});
+bld::run(chain, bld::jobs{8});
 ```
 
 Misuse fails fast: duplicates (`label` twice, `jobs` twice) are compile
-errors; bad combinations (deps without `deduce_dependency`,
-`deduce_dependency` with a `Plan`, empty commands, cycles, self-deps, missing
+errors; bad combinations (empty commands, cycles, self-deps, missing
 `cwd`) are runtime `Err`s naming the culprit. `examples/run.cpp` covers each case.
 
 ### Diff / testing

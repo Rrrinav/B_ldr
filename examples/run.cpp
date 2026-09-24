@@ -28,9 +28,8 @@
 //   with in_str.
 //
 // RUN MODIFIERS (whole batch only — Run_modifier_c, consume Run_config):
-//   jobs{[opt]int}         nullopt=>max-1; <=0=>max+i; >0=>capped by max
+//   jobs{[opt]int}         nullopt=>max-1; value=>exactly that, clamped [1, max]
 //   max_async{n}            0=>follow jobs width; >0=>absolute live-proc cap
-//   deduce_dependency{}     span<Task>: build DAG from Task inputs/outputs/after
 //   keep_going{}            run all possible despite failures (default: stop)
 //   dry_run{}               resolve + print, spawn nothing (composes with force)
 //   force{}                 ignore up-to-date, re-run everything
@@ -310,10 +309,9 @@ int main()
     // 2b. jobs forms: width caps live procs, max_async caps them too.
     {
         bld::log::i(
-            "2b max={} nullopt={} {{-1}}={} {{0}}={} {{2}}={} huge={}",
+            "2b max={} nullopt={} {{0}}={} {{2}}={} huge={}",
             bld::max_parallel_count(),
             bld::resolve_parallel_width(std::nullopt),
-            bld::resolve_parallel_width(-1),
             bld::resolve_parallel_width(0),
             bld::resolve_parallel_width(2),
             bld::resolve_parallel_width(1000000));
@@ -322,8 +320,8 @@ int main()
         tasks.emplace_back(bld::Cmd{"echo", "b"});
         auto r1 = bld::run(tasks, bld::jobs{2});
         show_result("2b jobs{2}", r1);
-        auto r2 = bld::run(tasks, bld::jobs{0}); // 0 => max
-        show_result("2b jobs{0}=max", r2);
+        auto r2 = bld::run(tasks, bld::jobs{0}); // 0 clamps to 1: serial
+        show_result("2b jobs{0}=1", r2);
         auto r3 = bld::run(tasks, bld::jobs{}, bld::max_async{1}); // serialize procs
         show_result("2b async{1}", r3);
         auto r4 = bld::run(tasks, bld::jobs{2}, bld::max_async{8}); // cap above jobs: jobs win
@@ -358,13 +356,13 @@ int main()
         a.name = "e_a";
         a.produces("demo_build/2e.o");
         tasks.push_back(std::move(a));
-        auto first = bld::run(tasks, bld::jobs{2}, bld::deduce_dependency{});
+        auto first = bld::run(tasks, bld::jobs{2});
         show_result("2e first", first); // ran
-        auto second = bld::run(tasks, bld::jobs{2}, bld::deduce_dependency{});
+        auto second = bld::run(tasks, bld::jobs{2});
         show_result("2e second", second); // skipped: up to date
-        auto preview = bld::run(tasks, bld::jobs{2}, bld::deduce_dependency{}, bld::force{}, bld::dry_run{});
+        auto preview = bld::run(tasks, bld::jobs{2}, bld::force{}, bld::dry_run{});
         show_result("2e force+dry_run preview", preview); // dry run (would re-run)
-        auto forced = bld::run(tasks, bld::jobs{2}, bld::deduce_dependency{}, bld::force{});
+        auto forced = bld::run(tasks, bld::jobs{2}, bld::force{});
         show_result("2e forced", forced); // ran again
     }
 
@@ -387,7 +385,7 @@ int main()
         show_result("2g empty", res);
     }
 
-    // 3. span<Task> + deduce_dependency: Task builders form the DAG.
+    // 3. span<Task> with declared deps: Task builders form the DAG automatically.
     {
         // Fresh outputs so the first run really runs the whole chain.
         std::filesystem::remove("demo_build/d_a.o");
@@ -406,10 +404,10 @@ int main()
         tasks.push_back(std::move(a));
         tasks.push_back(std::move(b));
         tasks.push_back(std::move(c));
-        auto res = bld::run(tasks, bld::jobs{2}, bld::deduce_dependency{});
-        show_result("3 deduce chain", res);
-        auto again = bld::run(tasks, bld::jobs{2}, bld::deduce_dependency{});
-        show_result("3 deduce up-to-date", again); // all skipped
+        auto res = bld::run(tasks, bld::jobs{2});
+        show_result("3 auto chain", res);
+        auto again = bld::run(tasks, bld::jobs{2});
+        show_result("3 auto up-to-date", again); // all skipped
     }
 
     // 4. Plan — graph + outdated lives in Plan maps; same Run modifiers as span.
@@ -496,7 +494,7 @@ int main()
 
     // 7. Runtime config errors — each prints the Err the library returns.
     {
-        // 7a. Task deps without deduce_dependency: would silently mis-order.
+        // 7a. Declared deps order automatically: producer runs first.
         {
             std::vector<bld::Task> tasks;
             bld::Task a{bld::Cmd{"echo", "a"}};
@@ -508,25 +506,18 @@ int main()
             tasks.push_back(std::move(a));
             tasks.push_back(std::move(b));
             auto res = bld::run(tasks);
-            expect_err("7a deps-without-deduce", res, "deduce_dependency");
+            show_result("7a auto graph", res); // ran=2, ordered a before b
         }
-        // 7b. deduce_dependency with a Plan: Plans always graph already.
-        {
-            bld::Plan plan;
-            plan.add("x", bld::Cmd{"echo", "x"});
-            auto res = bld::run(plan, bld::deduce_dependency{});
-            expect_err("7b plan+deduce", res, "deduce_dependency");
-        }
-        // 7c. Empty command names the task.
+        // 7b. Empty command names the task.
         {
             std::vector<bld::Task> tasks;
             bld::Task t;
             t.name = "empty-cmd";
             tasks.push_back(std::move(t));
             auto res = bld::run(tasks);
-            expect_err("7c empty cmd", res, "empty-cmd");
+            expect_err("7b empty cmd", res, "empty-cmd");
         }
-        // 7d. Duplicate task names.
+        // 7c. Duplicate task names.
         {
             std::vector<bld::Task> tasks;
             bld::Task a{bld::Cmd{"true"}};
@@ -535,10 +526,10 @@ int main()
             b.name = "dup";
             tasks.push_back(std::move(a));
             tasks.push_back(std::move(b));
-            auto res = bld::run(tasks, bld::deduce_dependency{});
-            expect_err("7d dup name", res, "duplicate task name 'dup'");
+            auto res = bld::run(tasks);
+            expect_err("7c dup name", res, "duplicate task name 'dup'");
         }
-        // 7e. Duplicate outputs.
+        // 7d. Duplicate outputs.
         {
             std::vector<bld::Task> tasks;
             bld::Task a{bld::Cmd{"true"}};
@@ -549,30 +540,30 @@ int main()
             b.produces("demo_build/7e.o");
             tasks.push_back(std::move(a));
             tasks.push_back(std::move(b));
-            auto res = bld::run(tasks, bld::deduce_dependency{});
-            expect_err("7e dup output", res, "multiple tasks produce");
+            auto res = bld::run(tasks);
+            expect_err("7d dup output", res, "multiple tasks produce");
         }
-        // 7f. Unknown after-dependency.
+        // 7e. Unknown after-dependency.
         {
             std::vector<bld::Task> tasks;
             bld::Task a{bld::Cmd{"true"}};
             a.name = "a";
             a.after_dep("ghost");
             tasks.push_back(std::move(a));
-            auto res = bld::run(tasks, bld::deduce_dependency{});
-            expect_err("7f unknown dep", res, "unknown task 'ghost'");
+            auto res = bld::run(tasks);
+            expect_err("7e unknown dep", res, "unknown task 'ghost'");
         }
-        // 7g. Self-dependency.
+        // 7f. Self-dependency.
         {
             std::vector<bld::Task> tasks;
             bld::Task a{bld::Cmd{"true"}};
             a.name = "self";
             a.after_dep("self");
             tasks.push_back(std::move(a));
-            auto res = bld::run(tasks, bld::deduce_dependency{});
-            expect_err("7g self dep", res, "depends on itself");
+            auto res = bld::run(tasks);
+            expect_err("7f self dep", res, "depends on itself");
         }
-        // 7h. Cycle a<->b.
+        // 7g. Cycle a<->b.
         {
             std::vector<bld::Task> tasks;
             bld::Task a{bld::Cmd{"true"}};
@@ -585,32 +576,32 @@ int main()
             b.needs("demo_build/7h_a");
             tasks.push_back(std::move(a));
             tasks.push_back(std::move(b));
-            auto res = bld::run(tasks, bld::deduce_dependency{});
-            expect_err("7h cycle", res, "cycle");
+            auto res = bld::run(tasks);
+            expect_err("7g cycle", res, "cycle");
         }
-        // 7i. Missing cwd.
+        // 7h. Missing cwd.
         {
             auto res = bld::run(bld::Cmd{"true"}, bld::cwd{"demo_build/nope"});
-            expect_proc_err("7i missing cwd", res, "does not exist");
+            expect_proc_err("7h missing cwd", res, "does not exist");
         }
-        // 7j. Eager open of a missing file (lazy form fails at spawn instead).
+        // 7i. Eager open of a missing file (lazy form fails at spawn instead).
         {
             auto f = bld::io_in::open("demo_build/nope.txt");
             if (!f) {
-                bld::log::i("7j eager open correctly failed: {}", f.error());
+                bld::log::i("7i eager open correctly failed: {}", f.error());
             } else {
-                bld::log::e("7j eager open UNEXPECTED SUCCESS");
+                bld::log::e("7i eager open UNEXPECTED SUCCESS");
             }
             auto res = bld::run(bld::Cmd{"cat"}, bld::io_in{"demo_build/nope.txt"});
-            expect_proc_err("7j lazy open at spawn", res, "nope.txt");
+            expect_proc_err("7i lazy open at spawn", res, "nope.txt");
         }
-        // 7k. Plan unknown after-dependency.
+        // 7j. Plan unknown after-dependency.
         {
             bld::Plan plan;
             plan.add("a", bld::Cmd{"true"});
             plan.after("a", "ghost");
             auto res = bld::run(plan);
-            expect_err("7k plan unknown dep", res, "unknown task 'ghost'");
+            expect_err("7j plan unknown dep", res, "unknown task 'ghost'");
         }
     }
 
