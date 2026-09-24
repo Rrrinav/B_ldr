@@ -219,6 +219,7 @@ g++ -std=c++23 -I. examples/hello.cpp -o hello
 | `examples/commands.cpp` | Sync/async runs, exit codes, file redirection |
 | `examples/capture.cpp` | Merged capture, stdin injection, CRLF normalization |
 | `examples/files.cpp` | Reading/writing, directories, `walk`, find helpers |
+| `examples/walk.cpp` | Callback traversal: prune, stop, fail, error kinds |
 | `examples/config.cpp` | Options, types, choices, `--help`, proxy reads |
 | `examples/tasks.cpp` | Parallel task batches, failure handling |
 | `examples/build_system.cpp` | A small incremental build of several files |
