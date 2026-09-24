@@ -1,7 +1,7 @@
 // files.cpp — the filesystem helpers.
 //
-// Everything returns std::expected — an Err carries a message you can format into logs.
-// Dir_walker is a small fluent API for walking trees with filters.
+// Walk a tree with walk(): one visitor callback drives everything — prune
+// branches, stop early, fail with an error, or just collect.
 
 #define B_LDR_IMPLEMENTATION
 #include "../b_ldr.hpp"
@@ -37,15 +37,20 @@ int main()
     }
     bld::log::i("demo/sub/note.txt exists: {}", bld::fs::exists("demo/sub/note.txt"));
 
-    // Walk a tree with filters, skip dirs by name, collect paths.
-    auto cpp_files = bld::fs::Dir_walker{"."}
-        .ext(".cpp")
-        .skip({".git", "build"})
-        .collect_paths();
-    if (cpp_files) {
-        bld::log::i("found {} .cpp files:", cpp_files->size());
-        for (const auto &p : *cpp_files) {
-            bld::log::i("  {}", p.string());
+// Walk a tree with a visitor: prune dirs, keep .cpp files, collect paths.
+    std::vector<std::string> cpp_files;
+    if (auto r = bld::fs::walk(".", {.skip = {".git", "build"}}, [&](const auto &e) {
+            if (e.is_file() && e.extension() == ".cpp") {
+                cpp_files.push_back(e.path.string());
+            }
+            return bld::fs::Act::next;
+        });
+        !r) {
+        bld::log::e("walk failed: {}", r.error().message());
+    } else {
+        bld::log::i("found {} .cpp files:", cpp_files.size());
+        for (const auto &p : cpp_files) {
+            bld::log::i("  {}", p);
         }
     }
 

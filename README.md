@@ -158,10 +158,13 @@ auto content = bld::fs::read_file("out.txt");   // expected<std::string>
 bld::fs::make_dirs("build/obj", "build/bin");
 
 auto srcs = bld::fs::find_by_ext(".", ".cpp");  // expected<vector<string>>
-auto walk = bld::fs::Dir_walker{"src"}
-    .ext({".cpp", ".hpp"})
-    .skip({"build", ".git"})
-    .collect();                                 // expected<vector<Dir_entry>>
+std::vector<bld::fs::Dir_entry> found;
+std::ignore = bld::fs::walk("src", {.skip = {"build", ".git"}}, [&](const auto &e) {
+    if (e.is_file() && (e.extension() == ".cpp" || e.extension() == ".hpp")) {
+        found.push_back(e);
+    }
+    return bld::fs::Act::next;
+});
 ```
 
 ### Unified runs and compile databases
@@ -215,7 +218,7 @@ g++ -std=c++23 -I. examples/hello.cpp -o hello
 | `examples/logging.cpp` | Levels, colors, `set_min_level`, custom streams/logger |
 | `examples/commands.cpp` | Sync/async runs, exit codes, file redirection |
 | `examples/capture.cpp` | Merged capture, stdin injection, CRLF normalization |
-| `examples/files.cpp` | Reading/writing, directories, `Dir_walker`, find helpers |
+| `examples/files.cpp` | Reading/writing, directories, `walk`, find helpers |
 | `examples/config.cpp` | Options, types, choices, `--help`, proxy reads |
 | `examples/tasks.cpp` | Parallel task batches, failure handling |
 | `examples/build_system.cpp` | A small incremental build of several files |

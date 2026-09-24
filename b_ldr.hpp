@@ -1392,132 +1392,62 @@ struct Dir_entry
     [[nodiscard]] std::string parent() const noexcept;
 };
 
-enum class Walk_action { next, skip_dir, stop };
-
-struct Walk_result
-{
-    Walk_action action = Walk_action::next;
-    std::error_code error = {};
-
-    constexpr Walk_result() = default;
-    constexpr Walk_result(Walk_action a) noexcept;
-    constexpr Walk_result(std::error_code ec) noexcept;
-};
+// Visitor verdict for walk(): next continues, prune skips the rest of this
+// branch (a pruned directory is neither visited nor descended), stop ends the
+// walk cleanly, fail aborts the whole walk with a user error. prune/stop are
+// success; fail and library failures both surface as Walk_error, told apart
+// by Kind.
+enum class Act { next, prune, stop, fail };
 
 struct Walk_error
 {
-    enum class Kind { fs, visitor } kind;
+    enum class Kind { fs, user } kind;
     std::error_code code;
+    std::string detail{};
 
     [[nodiscard]] bool is_fs_error() const noexcept;
-    [[nodiscard]] bool is_visitor_error() const noexcept;
+    [[nodiscard]] bool is_user_error() const noexcept;
     [[nodiscard]] std::string message() const;
 };
 
 template <typename T>
 using Walk_result_t = std::expected<T, Walk_error>;
 
-namespace detail {
-template <typename V>
-concept Void_visitor = std::invocable<V, const Dir_entry &> && std::same_as<std::invoke_result_t<V, const Dir_entry &>, void>;
-template <typename V>
-concept Result_visitor = std::invocable<V, const Dir_entry &> && std::convertible_to<std::invoke_result_t<V, const Dir_entry &>, Walk_result>;
-template <typename V>
-concept Valid_visitor = Void_visitor<V> || Result_visitor<V>;
-
-template <Valid_visitor V>
-auto invoke_visitor(V &&v, const Dir_entry &e) -> Walk_result;
-} // namespace detail
-
-class Dir_walker
+// Traversal options for walk()/files(). Only traversal-affecting knobs live
+// here; display decisions (extension, name, ...) belong in the visitor.
+// NOTE: the visitor always sees every non-skipped directory (prune verdicts
+// live there), while files additionally respect include_hidden.
+struct Walk_opts
 {
-public:
-    explicit Dir_walker(std::string_view root);
-    explicit Dir_walker(std::filesystem::path root);
-    explicit Dir_walker(const std::string &root);
-    explicit Dir_walker(const char *root);
-
-    [[nodiscard]] auto recursive(bool v = true) noexcept -> Dir_walker &;
-    [[nodiscard]] auto flat() noexcept -> Dir_walker &;
-    [[nodiscard]] auto files_only(bool v = true) noexcept -> Dir_walker &;
-    [[nodiscard]] auto exclude_dirs(bool v = true) noexcept -> Dir_walker &;
-    [[nodiscard]] auto include_hidden(bool v = true) noexcept -> Dir_walker &;
-    [[nodiscard]] auto follow_symlinks(bool v = true) noexcept -> Dir_walker &;
-    [[nodiscard]] auto max_depth(int v) noexcept -> Dir_walker &;
-
-    [[nodiscard]] auto ext(std::string e) -> Dir_walker &;
-    [[nodiscard]] auto ext(std::initializer_list<std::string_view> exts) -> Dir_walker &;
-    [[nodiscard]] auto named(std::string name) -> Dir_walker &;
-    [[nodiscard]] auto named(std::initializer_list<std::string_view> names) -> Dir_walker &;
-    [[nodiscard]] auto skip(std::string dir_name) -> Dir_walker &;
-    [[nodiscard]] auto skip(std::initializer_list<std::string_view> dir_names) -> Dir_walker &;
-
-    template <typename Pred>
-        requires std::predicate<Pred, const Dir_entry &>
-    [[nodiscard]] auto where(Pred pred) -> Dir_walker &;
-    template <detail::Valid_visitor V>
-    [[nodiscard]] auto walk(V &&visitor, std::source_location caller = std::source_location::current()) const noexcept -> Walk_result_t<void>;
-    [[nodiscard]] auto collect(std::source_location caller = std::source_location::current()) const noexcept -> Walk_result_t<std::vector<Dir_entry>>;
-    [[nodiscard]]
-    auto collect_paths(std::source_location caller = std::source_location::current()) const noexcept
-        -> Walk_result_t<std::vector<std::filesystem::path>>;
-    [[nodiscard]]
-    auto count(std::source_location caller = std::source_location::current()) const noexcept -> Walk_result_t<std::size_t>;
-    [[nodiscard]]
-    auto any(std::source_location caller = std::source_location::current()) const noexcept -> Walk_result_t<bool>;
-    [[nodiscard]]
-    auto none(std::source_location caller = std::source_location::current()) const noexcept -> Walk_result_t<bool>;
-    [[nodiscard]]
-    auto first(std::source_location caller = std::source_location::current()) const noexcept -> Walk_result_t<std::optional<Dir_entry>>;
-    [[nodiscard]]
-    auto last(std::source_location caller = std::source_location::current()) const noexcept -> Walk_result_t<std::optional<Dir_entry>>;
-    template <std::invocable<const Dir_entry &> F>
-    [[nodiscard]]
-    auto for_each(F &&fn, std::source_location caller = std::source_location::current()) const noexcept -> Walk_result_t<void>;
-    template <typename Pred>
-        requires std::predicate<Pred, const Dir_entry &>
-    [[nodiscard]]
-    auto partition(Pred pred, std::source_location caller = std::source_location::current()) const noexcept
-        -> Walk_result_t<std::pair<std::vector<Dir_entry>, std::vector<Dir_entry>>>;
-    template <typename T, std::invocable<T, const Dir_entry &> F>
-    [[nodiscard]]
-    auto fold(T init, F &&fn, std::source_location caller = std::source_location::current()) const noexcept -> Walk_result_t<T>;
-    [[nodiscard]]
-    auto subdir(std::string_view sub) const -> Dir_walker;
-    template <std::invocable<Dir_walker &> F>
-    [[nodiscard]] auto apply(F &&fn) -> Dir_walker &;
-
-private:
-    std::filesystem::path root_;
-    bool recursive_ = true;
-    bool include_dirs_ = false;
-    bool include_hidden_ = false;
-    bool follow_symlinks_ = false;
-    int max_depth_ = std::numeric_limits<int>::max();
-    std::vector<std::function<bool(const Dir_entry &)>> filters_;
-    std::vector<std::string> skips_;
-
-    [[nodiscard]] bool passes_filters(const Dir_entry &e) const;
-    [[nodiscard]] bool is_skipped(const Dir_entry &e) const;
-    [[nodiscard]] bool is_visible(const Dir_entry &e) const;
-    static auto make_entry(const std::filesystem::directory_entry &raw, int d) -> Dir_entry;
-
-    template <std::invocable<const Dir_entry &> F>
-    [[nodiscard]]
-    auto run(F &&fn, std::source_location caller) const noexcept -> Walk_result_t<void>;
-
-    // Shared run()+transform skeleton for the terminal operations below.
-    template <typename S, typename Step, typename Finish>
-    [[nodiscard]]
-    auto run_transformed(S init, Step step, Walk_action terminal, Finish finish, std::source_location caller) const noexcept
-        -> Walk_result_t<std::invoke_result_t<Finish, S>>;
+    bool recursive = true;
+    bool include_hidden = false;
+    bool follow_symlinks = false;
+    int max_depth = std::numeric_limits<int>::max();
+    std::vector<std::string> skip{};
 };
 
-template <detail::Valid_visitor V>
-[[nodiscard]] inline auto walk(std::string_view root, V &&visitor, std::source_location caller = std::source_location::current()) noexcept;
+template <typename V>
+concept Walk_visitor = std::invocable<V, const Dir_entry &> && std::same_as<std::invoke_result_t<V, const Dir_entry &>, Act>;
 
-[[nodiscard]] auto collect(std::string_view root, std::source_location caller = std::source_location::current()) noexcept
-    -> Walk_result_t<std::vector<Dir_entry>>;
+// Callback-driven traversal. The visitor sees every directory (for prune
+// verdicts) and every non-hidden file, and drives the walk: prune skips a
+// branch, stop ends cleanly (success), fail aborts with a user error.
+// Two failure points, kept distinct: library failures (bad root, unreadable
+// directory -> Kind::fs) vs visitor abort (Act::fail or a throwing visitor
+// -> Kind::user). Errors are logged.
+template <Walk_visitor V>
+[[nodiscard]] auto walk(
+    std::string_view root,
+    Walk_opts opts,
+    V &&visitor,
+    std::source_location caller = std::source_location::current()) noexcept -> Walk_result_t<void>;
+
+// Eager collect: every file walk() would visit, in one vector.
+// Logs and returns empty on error.
+[[nodiscard]] auto files(
+    std::string_view root,
+    Walk_opts opts = {},
+    std::source_location caller = std::source_location::current()) noexcept -> std::vector<Dir_entry>;
 
 // "src/main.cpp" -> "main"
 [[nodiscard]] auto stem(std::string_view path) noexcept -> std::string;
@@ -6387,19 +6317,6 @@ inline auto wrap_void_logged(Op &&op, std::format_string<Args...> fmt, Args &&..
     bld::log::i("fs: {}.", std::format(fmt, std::forward<Args>(args)...));
     return true;
 }
-// Shared collect_paths()+to-strings tail for find_all_files/by_ext/by_name.
-inline auto paths_to_strings(Walk_result_t<std::vector<std::filesystem::path>> r) noexcept
-    -> Walk_result_t<std::vector<std::string>>
-{
-    return r.transform([](const auto &paths) {
-        std::vector<std::string> res;
-        res.reserve(paths.size());
-        for (const auto &p : paths) {
-            res.push_back(p.string());
-        }
-        return res;
-    });
-}
 
 // Shared ofstream body for write_file/append_file (differ only in open mode
 // and message verb).
@@ -6481,242 +6398,137 @@ bool Walk_error::is_fs_error() const noexcept
     return kind == Kind::fs;
 }
 
-bool Walk_error::is_visitor_error() const noexcept
+bool Walk_error::is_user_error() const noexcept
 {
-    return kind == Kind::visitor;
+    return kind == Kind::user;
 }
 
 std::string Walk_error::message() const
 {
+    if (!detail.empty()) {
+        return detail;
+    }
     return code.message();
 }
 
-Dir_walker::Dir_walker(std::string_view root) : root_{root}
-{}
-
-Dir_walker::Dir_walker(std::filesystem::path root) : root_{std::move(root)}
-{}
-
-Dir_walker::Dir_walker(const std::string &root) : root_{root}
-{}
-
-Dir_walker::Dir_walker(const char *root) : root_{root}
-{}
-
-auto Dir_walker::recursive(bool v) noexcept -> Dir_walker &
+auto files(std::string_view root, Walk_opts opts, std::source_location caller) noexcept -> std::vector<Dir_entry>
 {
-    recursive_ = v;
-    return *this;
-}
-
-auto Dir_walker::flat() noexcept -> Dir_walker &
-{
-    recursive_ = false;
-    return *this;
-}
-
-auto Dir_walker::exclude_dirs(bool v) noexcept -> Dir_walker &
-{
-    include_dirs_ = !v;
-    return *this;
-}
-
-auto Dir_walker::files_only(bool v) noexcept -> Dir_walker &
-{
-    include_dirs_ = !v;
-    return *this;
-}
-
-auto Dir_walker::include_hidden(bool v) noexcept -> Dir_walker &
-{
-    include_hidden_ = v;
-    return *this;
-}
-
-auto Dir_walker::follow_symlinks(bool v) noexcept -> Dir_walker &
-{
-    follow_symlinks_ = v;
-    return *this;
-}
-
-auto Dir_walker::max_depth(int v) noexcept -> Dir_walker &
-{
-    max_depth_ = v;
-    return *this;
-}
-
-auto Dir_walker::ext(std::string e) -> Dir_walker &
-{
-    if (!e.empty() && e.front() != '.') {
-        e = '.' + e;
+    std::vector<Dir_entry> out;
+    auto r = walk(root, std::move(opts), [&](const Dir_entry &e) {
+        if (e.is_file()) {
+            out.push_back(e);
+        }
+        return Act::next;
+    }, caller);
+    if (!r) {
+        return {};
     }
-    return where([e = std::move(e)](const Dir_entry &entry) { return entry.extension() == e; });
+    return out;
 }
 
-auto Dir_walker::ext(std::initializer_list<std::string_view> exts) -> Dir_walker &
+template <Walk_visitor V>
+auto walk(std::string_view root, Walk_opts opts, V &&visitor, std::source_location caller) noexcept -> Walk_result_t<void>
 {
-    std::vector<std::string> normalized;
-    normalized.reserve(exts.size());
-    for (auto e : exts) {
-        if (!e.empty() && e.front() != '.') {
-            normalized.emplace_back(std::string{"."} + std::string{e});
-        } else {
-            normalized.emplace_back(e);
+    namespace fs = std::filesystem;
+
+    if (root.empty()) {
+        bld::log::w("walk: empty root ({})", caller.function_name());
+        return std::unexpected{Walk_error{.kind = Walk_error::Kind::fs, .code = std::make_error_code(std::errc::invalid_argument)}};
+    }
+
+    std::error_code ec;
+    const auto iter_opts = opts.follow_symlinks ? fs::directory_options::skip_permission_denied | fs::directory_options::follow_directory_symlink
+                                                : fs::directory_options::skip_permission_denied;
+
+    auto to_entry = [](const fs::directory_entry &raw, int d) {
+        std::error_code ignored;
+        return Dir_entry{.path = raw.path(), .type = raw.symlink_status(ignored).type(), .depth = d};
+    };
+    // Visitor call: throwing visitors become user errors (walk is noexcept).
+    auto call = [&](const Dir_entry &e) -> std::expected<Act, Walk_error> {
+        try {
+            return std::invoke(visitor, e);
+        } catch (const std::exception &ex) {
+            return std::unexpected{Walk_error{
+                .kind = Walk_error::Kind::user,
+                .code = std::make_error_code(std::errc::operation_canceled),
+                .detail = std::format("visitor threw at '{}': {}", e.path.string(), ex.what())}};
+        } catch (...) {
+            return std::unexpected{Walk_error{
+                .kind = Walk_error::Kind::user,
+                .code = std::make_error_code(std::errc::operation_canceled),
+                .detail = std::format("visitor threw at '{}'", e.path.string())}};
+        }
+    };
+    auto aborted = [&](const Dir_entry &e) -> std::unexpected<Walk_error> {
+        bld::log::e("walk: aborted by visitor at '{}'", e.path.string());
+        return std::unexpected{Walk_error{
+            .kind = Walk_error::Kind::user,
+            .code = std::make_error_code(std::errc::operation_canceled),
+            .detail = std::format("walk aborted by visitor at '{}'", e.path.string())}};
+    };
+    // Static skip prunes silently; hidden files are gated; directories always
+    // reach the visitor so it can return prune.
+    auto step = [&](const Dir_entry &e) -> std::expected<Act, Walk_error> {
+        if (e.is_dir() && std::ranges::find(opts.skip, e.filename()) != opts.skip.end()) {
+            return Act::prune;
+        }
+        if (!e.is_dir() && !opts.include_hidden && e.is_hidden()) {
+            return Act::next;
+        }
+        return call(e);
+    };
+
+    if (!opts.recursive) {
+        fs::directory_iterator it{fs::path{root}, iter_opts, ec};
+        if (ec) {
+            bld::log::w("walk: cannot read '{}': {}", root, ec.message());
+            return std::unexpected{Walk_error{.kind = Walk_error::Kind::fs, .code = ec}};
+        }
+        for (const auto &raw : it) {
+            Dir_entry e = to_entry(raw, 0);
+            auto r = step(e);
+            if (!r) {
+                return std::unexpected(std::move(r.error()));
+            }
+            if (*r == Act::stop) {
+                return {};
+            }
+            if (*r == Act::fail) {
+                return aborted(e);
+            }
+        }
+        return {};
+    }
+
+    fs::recursive_directory_iterator it{fs::path{root}, iter_opts, ec};
+    if (ec) {
+        bld::log::w("walk: cannot read '{}': {}", root, ec.message());
+        return std::unexpected{Walk_error{.kind = Walk_error::Kind::fs, .code = ec}};
+    }
+    for (const auto &raw : it) {
+        const int d = it.depth();
+        if (d >= opts.max_depth) {
+            it.disable_recursion_pending();
+        }
+        Dir_entry e = to_entry(raw, d);
+        auto r = step(e);
+        if (!r) {
+            return std::unexpected(std::move(r.error()));
+        }
+        switch (*r) {
+        case Act::stop:
+            return {};
+        case Act::prune:
+            it.disable_recursion_pending();
+            break;
+        case Act::fail:
+            return aborted(e);
+        case Act::next:
+            break;
         }
     }
-    return where([exts = std::move(normalized)](const Dir_entry &entry) {
-        return std::ranges::any_of(exts, [&](const auto &e) { return entry.extension() == e; });
-    });
-}
-
-auto Dir_walker::named(std::string name) -> Dir_walker &
-{
-    return where([n = std::move(name)](const Dir_entry &entry) { return entry.filename() == n; });
-}
-
-auto Dir_walker::named(std::initializer_list<std::string_view> names) -> Dir_walker &
-{
-    return where([names = std::vector<std::string>{names.begin(), names.end()}](const Dir_entry &entry) {
-        return std::ranges::any_of(names, [&](const auto &n) { return entry.filename() == n; });
-    });
-}
-
-auto Dir_walker::skip(std::string dir_name) -> Dir_walker &
-{
-    skips_.emplace_back(std::move(dir_name));
-    return *this;
-}
-
-auto Dir_walker::skip(std::initializer_list<std::string_view> dir_names) -> Dir_walker &
-{
-    for (auto n : dir_names) {
-        skips_.emplace_back(n);
-    }
-    return *this;
-}
-
-template <typename S, typename Step, typename Finish>
-auto Dir_walker::run_transformed(S init, Step step, Walk_action terminal, Finish finish, std::source_location caller) const noexcept
-    -> Walk_result_t<std::invoke_result_t<Finish, S>>
-{
-    S state = std::move(init);
-    return run(
-               [&](const Dir_entry &e) -> Walk_result {
-                   std::invoke(step, state, e);
-                   return terminal;
-               },
-               caller)
-        .transform([&] { return std::invoke(finish, std::move(state)); });
-}
-
-auto Dir_walker::collect(std::source_location caller) const noexcept -> Walk_result_t<std::vector<Dir_entry>>
-{
-    return run_transformed(
-        std::vector<Dir_entry>{},
-        [](std::vector<Dir_entry> &out, const Dir_entry &e) { out.push_back(e); },
-        Walk_action::next,
-        [](auto v) { return v; },
-        caller);
-}
-
-auto Dir_walker::collect_paths(std::source_location caller) const noexcept -> Walk_result_t<std::vector<std::filesystem::path>>
-{
-    return collect(caller).transform(
-        [](auto &&entries) { return entries | std::views::transform(&Dir_entry::path) | std::ranges::to<std::vector>(); });
-}
-
-auto Dir_walker::count(std::source_location caller) const noexcept -> Walk_result_t<std::size_t>
-{
-    return run_transformed(
-        std::size_t{0},
-        [](std::size_t &n, const Dir_entry &) { ++n; },
-        Walk_action::next,
-        [](auto v) { return v; },
-        caller);
-}
-
-auto Dir_walker::any(std::source_location caller) const noexcept -> Walk_result_t<bool>
-{
-    return run_transformed(
-        false,
-        [](bool &found, const Dir_entry &) { found = true; },
-        Walk_action::stop,
-        [](auto v) { return v; },
-        caller);
-}
-
-auto Dir_walker::none(std::source_location caller) const noexcept -> Walk_result_t<bool>
-{
-    return any(caller).transform([](bool v) { return !v; });
-}
-
-auto Dir_walker::first(std::source_location caller) const noexcept -> Walk_result_t<std::optional<Dir_entry>>
-{
-    return run_transformed(
-        std::optional<Dir_entry>{},
-        [](std::optional<Dir_entry> &found, const Dir_entry &e) { found = e; },
-        Walk_action::stop,
-        [](auto v) { return v; },
-        caller);
-}
-
-auto Dir_walker::last(std::source_location caller) const noexcept -> Walk_result_t<std::optional<Dir_entry>>
-{
-    return run_transformed(
-        std::optional<Dir_entry>{},
-        [](std::optional<Dir_entry> &found, const Dir_entry &e) { found = e; },
-        Walk_action::next,
-        [](auto v) { return v; },
-        caller);
-}
-
-auto Dir_walker::subdir(std::string_view sub) const -> Dir_walker
-{
-    Dir_walker w{root_ / sub};
-    w.recursive_ = recursive_;
-    w.include_dirs_ = include_dirs_;
-    w.include_hidden_ = include_hidden_;
-    w.follow_symlinks_ = follow_symlinks_;
-    w.max_depth_ = max_depth_;
-    w.filters_ = filters_;
-    w.skips_ = skips_;
-    return w;
-}
-
-bool Dir_walker::passes_filters(const Dir_entry &e) const
-{
-    return std::ranges::all_of(filters_, [&](const auto &f) { return f(e); });
-}
-
-bool Dir_walker::is_skipped(const Dir_entry &e) const
-{
-    return e.is_dir() && std::ranges::any_of(skips_, [&](const auto &s) { return e.filename() == s; });
-}
-
-bool Dir_walker::is_visible(const Dir_entry &e) const
-{
-    if (!include_hidden_ && e.is_hidden()) {
-        return false;
-    }
-    if (!include_dirs_ && e.is_dir()) {
-        return false;
-    }
-    return true;
-}
-
-auto Dir_walker::make_entry(const std::filesystem::directory_entry &raw, int d) -> Dir_entry
-{
-    std::error_code ignored;
-    return Dir_entry{
-        .path = raw.path(),
-        .type = raw.symlink_status(ignored).type(),
-        .depth = d,
-    };
-}
-
-auto collect(std::string_view root, std::source_location caller) noexcept -> Walk_result_t<std::vector<Dir_entry>>
-{
-    return Dir_walker{root}.collect(caller);
+    return {};
 }
 
 auto stem(std::string_view path) noexcept -> std::string
@@ -6996,14 +6808,40 @@ auto make_dirs(Paths &&...paths) noexcept -> bool
 
 inline auto find_all_files(std::string_view root) noexcept -> Walk_result_t<std::vector<std::string>>
 {
-    return detail::paths_to_strings(Dir_walker{root}.collect_paths());
+    std::vector<std::string> out;
+    auto r = walk(root, {}, [&](const Dir_entry &e) {
+        if (e.is_file()) {
+            out.push_back(e.path.string());
+        }
+        return Act::next;
+    });
+    if (!r) {
+        return std::unexpected(std::move(r.error()));
+    }
+    return out;
 }
 
 template <typename... Exts>
     requires(std::convertible_to<Exts, std::string_view> && ...)
 auto find_by_ext(std::string_view root, Exts &&...exts) noexcept -> Walk_result_t<std::vector<std::string>>
 {
-    return detail::paths_to_strings(Dir_walker{root}.ext({std::string_view(exts)...}).collect_paths());
+    std::vector<std::string> want{std::string{exts}...};
+    for (auto &e : want) {
+        if (!e.empty() && e.front() != '.') {
+            e = '.' + e;
+        }
+    }
+    std::vector<std::string> out;
+    auto r = walk(root, {}, [&](const Dir_entry &e) {
+        if (e.is_file() && std::ranges::find(want, e.extension()) != want.end()) {
+            out.push_back(e.path.string());
+        }
+        return Act::next;
+    });
+    if (!r) {
+        return std::unexpected(std::move(r.error()));
+    }
+    return out;
 }
 
 template <typename... Names>
@@ -7011,10 +6849,17 @@ template <typename... Names>
 auto find_by_name(std::string_view root, Names &&...names) noexcept -> Walk_result_t<std::vector<std::string>>
 {
     std::vector<std::string_view> targets{std::forward<Names>(names)...};
-    return detail::paths_to_strings(
-        Dir_walker{root}
-            .where([targets](const Dir_entry &e) { return std::ranges::find(targets, e.filename()) != targets.end(); })
-            .collect_paths());
+    std::vector<std::string> out;
+    auto r = walk(root, {}, [&](const Dir_entry &e) {
+        if (e.is_file() && std::ranges::find(targets, e.filename()) != targets.end()) {
+            out.push_back(e.path.string());
+        }
+        return Act::next;
+    });
+    if (!r) {
+        return std::unexpected(std::move(r.error()));
+    }
+    return out;
 }
 
 std::vector<Cpp_module> scan_modules(const std::string &path, std::vector<std::string> extensions)
@@ -7032,21 +6877,24 @@ std::vector<Cpp_module> scan_modules(const std::string &path, std::vector<std::s
         }
     }
 
-    auto walk_res = bld::fs::Dir_walker{path}
-                        .recursive()
-                        .where([&extensions](const bld::fs::Dir_entry &entry) {
-                            return std::ranges::any_of(extensions, [&](const std::string &ext) { return entry.extension() == ext; });
-                        })
-                        .for_each([&](const bld::fs::Dir_entry &entry) {
-                            std::string content;
+    auto walk_res = bld::fs::walk(
+        path,
+        bld::fs::Walk_opts{},
+        [&](const bld::fs::Dir_entry &entry) {
+            if (!entry.is_file()
+                || !std::ranges::any_of(
+                    extensions, [&](const std::string &ext) { return entry.extension() == ext; })) {
+                return bld::fs::Act::next;
+            }
+            std::string content;
                             if (auto res = bld::fs::read_file(entry.path.string()); res) {
                                 content = *res;
                             } else {
                                 bld::log::w("Failed to read module file '{}': {}", entry.path.string(), res.error().msg);
-                                return;
+                                return bld::fs::Act::next;
                             }
                             if (content.empty()) {
-                                return;
+                                return bld::fs::Act::next;
                             }
 
                             // Tokenize
@@ -7111,6 +6959,7 @@ std::vector<Cpp_module> scan_modules(const std::string &path, std::vector<std::s
                             } else {
                                 bld::log::w("Skipped file (no module decl found): {}", entry.path.string());
                             }
+                            return bld::fs::Act::next;
                         });
 
     if (!walk_res) {
@@ -7315,165 +7164,6 @@ auto format(std::chrono::nanoseconds ns) -> std::string
 } // namespace bld::time
 
 namespace bld::fs {
-
-constexpr Walk_result::Walk_result(Walk_action a) noexcept : action{a}
-{}
-constexpr Walk_result::Walk_result(std::error_code ec) noexcept : action{ec ? Walk_action::stop : Walk_action::next}, error{ec}
-{}
-
-namespace detail {
-template <Valid_visitor V>
-auto invoke_visitor(V &&v, const Dir_entry &e) -> Walk_result
-{
-    if constexpr (Void_visitor<V>) {
-        std::invoke(std::forward<V>(v), e);
-        return {};
-    } else {
-        return std::invoke(std::forward<V>(v), e);
-    }
-}
-} // namespace detail
-
-template <typename Pred>
-    requires std::predicate<Pred, const Dir_entry &>
-auto Dir_walker::where(Pred pred) -> Dir_walker &
-{
-    filters_.emplace_back(std::move(pred));
-    return *this;
-}
-
-template <detail::Valid_visitor V>
-auto Dir_walker::walk(V &&visitor, std::source_location caller) const noexcept -> Walk_result_t<void>
-{
-    return run([&](const Dir_entry &e) { return detail::invoke_visitor(std::forward<V>(visitor), e); }, caller);
-}
-
-template <std::invocable<const Dir_entry &> F>
-auto Dir_walker::for_each(F &&fn, std::source_location caller) const noexcept -> Walk_result_t<void>
-{
-    return walk(
-        [&](const Dir_entry &e) -> Walk_result {
-            std::invoke(std::forward<F>(fn), e);
-            return Walk_action::next;
-        },
-        caller);
-}
-
-template <typename Pred>
-    requires std::predicate<Pred, const Dir_entry &>
-auto Dir_walker::partition(Pred pred, std::source_location caller) const noexcept
-    -> Walk_result_t<std::pair<std::vector<Dir_entry>, std::vector<Dir_entry>>>
-{
-    return run_transformed(
-        std::pair<std::vector<Dir_entry>, std::vector<Dir_entry>>{},
-        [&](auto &halves, const Dir_entry &e) {
-            (std::invoke(pred, e) ? halves.first : halves.second).push_back(e);
-        },
-        Walk_action::next,
-        [](auto p) { return p; },
-        caller);
-}
-
-template <typename T, std::invocable<T, const Dir_entry &> F>
-auto Dir_walker::fold(T init, F &&fn, std::source_location caller) const noexcept -> Walk_result_t<T>
-{
-    return run_transformed(
-        std::move(init),
-        [&](T &acc, const Dir_entry &e) { acc = std::invoke(fn, std::move(acc), e); },
-        Walk_action::next,
-        [](T v) { return v; },
-        caller);
-}
-
-template <std::invocable<Dir_walker &> F>
-auto Dir_walker::apply(F &&fn) -> Dir_walker &
-{
-    std::invoke(std::forward<F>(fn), *this);
-    return *this;
-}
-
-template <std::invocable<const Dir_entry &> F>
-auto Dir_walker::run(F &&fn, std::source_location caller) const noexcept -> Walk_result_t<void>
-{
-    namespace fs = std::filesystem;
-
-    if (root_.empty()) {
-        bld::log::w("Dir_walker: empty root ({})", caller.function_name());
-        return std::unexpected{Walk_error{.kind = Walk_error::Kind::fs, .code = std::make_error_code(std::errc::invalid_argument)}};
-    }
-
-    std::error_code ec;
-    const auto iter_opts = follow_symlinks_ ? fs::directory_options::skip_permission_denied | fs::directory_options::follow_directory_symlink
-                                            : fs::directory_options::skip_permission_denied;
-
-    auto handle = [&](const Dir_entry &e) -> Walk_result {
-        if (is_skipped(e)) {
-            return Walk_action::skip_dir;
-        }
-        if (!is_visible(e)) {
-            return Walk_action::next;
-        }
-        if (!passes_filters(e)) {
-            return Walk_action::next;
-        }
-        return std::invoke(fn, e);
-    };
-
-    if (!recursive_) {
-        fs::directory_iterator it{root_, iter_opts, ec};
-        if (ec) {
-            return std::unexpected{Walk_error{.kind = Walk_error::Kind::fs, .code = ec}};
-        }
-
-        for (const auto &raw : it) {
-            const auto [action, err] = handle(make_entry(raw, 0));
-            if (err) {
-                return std::unexpected{Walk_error{.kind = Walk_error::Kind::visitor, .code = err}};
-            }
-            if (action == Walk_action::stop) {
-                return {};
-            }
-        }
-        return {};
-    }
-
-    fs::recursive_directory_iterator it{root_, iter_opts, ec};
-    if (ec) {
-        return std::unexpected{Walk_error{.kind = Walk_error::Kind::fs, .code = ec}};
-    }
-
-    for (const auto &raw : it) {
-        const int d = it.depth();
-        if (d >= max_depth_) {
-            it.disable_recursion_pending();
-        }
-
-        const auto [action, err] = handle(make_entry(raw, d));
-
-        if (err) {
-            return std::unexpected{Walk_error{.kind = Walk_error::Kind::visitor, .code = err}};
-        }
-
-        switch (action) {
-        case Walk_action::stop:
-            it = {};
-            return {};
-        case Walk_action::skip_dir:
-            it.disable_recursion_pending();
-            break;
-        case Walk_action::next:
-            break;
-        }
-    }
-
-    return {};
-}
-
-template <detail::Valid_visitor V>
-inline auto walk(std::string_view root, V &&visitor, std::source_location caller) noexcept
-{
-    return Dir_walker{root}.walk(std::forward<V>(visitor), caller);
-}
 
 } // namespace bld::fs
 
