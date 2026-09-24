@@ -30,7 +30,7 @@ int main()
     }
 
     // jobs{} (default) => max-1. jobs{n} => exactly n, clamped to the machine.
-    // Add inputs/outputs to make this same call graph-aware (auto-ordered).
+    // A bare span always runs everything; use a Plan for ordered builds.
     bld::log::i("default parallelism would be {} procs", bld::max_parallel_count());
 
     return EXIT_SUCCESS;

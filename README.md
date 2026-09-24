@@ -172,27 +172,30 @@ for (const auto &e : bld::fs::walk_dir("src", wctl)
 // if (wctl.failed()) { /* wctl.error(): Kind::fs vs Kind::user */ }
 ```
 
-### Unified runs and compile databases
+### Task batches, plans, and compile databases
 
 ```cpp
+// A Task is an unrun Proc: name + command. A bare span runs everything
+// in parallel, no questions asked.
 std::vector<bld::Task> tasks;
 tasks.emplace_back(bld::Cmd{"g++", "-c", "a.cpp", "-o", "a.o"});
 tasks.emplace_back(bld::Cmd{"g++", "-c", "b.cpp", "-o", "b.o"});
 
-// jobs{nullopt} => max-1; <=0 => max+i; >0 => capped by max.
+// jobs{} => max-1; jobs{n} => exactly n, clamped to the machine.
 // max_async{0} => follow jobs width; >0 => absolute proc cap.
 auto res = bld::run(tasks, bld::jobs{4}, bld::max_async{8});
+
+// Ordering and up-to-date checks live in Plan's side tables, not in Task.
+bld::Plan chain;
+chain.add("a", bld::Cmd{"sh", "-c", "echo a > a.o"});
+chain.produces("a", "a.o");
+chain.add("b", bld::Cmd{"sh", "-c", "cat a.o > b"});
+chain.needs("b", "a.o");
+bld::run(chain, bld::jobs{8});
 
 // Export marked tasks, or execute an existing database directly.
 bld::run(build, bld::write_compile_commands{"compile_commands.json"});
 bld::run(bld::compile_commands("build/compile_commands.json"), bld::jobs{8});
-
-// span<Task> with no declared deps runs everything in parallel; any
-// inputs/outputs/after builds a DAG automatically. Plan always graphs.
-bld::Task a{bld::Cmd{"sh", "-c", "echo a > a.o"}}; a.produces("a.o");
-bld::Task b{bld::Cmd{"sh", "-c", "cat a.o > b"}}; b.needs("a.o");
-std::vector<bld::Task> chain{std::move(a), std::move(b)};
-bld::run(chain, bld::jobs{8});
 ```
 
 Misuse fails fast: duplicates (`label` twice, `jobs` twice) are compile

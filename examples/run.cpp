@@ -350,19 +350,25 @@ int main()
     }
 
     // 2e. dry_run previews (spawns nothing); force re-runs up-to-date work.
+    // A one-task Plan (span<Task> never skips — ordering lives in Plan).
     {
-        std::vector<bld::Task> tasks;
-        bld::Task a{bld::Cmd{"sh", "-c", "echo a > demo_build/2e.o"}};
-        a.name = "e_a";
-        a.produces("demo_build/2e.o");
-        tasks.push_back(std::move(a));
-        auto first = bld::run(tasks, bld::jobs{2});
+        auto build = [] {
+            bld::Plan plan;
+            plan.add("e_a", bld::Cmd{"sh", "-c", "echo a > demo_build/2e.o"});
+            plan.produces("e_a", "demo_build/2e.o");
+            return plan;
+        };
+        bld::Plan p1 = build();
+        auto first = bld::run(p1, bld::jobs{2});
         show_result("2e first", first); // ran
-        auto second = bld::run(tasks, bld::jobs{2});
+        bld::Plan p2 = build();
+        auto second = bld::run(p2, bld::jobs{2});
         show_result("2e second", second); // skipped: up to date
-        auto preview = bld::run(tasks, bld::jobs{2}, bld::force{}, bld::dry_run{});
+        bld::Plan p3 = build();
+        auto preview = bld::run(p3, bld::jobs{2}, bld::force{}, bld::dry_run{});
         show_result("2e force+dry_run preview", preview); // dry run (would re-run)
-        auto forced = bld::run(tasks, bld::jobs{2}, bld::force{});
+        bld::Plan p4 = build();
+        auto forced = bld::run(p4, bld::jobs{2}, bld::force{});
         show_result("2e forced", forced); // ran again
     }
 
@@ -385,29 +391,31 @@ int main()
         show_result("2g empty", res);
     }
 
-    // 3. span<Task> with declared deps: Task builders form the DAG automatically.
+    // 3. Plan chain: Task builders form the DAG in Plan maps.
     {
         // Fresh outputs so the first run really runs the whole chain.
         std::filesystem::remove("demo_build/d_a.o");
         std::filesystem::remove("demo_build/d_b.o");
         std::filesystem::remove("demo_build/d_c.o");
-        std::vector<bld::Task> tasks;
-        bld::Task a{bld::Cmd{"sh", "-c", "echo a > demo_build/d_a.o"}};
-        a.name = "d_a";
-        a.produces("demo_build/d_a.o");
-        bld::Task b{bld::Cmd{"sh", "-c", "cat demo_build/d_a.o > demo_build/d_b.o"}};
-        b.name = "d_b";
-        b.needs("demo_build/d_a.o").produces("demo_build/d_b.o");
-        bld::Task c{bld::Cmd{"sh", "-c", "cat demo_build/d_b.o > demo_build/d_c.o"}};
-        c.name = "d_c";
-        c.needs_from({"demo_build/d_b.o"}).produces_to({"demo_build/d_c.o"}).after_dep("d_a");
-        tasks.push_back(std::move(a));
-        tasks.push_back(std::move(b));
-        tasks.push_back(std::move(c));
-        auto res = bld::run(tasks, bld::jobs{2});
-        show_result("3 auto chain", res);
-        auto again = bld::run(tasks, bld::jobs{2});
-        show_result("3 auto up-to-date", again); // all skipped
+        auto build = [] {
+            bld::Plan plan;
+            plan.add("d_a", bld::Cmd{"sh", "-c", "echo a > demo_build/d_a.o"});
+            plan.produces("d_a", "demo_build/d_a.o");
+            plan.add("d_b", bld::Cmd{"sh", "-c", "cat demo_build/d_a.o > demo_build/d_b.o"});
+            plan.needs("d_b", "demo_build/d_a.o");
+            plan.produces("d_b", "demo_build/d_b.o");
+            plan.add("d_c", bld::Cmd{"sh", "-c", "cat demo_build/d_b.o > demo_build/d_c.o"});
+            plan.needs("d_c", "demo_build/d_b.o");
+            plan.produces("d_c", "demo_build/d_c.o");
+            plan.after("d_c", "d_a");
+            return plan;
+        };
+        bld::Plan plan = build();
+        auto res = bld::run(plan, bld::jobs{2});
+        show_result("3 plan chain", res);
+        bld::Plan plan2 = build();
+        auto again = bld::run(plan2, bld::jobs{2});
+        show_result("3 plan up-to-date", again); // all skipped
     }
 
     // 4. Plan — graph + outdated lives in Plan maps; same Run modifiers as span.
@@ -452,7 +460,7 @@ int main()
             auto res2 = bld::run(
                 bld::compile_commands("demo_build/compile_commands.json", true), bld::jobs{4}, bld::keep_going{});
             show_result("5b db infer+keep_going", res2);
-            // infer_outputs parses "-o <file>" into Task.outputs; false leaves them empty.
+            // infer_outputs parses "-o <file>" into Plan outputs; false leaves them empty.
             // The Plan-written db above already carries explicit "output" keys, so
             // craft one entry without it to show the difference.
             std::ignore = bld::fs::write_file(
@@ -461,11 +469,18 @@ int main()
             auto with = bld::details::load_compile_commands(bld::compile_commands("demo_build/infer_cc.json", true));
             auto without = bld::details::load_compile_commands(bld::compile_commands("demo_build/infer_cc.json", false));
             if (with && without) {
-                const bool w = !with->empty() && !(*with)[0].outputs.empty();
-                const bool wo = !without->empty() && !(*without)[0].outputs.empty();
+                auto has_out = [](const auto &plan) {
+                    auto it = plan.task_outputs.find("a.cpp");
+                    return it != plan.task_outputs.end() && !it->second.empty();
+                };
+                const bool w = !with->tasks.empty() && has_out(*with);
+                const bool wo = !without->tasks.empty() && has_out(*without);
                 bld::log::i("5c infer outputs: true_has={} false_has={} (want true/false)", w, wo);
                 if (w) {
-                    bld::log::i("5c inferred output='{}' input='{}'", (*with)[0].outputs.front(), (*with)[0].inputs.front());
+                    bld::log::i(
+                        "5c inferred output='{}' input='{}'",
+                        with->task_outputs["a.cpp"].front(),
+                        with->task_inputs["a.cpp"].front());
                 }
             }
             // Missing file is an error, not a crash.
@@ -494,19 +509,16 @@ int main()
 
     // 7. Runtime config errors — each prints the Err the library returns.
     {
-        // 7a. Declared deps order automatically: producer runs first.
+        // 7a. Declared deps order automatically in a Plan (span<Task> is
+        // unordered by design — it holds no dependency info at all).
         {
-            std::vector<bld::Task> tasks;
-            bld::Task a{bld::Cmd{"echo", "a"}};
-            a.name = "a";
-            a.produces("demo_build/7a.o");
-            bld::Task b{bld::Cmd{"echo", "b"}};
-            b.name = "b";
-            b.needs("demo_build/7a.o");
-            tasks.push_back(std::move(a));
-            tasks.push_back(std::move(b));
-            auto res = bld::run(tasks);
-            show_result("7a auto graph", res); // ran=2, ordered a before b
+            bld::Plan plan;
+            plan.add("a", bld::Cmd{"echo", "a"});
+            plan.produces("a", "demo_build/7a.o");
+            plan.add("b", bld::Cmd{"echo", "b"});
+            plan.needs("b", "demo_build/7a.o");
+            auto res = bld::run(plan);
+            show_result("7a plan graph", res); // ran=2, ordered a before b
         }
         // 7b. Empty command names the task.
         {
@@ -531,52 +543,38 @@ int main()
         }
         // 7d. Duplicate outputs.
         {
-            std::vector<bld::Task> tasks;
-            bld::Task a{bld::Cmd{"true"}};
-            a.name = "a";
-            a.produces("demo_build/7e.o");
-            bld::Task b{bld::Cmd{"true"}};
-            b.name = "b";
-            b.produces("demo_build/7e.o");
-            tasks.push_back(std::move(a));
-            tasks.push_back(std::move(b));
-            auto res = bld::run(tasks);
+            bld::Plan plan;
+            plan.add("a", bld::Cmd{"true"});
+            plan.produces("a", "demo_build/7e.o");
+            plan.add("b", bld::Cmd{"true"});
+            plan.produces("b", "demo_build/7e.o");
+            auto res = bld::run(plan);
             expect_err("7d dup output", res, "multiple tasks produce");
         }
         // 7e. Unknown after-dependency.
         {
-            std::vector<bld::Task> tasks;
-            bld::Task a{bld::Cmd{"true"}};
-            a.name = "a";
-            a.after_dep("ghost");
-            tasks.push_back(std::move(a));
-            auto res = bld::run(tasks);
+            bld::Plan plan;
+            plan.add("a", bld::Cmd{"true"});
+            plan.after("a", "ghost");
+            auto res = bld::run(plan);
             expect_err("7e unknown dep", res, "unknown task 'ghost'");
         }
         // 7f. Self-dependency.
         {
-            std::vector<bld::Task> tasks;
-            bld::Task a{bld::Cmd{"true"}};
-            a.name = "self";
-            a.after_dep("self");
-            tasks.push_back(std::move(a));
-            auto res = bld::run(tasks);
+            bld::Plan plan;
+            plan.add("self", bld::Cmd{"true"});
+            plan.after("self", "self");
+            auto res = bld::run(plan);
             expect_err("7f self dep", res, "depends on itself");
         }
         // 7g. Cycle a<->b.
         {
-            std::vector<bld::Task> tasks;
-            bld::Task a{bld::Cmd{"true"}};
-            a.name = "a";
-            a.produces("demo_build/7h_a");
-            a.needs("demo_build/7h_b");
-            bld::Task b{bld::Cmd{"true"}};
-            b.name = "b";
-            b.produces("demo_build/7h_b");
-            b.needs("demo_build/7h_a");
-            tasks.push_back(std::move(a));
-            tasks.push_back(std::move(b));
-            auto res = bld::run(tasks);
+            bld::Plan plan;
+            plan.add("a", bld::Cmd{"true"});
+            plan.add("b", bld::Cmd{"true"});
+            plan.after("a", "b");
+            plan.after("b", "a");
+            auto res = bld::run(plan);
             expect_err("7g cycle", res, "cycle");
         }
         // 7h. Missing cwd.

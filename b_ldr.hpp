@@ -560,24 +560,15 @@ inline constexpr Proc_id INVALID_PROC_ID = 0;
 
 struct Task
 {
+    // An unrun Proc: a name plus what to spawn. No dependency info —
+    // ordering lives in Plan's side tables (or not at all for a bare span,
+    // which always runs everything in parallel).
     std::string name;
     Exec_spec spec;
-    // Local dependency info; run(span<Task>) builds a graph from it
-    // automatically whenever any task declares deps, so a bare span can
-    // also form a graph. Plan keeps its own external maps.
-    std::vector<std::string> inputs;
-    std::vector<std::string> outputs;
-    std::vector<std::string> after;
 
     Task() = default;
     template <typename... Configs>
     explicit Task(Cmd_loc cl, Configs &&...confs);
-
-    auto needs(std::string_view input) -> Task &;
-    auto needs_from(std::initializer_list<std::string_view> ins) -> Task &;
-    auto produces(std::string_view output) -> Task &;
-    auto produces_to(std::initializer_list<std::string_view> outs) -> Task &;
-    auto after_dep(std::string_view dep) -> Task &;
 };
 
 struct Proc
@@ -1135,7 +1126,7 @@ struct Compilation_database
 namespace details {
 auto run_tasks(std::span<bld::Task> tasks, const bld::Run_config &cfg) -> std::expected<bld::Run_result, bld::Err>;
 auto run_plan(Plan &plan, const bld::Run_config &cfg) -> std::expected<bld::Run_result, bld::Err>;
-auto load_compile_commands(const bld::Compilation_database &database) -> std::expected<std::vector<bld::Task>, bld::Err>;
+auto load_compile_commands(const bld::Compilation_database &database) -> std::expected<bld::Plan, bld::Err>;
 } // namespace details
 template <typename T>
 concept Run_modifier_c = requires(T &&modifier, Run_config &cfg) { modifier(cfg); };
@@ -1194,13 +1185,13 @@ auto run(const Compilation_database &database, Options &&...options) -> std::exp
 {
     static_assert((Run_modifier_c<Options> && ...), B_LDR_RUN_MODIFIERS_MSG);
     validate_run_options<Options...>();
-    auto tasks = details::load_compile_commands(database);
-    if (!tasks) {
-        return std::unexpected(tasks.error());
+    auto plan = details::load_compile_commands(database);
+    if (!plan) {
+        return std::unexpected(plan.error());
     }
     Run_config cfg{};
     (options(cfg), ...);
-    return details::run_tasks(std::span<bld::Task>{*tasks}, cfg);
+    return details::run_plan(*plan, cfg);
 }
 } // namespace bld
 
@@ -4293,35 +4284,6 @@ auto bld::write_compile_commands::operator()(Run_config &cfg) const -> void
 {
     cfg.write_compile_commands = path;
 }
-auto bld::Task::needs(std::string_view input) -> Task &
-{
-    inputs.emplace_back(input);
-    return *this;
-}
-auto bld::Task::needs_from(std::initializer_list<std::string_view> ins) -> Task &
-{
-    for (auto s : ins) {
-        inputs.emplace_back(s);
-    }
-    return *this;
-}
-auto bld::Task::produces(std::string_view output) -> Task &
-{
-    outputs.emplace_back(output);
-    return *this;
-}
-auto bld::Task::produces_to(std::initializer_list<std::string_view> outs) -> Task &
-{
-    for (auto s : outs) {
-        outputs.emplace_back(s);
-    }
-    return *this;
-}
-auto bld::Task::after_dep(std::string_view dep) -> Task &
-{
-    after.emplace_back(dep);
-    return *this;
-}
 
 // IMPL SECTION 04 — Execution (bld::run, bld::capture, bld::Task)
 auto bld::details::execute(const bld::Cmd &cmd, const Proc_config &cfg, std::source_location loc) -> std::expected<bld::Proc, bld::Err>
@@ -5128,7 +5090,7 @@ auto write_database(Plan &plan, std::string_view path) -> std::expected<void, bl
 }
 } // namespace
 
-auto load_compile_commands(const bld::Compilation_database &database) -> std::expected<std::vector<bld::Task>, bld::Err>
+auto load_compile_commands(const bld::Compilation_database &database) -> std::expected<bld::Plan, bld::Err>
 {
     auto file = bld::fs::read_file(database.path);
     if (!file) {
@@ -5138,7 +5100,7 @@ auto load_compile_commands(const bld::Compilation_database &database) -> std::ex
     if (!reader.take('[')) {
         return std::unexpected(bld::Err::erc(std::errc::invalid_argument, "compile_commands.json must contain an array"));
     }
-    std::vector<bld::Task> tasks;
+    bld::Plan plan;
     reader.ws();
     while (!reader.take(']')) {
         if (!reader.take('{')) {
@@ -5196,20 +5158,21 @@ auto load_compile_commands(const bld::Compilation_database &database) -> std::ex
         task.name = file_name;
         task.spec.cmd.args_ = std::move(arguments);
         task.spec.cfg.cwd = std::move(directory);
-        // Record file-level deps so run(tasks) can order them automatically.
-        task.inputs.push_back(file_name);
+        plan.add(std::move(task));
+        // Record file-level deps in the Plan so the loaded database runs ordered.
+        plan.needs(file_name, file_name);
         if (!output.empty()) {
-            task.outputs.push_back(std::move(output));
+            plan.produces(file_name, std::move(output));
         } else if (database.infer_outputs) {
             // Infer "-o <file>" from the argument list.
-            for (std::size_t i = 0; i + 1 < task.spec.cmd.args_.size(); ++i) {
-                if (task.spec.cmd.args_[i] == "-o") {
-                    task.outputs.push_back(task.spec.cmd.args_[i + 1]);
+            auto &added = plan.tasks.back();
+            for (std::size_t i = 0; i + 1 < added.spec.cmd.args_.size(); ++i) {
+                if (added.spec.cmd.args_[i] == "-o") {
+                    plan.produces(file_name, added.spec.cmd.args_[i + 1]);
                     break;
                 }
             }
         }
-        tasks.push_back(std::move(task));
         reader.ws();
         if (!reader.take(',')) {
             reader.ws();
@@ -5219,7 +5182,7 @@ auto load_compile_commands(const bld::Compilation_database &database) -> std::ex
             break;
         }
     }
-    return tasks;
+    return plan;
 }
 
 // Shared scheduler pieces for run_tasks/run_plan. Behavior-preserving:
@@ -5467,8 +5430,8 @@ inline auto run_schedule(
 
 auto run_tasks(std::span<bld::Task> tasks, const bld::Run_config &cfg) -> std::expected<bld::Run_result, bld::Err>
 {
-    // span<Task>: no declared deps => run everything independently;
-    // any inputs/outputs/after => build the DAG automatically.
+    // span<Task>: a bag of unrun Procs. No graph, no skipping — everything
+    // runs in parallel. Ordering and up-to-date checks belong to Plan.
     // Waiting is done via Proc_group (procs owned by the group).
     if (!cfg.write_compile_commands.empty()) {
         auto written = write_database(tasks, cfg.write_compile_commands);
@@ -5487,116 +5450,22 @@ auto run_tasks(std::span<bld::Task> tasks, const bld::Run_config &cfg) -> std::e
     if (auto ok = check_empty_commands(tasks); !ok) {
         return std::unexpected(std::move(ok.error()));
     }
+    // Names must be unique (logging and results key off them).
+    {
+        std::unordered_set<std::string> seen;
+        for (auto &t : tasks) {
+            if (!seen.insert(t.name).second) {
+                return std::unexpected(
+                    Err::erc(std::errc::invalid_argument, std::format("duplicate task name '{}'", t.name)));
+            }
+        }
+    }
     // Single-threaded scheduler: up to <width> child processes live at once.
     // Effective width = min(resolved parallel width, resolved async cap).
     std::size_t width = resolve_sched_width(cfg);
     std::vector<std::vector<std::size_t>> children(tasks.size());
     std::vector<std::size_t> indegree(tasks.size(), 0);
-    const bool graph = std::ranges::any_of(tasks, [](const bld::Task &t) {
-        return !t.inputs.empty() || !t.outputs.empty() || !t.after.empty();
-    });
-    if (graph) {
-        std::unordered_map<std::string, std::size_t> producers, names;
-        for (std::size_t i = 0; i < tasks.size(); ++i) {
-            if (!names.emplace(tasks[i].name, i).second) {
-                return std::unexpected(Err::erc(std::errc::invalid_argument, std::format("duplicate task name '{}'", tasks[i].name)));
-            }
-            for (auto &out : tasks[i].outputs) {
-                if (!producers.emplace(out, i).second) {
-                    return std::unexpected(Err::erc(std::errc::invalid_argument, std::format("multiple tasks produce '{}'", out)));
-                }
-            }
-        }
-        auto edge = [&](std::size_t from, std::size_t to) {
-            for (auto c : children[from]) {
-                if (c == to) {
-                    return;
-                }
-            }
-            children[from].push_back(to);
-            ++indegree[to];
-        };
-        for (std::size_t i = 0; i < tasks.size(); ++i) {
-            for (auto &in : tasks[i].inputs) {
-                if (auto it = producers.find(in); it != producers.end()) {
-                    if (it->second == i) {
-                        return std::unexpected(Err::erc(
-                            std::errc::invalid_argument,
-                            std::format("task '{}' depends on its own output '{}'", tasks[i].name, in)));
-                    }
-                    edge(it->second, i);
-                }
-            }
-            for (auto &dep : tasks[i].after) {
-                auto it = names.find(dep);
-                if (it == names.end()) {
-                    return details::fail(
-                        std::errc::invalid_argument, "task '{}' depends on unknown task '{}'", tasks[i].name, dep);
-                }
-                if (it->second == i) {
-                    return details::fail(std::errc::invalid_argument, "task '{}' depends on itself", tasks[i].name);
-                }
-                edge(it->second, i);
-            }
-        }
-    }
-    // No declared deps anywhere: independent run-all, everything dirty.
-    auto topo_res = topo_sort(children, indegree);
-    if (!topo_res) {
-        return std::unexpected(std::move(topo_res.error()));
-    }
-    auto topo = std::move(*topo_res);
-    // Dirty: run-all mode always dirty; graph mode honours is_outdated + force.
-    std::vector<bool> dirty(tasks.size(), false);
-    if (!graph) {
-        std::fill(dirty.begin(), dirty.end(), true);
-    } else if (cfg.force) {
-        std::fill(dirty.begin(), dirty.end(), true);
-    } else {
-        for (auto i : topo) {
-            bool needs_run = false;
-            if (tasks[i].outputs.empty()) {
-                needs_run = true;
-            } else {
-                for (auto &out : tasks[i].outputs) {
-                    if (!std::filesystem::exists(out)) {
-                        needs_run = true;
-                        break;
-                    }
-                    for (auto &in : tasks[i].inputs) {
-                        if (is_outdated(out, in)) {
-                            needs_run = true;
-                            break;
-                        }
-                    }
-                    if (needs_run) {
-                        break;
-                    }
-                }
-            }
-            // A dirty producer forces consumers dirty.
-            if (!needs_run) {
-                for (std::size_t p = 0; p < tasks.size(); ++p) {
-                    for (auto ch : children[p]) {
-                        if (ch == i && dirty[p]) {
-                            needs_run = true;
-                            break;
-                        }
-                    }
-                    if (needs_run) {
-                        break;
-                    }
-                }
-            }
-            dirty[i] = needs_run;
-            if (!needs_run) {
-                result.tasks[i].state = bld::Task_state::skipped;
-                result.tasks[i].message = "up to date";
-                ++result.skipped;
-                bld::log::d("task '{}': skipped (up to date)", tasks[i].name);
-            }
-        }
-    }
+    std::vector<bool> dirty(tasks.size(), true);
     return run_schedule(tasks, children, indegree, dirty, cfg, result, width);
 }
 

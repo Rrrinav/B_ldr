@@ -1061,38 +1061,15 @@ auto run_tests() -> int
              }
              return {};
          }},
-        {"span_tasks_build_graph",
+        {"span_runs_everything_in_parallel",
          []() -> std::expected<void, std::string> {
+             // A bare span is a bag of unrun Procs: no graph, everything runs.
              std::vector<bld::Task> tasks;
-             bld::Task a{true_cmd()};
-             a.name = "a";
-             a.produces("test_sandbox/dedup.out");
-             bld::Task b{true_cmd()};
-             b.name = "b";
-             b.needs("test_sandbox/dedup.out");
-             tasks.push_back(std::move(a));
-             tasks.push_back(std::move(b));
+             tasks.emplace_back(true_cmd());
+             tasks.emplace_back(true_cmd());
              auto report = bld::run(tasks, bld::jobs{2});
              if (!report || report->ran != 2) {
-                 return std::unexpected("span tasks did not run the 2-task chain");
-             }
-             return {};
-         }},
-        {"span_deps_auto_graph",
-         []() -> std::expected<void, std::string> {
-             // Declared deps build the graph automatically; no flag needed.
-             std::vector<bld::Task> tasks;
-             bld::Task a{true_cmd()};
-             a.name = "a";
-             a.produces("test_sandbox/undep.out");
-             bld::Task b{true_cmd()};
-             b.name = "b";
-             b.needs("test_sandbox/undep.out");
-             tasks.push_back(std::move(a));
-             tasks.push_back(std::move(b));
-             auto report = bld::run(tasks, bld::jobs{2});
-             if (!report || report->ran != 2) {
-                 return std::unexpected("declared deps did not auto-build the graph");
+                 return std::unexpected("span did not run both tasks");
              }
              return {};
          }},
@@ -1113,12 +1090,10 @@ auto run_tests() -> int
          }},
         {"self_dependency_rejected",
          []() -> std::expected<void, std::string> {
-             std::vector<bld::Task> tasks;
-             bld::Task a{true_cmd()};
-             a.name = "self";
-             a.after_dep("self");
-             tasks.push_back(std::move(a));
-             auto report = bld::run(tasks);
+             bld::Plan plan;
+             plan.add("self", true_cmd());
+             plan.after("self", "self");
+             auto report = bld::run(plan);
              if (report) {
                  return std::unexpected("self-dependency unexpectedly succeeded");
              }
@@ -1129,18 +1104,12 @@ auto run_tests() -> int
          }},
         {"dependency_cycle_rejected",
          []() -> std::expected<void, std::string> {
-             std::vector<bld::Task> tasks;
-             bld::Task a{true_cmd()};
-             a.name = "a";
-             a.produces("test_sandbox/cyc_a");
-             a.needs("test_sandbox/cyc_b");
-             bld::Task b{true_cmd()};
-             b.name = "b";
-             b.produces("test_sandbox/cyc_b");
-             b.needs("test_sandbox/cyc_a");
-             tasks.push_back(std::move(a));
-             tasks.push_back(std::move(b));
-             auto report = bld::run(tasks);
+             bld::Plan plan;
+             plan.add("a", true_cmd());
+             plan.add("b", true_cmd());
+             plan.after("a", "b");
+             plan.after("b", "a");
+             auto report = bld::run(plan);
              if (report) {
                  return std::unexpected("cycle unexpectedly succeeded");
              }
@@ -1312,16 +1281,19 @@ auto run_tests() -> int
              }
              auto with = bld::details::load_compile_commands(bld::compile_commands(db, true));
              auto without = bld::details::load_compile_commands(bld::compile_commands(db, false));
-             if (!with || !without || with->empty() || without->empty()) {
+             if (!with || !without || with->tasks.empty() || without->tasks.empty()) {
                  return std::unexpected("loader failed");
              }
-             if ((*with)[0].outputs.empty() || (*with)[0].outputs.front() != "a.o") {
+             auto wit = with->task_outputs.find("a.cpp");
+             if (wit == with->task_outputs.end() || wit->second.empty() || wit->second.front() != "a.o") {
                  return std::unexpected("infer_outputs=true did not parse -o");
              }
-             if (!(*without)[0].outputs.empty()) {
+             auto woit = without->task_outputs.find("a.cpp");
+             if (woit != without->task_outputs.end() && !woit->second.empty()) {
                  return std::unexpected("infer_outputs=false should leave outputs empty");
              }
-             if ((*with)[0].inputs.empty() || (*without)[0].inputs.empty()) {
+             if (with->task_inputs.find("a.cpp") == with->task_inputs.end()
+                 || without->task_inputs.find("a.cpp") == without->task_inputs.end()) {
                  return std::unexpected("loader should record the file as input");
              }
              return {};
@@ -1442,10 +1414,10 @@ auto run_tests() -> int
                   return std::unexpected("could not write test db");
               }
               auto loaded = bld::details::load_compile_commands(bld::compile_commands(database));
-              if (!loaded || loaded->empty()) {
+              if (!loaded || loaded->tasks.empty()) {
                   return std::unexpected("command-string entry failed to load");
               }
-              if ((*loaded)[0].spec.cmd.args_ != true_cmd().args_) {
+              if (loaded->tasks[0].spec.cmd.args_ != true_cmd().args_) {
                   return std::unexpected("command string was not split into argv correctly");
               }
               auto res = bld::run(bld::compile_commands(database));
