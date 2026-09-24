@@ -133,16 +133,16 @@ auto test_walk() -> TestSuite
     std::ignore = bld::fs::write_file(sub_dir + "/file4.cpp", "e");
     std::ignore = bld::fs::write_file(root + "root_file.hpp", "f");
 
-    // Visitor collects what its predicate keeps; everything else is a lambda.
+    // The loop body handles everything; ranges compose downstream.
     auto gather = [](const std::string &rt, bld::fs::Walk_opts opts, auto pred) {
-        std::vector<bld::fs::Dir_entry> out;
-        auto r = bld::fs::walk(rt, std::move(opts), [&](const bld::fs::Dir_entry &e) {
+        bld::fs::Controller ctl{std::move(opts)};
+        std::vector<std::string> out;
+        for (const auto &e : bld::fs::walk_dir(rt, ctl)) {
             if (e.is_file() && pred(e)) {
-                out.push_back(e);
+                out.push_back(e.filename());
             }
-            return bld::fs::Act::next;
-        });
-        return std::pair{static_cast<bool>(r), std::move(out)};
+        }
+        return std::pair{!ctl.failed(), std::move(out)};
     };
     auto all_files = gather(root, {}, [](const auto &) { return true; });
     suite.expect(all_files.first && all_files.second.size() == 5, "recursive walk should find exactly 5 files (hidden excluded)");
@@ -154,57 +154,89 @@ auto test_walk() -> TestSuite
     auto depth1 = gather(root, {.max_depth = 1}, [](const auto &) { return true; });
     suite.expect(depth1.first && depth1.second.size() == 4, "max_depth(1) should find 4 files (root + immediate children)");
 
-    // 3. Multiple Extensions (dot-insensitive, like find_by_ext)
-    auto norm = [](std::string e) {
-        if (!e.empty() && e.front() != '.') {
-            e = '.' + e;
+    // 3. Multiple Extensions via the adaptor (dot-insensitive)
+    std::vector<std::string> ext_multi;
+    {
+        bld::fs::Controller ctl;
+        for (const auto &e :
+             bld::fs::walk_dir(root, ctl) | bld::fs::only_extensions("cpp", ".hpp")) {
+            if (e.is_file()) {
+                ext_multi.push_back(e.filename());
+            }
         }
-        return e;
-    };
-    std::vector<std::string> want{norm(".cpp"), norm(".hpp")};
-    auto ext_multi = gather(root, {}, [&](const auto &e) { return std::ranges::find(want, e.extension()) != want.end(); });
-    suite.expect(ext_multi.first && ext_multi.second.size() == 3, "multi-extension filter should find 3 files");
+        suite.expect(!ctl.failed() && ext_multi.size() == 3, "multi-extension filter should find 3 files");
+    }
 
-    // 4. Custom Predicate
-    auto where_test = gather(root, {}, [](const auto &e) { return e.filename().starts_with("file"); });
-    suite.expect(where_test.first && where_test.second.size() == 4, "custom predicate failed");
+    // 4. Custom predicate (plain views::filter, no library helper needed)
+    std::vector<std::string> where_test;
+    {
+        bld::fs::Controller ctl;
+        for (const auto &e :
+             bld::fs::walk_dir(root, ctl) | std::views::filter([](const auto &x) { return x.filename().starts_with("file"); })) {
+            if (e.is_file()) {
+                where_test.push_back(e.filename());
+            }
+        }
+        suite.expect(!ctl.failed() && where_test.size() == 4, "custom predicate failed");
+    }
 
-    // 5. Static skip + filter
+    // 5. Static skip + name exclusion adaptor
     auto chained = gather(root, {.skip = {"dir1"}}, [](const auto &e) { return e.extension() == ".txt"; });
     suite.expect(chained.first && chained.second.size() == 1, "static skip + filter failed");
+    {
+        bld::fs::Controller ctl;
+        std::size_t n = 0;
+        for (const auto &e : bld::fs::walk_dir(root, ctl) | bld::fs::not_name("file1.txt", "file2.cpp")) {
+            if (e.is_file()) {
+                ++n;
+            }
+        }
+        suite.expect(!ctl.failed() && n == 3, "not_name adaptor failed");
+    }
 
-    // 6. Dynamic prune: dir2's branch is never visited nor descended.
+    // 6. Dynamic dont_recurse: dir2's branch is never visited nor descended.
     std::vector<std::string> pruned;
-    auto r_prune = bld::fs::walk(root, {}, [&](const auto &e) {
+    bld::fs::Controller prune_ctl;
+    for (const auto &e : bld::fs::walk_dir(root, prune_ctl)) {
         if (e.is_dir() && e.filename() == "dir2") {
-            return bld::fs::Act::prune;
+            prune_ctl.dont_recurse = true;
+            continue;
         }
         if (e.is_file()) {
             pruned.push_back(e.filename());
         }
-        return bld::fs::Act::next;
-    });
-    suite.expect(static_cast<bool>(r_prune), "prune walk failed");
-    suite.expect(pruned.size() == 3, "prune should leave exactly 3 files");
+    }
+    suite.expect(!prune_ctl.failed() && pruned.size() == 3, "prune should leave exactly 3 files");
     suite.expect(
         std::ranges::find(pruned, "file3.txt") == pruned.end() && std::ranges::find(pruned, "file4.cpp") == pruned.end(),
         "pruned branch was still visited");
 
-    // 7. stop ends cleanly (success, not an error).
+    // 7. break ends cleanly (no error recorded).
     int seen = 0;
-    auto r_stop = bld::fs::walk(root, {}, [&](const auto &) {
-        ++seen;
-        return seen >= 2 ? bld::fs::Act::stop : bld::fs::Act::next;
-    });
-    suite.expect(static_cast<bool>(r_stop) && seen == 2, "stop should end the walk cleanly after 2 entries");
+    bld::fs::Controller stop_ctl;
+    for (const auto &e : bld::fs::walk_dir(root, stop_ctl)) {
+        (void)e;
+        if (++seen >= 2) {
+            break;
+        }
+    }
+    suite.expect(!stop_ctl.failed() && seen == 2, "break should end the walk cleanly after 2 entries");
 
-    // 8. fail aborts with a USER error (distinct from library failure).
-    auto r_fail = bld::fs::walk(root, {}, [](const auto &) { return bld::fs::Act::fail; });
-    suite.expect(!r_fail && r_fail.error().is_user_error(), "fail should abort with a user error");
+    // 8. abort() records a USER error (distinct from library failure).
+    bld::fs::Controller fail_ctl;
+    for (const auto &e : bld::fs::walk_dir(root, fail_ctl)) {
+        (void)e;
+        fail_ctl.abort("nope");
+        break;
+    }
+    suite.expect(fail_ctl.failed() && fail_ctl.error().is_user_error(), "abort should record a user error");
 
     // 9. Missing root is a library (fs) error.
-    auto r_missing = bld::fs::walk(SANDBOX + "nope/", {}, [](const auto &) { return bld::fs::Act::next; });
-    suite.expect(!r_missing && r_missing.error().is_fs_error(), "missing root should fail with an fs error");
+    bld::fs::Controller miss_ctl;
+    for (const auto &e : bld::fs::walk_dir(SANDBOX + "nope/", miss_ctl)) {
+        (void)e;
+    }
+    suite.expect(miss_ctl.failed() && miss_ctl.error().is_fs_error(), "missing root should record an fs error");
 
     // 10. files() eager + high-level wrappers
     suite.expect(bld::fs::files(root).size() == 5, "files() should find exactly 5 files");
@@ -230,14 +262,14 @@ auto test_walk_advanced() -> TestSuite
     std::ignore = bld::fs::write_file(root + "sub/b.txt", "b");
 
     auto count_files = [](const std::string &rt, bld::fs::Walk_opts opts, auto pred) {
+        bld::fs::Controller ctl{std::move(opts)};
         std::size_t n = 0;
-        auto r = bld::fs::walk(rt, std::move(opts), [&](const auto &e) {
+        for (const auto &e : bld::fs::walk_dir(rt, ctl)) {
             if (e.is_file() && pred(e)) {
                 ++n;
             }
-            return bld::fs::Act::next;
-        });
-        return std::pair{static_cast<bool>(r), n};
+        }
+        return std::pair{!ctl.failed(), n};
     };
     auto hidden = count_files(root, {.include_hidden = true}, [](const auto &) { return true; });
     suite.expect(hidden.first && hidden.second == 3, "include_hidden(true) should find 3 files");
@@ -245,40 +277,42 @@ auto test_walk_advanced() -> TestSuite
     auto cnt = count_files(root, {}, [](const auto &) { return true; });
     suite.expect(cnt.first && cnt.second == 2, "count should be 2 without hidden");
 
-    // any/none via early stop.
+    // any/none via early break.
     bool any = false;
-    std::ignore = bld::fs::walk(root, {}, [&](const auto &e) {
-        if (e.is_file()) {
-            any = true;
-            return bld::fs::Act::stop;
+    {
+        bld::fs::Controller ctl;
+        for (const auto &e : bld::fs::walk_dir(root, ctl)) {
+            if (e.is_file()) {
+                any = true;
+                break;
+            }
         }
-        return bld::fs::Act::next;
-    });
+        suite.expect(!ctl.failed(), "any walk should not fail");
+    }
     suite.expect(any, "any should be true");
-    bool none_empty = true;
-    std::ignore = bld::fs::walk(root, {}, [&](const auto &) {
-        none_empty = false;
-        return bld::fs::Act::stop;
-    });
-    suite.expect(!none_empty, "walk should visit entries");
 
-    // first match via stop; last match by remembering.
+    // first match via break; last match by remembering.
     std::optional<bld::fs::Dir_entry> first;
-    std::ignore = bld::fs::walk(root, {}, [&](const auto &e) {
-        if (e.is_file()) {
-            first = e;
-            return bld::fs::Act::stop;
+    {
+        bld::fs::Controller ctl;
+        for (const auto &e : bld::fs::walk_dir(root, ctl)) {
+            if (e.is_file()) {
+                first = e;
+                break;
+            }
         }
-        return bld::fs::Act::next;
-    });
+    }
     suite.expect(first.has_value(), "first should return an entry");
     std::optional<bld::fs::Dir_entry> last;
-    std::ignore = bld::fs::walk(root, {}, [&](const auto &e) {
-        if (e.is_file() && e.filename() == "b.txt") {
-            last = e;
+    {
+        bld::fs::Controller ctl;
+        for (const auto &e : bld::fs::walk_dir(root, ctl)) {
+            if (e.is_file() && e.filename() == "b.txt") {
+                last = e;
+            }
         }
-        return bld::fs::Act::next;
-    });
+        suite.expect(!ctl.failed(), "last walk should not fail");
+    }
     suite.expect(last.has_value(), "last should return the deeply nested file");
 
     // subdir: just walk the joined path.
@@ -294,9 +328,17 @@ auto test_walk_advanced() -> TestSuite
     };
     suite.expect(dot_count("txt") == 2 && dot_count(".txt") == 2, "ext without dot should match ext with dot");
 
-    // Throwing visitor becomes a user error (walk is noexcept).
-    auto r_throw = bld::fs::walk(root, {}, [](const auto &) -> bld::fs::Act { throw std::runtime_error("boom"); });
-    suite.expect(!r_throw && r_throw.error().is_user_error(), "throwing visitor should fail with a user error");
+    // Adaptor over a subdirectory.
+    {
+        bld::fs::Controller ctl;
+        std::size_t n = 0;
+        for (const auto &e : bld::fs::walk_dir(root, ctl) | bld::fs::only_extensions({"txt"})) {
+            if (e.is_file()) {
+                ++n;
+            }
+        }
+        suite.expect(!ctl.failed() && n == 2, "only_extensions with vector should match");
+    }
 
     auto all = bld::fs::find_all_files(root);
     suite.expect(all.has_value() && all->size() == 2, "find_all_files should find 2 files");

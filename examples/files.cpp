@@ -37,16 +37,17 @@ int main()
     }
     bld::log::i("demo/sub/note.txt exists: {}", bld::fs::exists("demo/sub/note.txt"));
 
-// Walk a tree with a visitor: prune dirs, keep .cpp files, collect paths.
+    // Walk a tree: prune dirs from the loop body, keep .cpp files.
     std::vector<std::string> cpp_files;
-    if (auto r = bld::fs::walk(".", {.skip = {".git", "build"}}, [&](const auto &e) {
-            if (e.is_file() && e.extension() == ".cpp") {
-                cpp_files.push_back(e.path.string());
-            }
-            return bld::fs::Act::next;
-        });
-        !r) {
-        bld::log::e("walk failed: {}", r.error().message());
+    bld::fs::Controller wctl;
+    wctl.opts.skip = {".git", "build"};
+    for (const auto &e : bld::fs::walk_dir(".", wctl)) {
+        if (e.is_file() && e.extension() == ".cpp") {
+            cpp_files.push_back(e.path.string());
+        }
+    }
+    if (wctl.failed()) {
+        bld::log::e("walk failed: {}", wctl.error().message());
     } else {
         bld::log::i("found {} .cpp files:", cpp_files.size());
         for (const auto &p : cpp_files) {

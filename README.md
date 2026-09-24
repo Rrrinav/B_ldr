@@ -158,13 +158,14 @@ auto content = bld::fs::read_file("out.txt");   // expected<std::string>
 bld::fs::make_dirs("build/obj", "build/bin");
 
 auto srcs = bld::fs::find_by_ext(".", ".cpp");  // expected<vector<string>>
+bld::fs::Controller wctl;
+wctl.opts.skip = {"build", ".git"};
 std::vector<bld::fs::Dir_entry> found;
-std::ignore = bld::fs::walk("src", {.skip = {"build", ".git"}}, [&](const auto &e) {
+for (const auto &e : bld::fs::walk_dir("src", wctl)) {
     if (e.is_file() && (e.extension() == ".cpp" || e.extension() == ".hpp")) {
         found.push_back(e);
     }
-    return bld::fs::Act::next;
-});
+}
 ```
 
 ### Unified runs and compile databases

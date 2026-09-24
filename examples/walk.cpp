@@ -1,11 +1,10 @@
-// walk.cpp — callback-driven directory traversal.
+// walk.cpp — controller-driven directory traversal.
 //
 // g++ -std=c++23 -I. examples/walk.cpp -o /tmp/walk && /tmp/walk
 //
-// One function walks everything: walk(root, opts, visitor). The visitor sees
-// every directory (so it can prune) and every non-hidden file, and answers
-// per entry: next (continue), prune (skip this branch), stop (done, success),
-// fail (abort the whole walk with a user error).
+// walk_dir() returns a lazy range bound to your controller. The loop body
+// steers it with plain control flow: dont_recurse skips a branch, break ends
+// cleanly, abort() quits with a user error. Ranges compose downstream.
 
 #define B_LDR_IMPLEMENTATION
 #include "../b_ldr.hpp"
@@ -36,60 +35,76 @@ int main()
     make_demo_tree(root);
     const std::string src = root + "/src";
 
-    // 1. Collect: the visitor keeps what it wants, ignores the rest.
-    std::vector<std::string> cpps;
-    if (auto r = bld::fs::walk(src, {.skip = {"gen"}}, [&](const auto &e) {
-            if (e.is_file() && e.extension() == ".cpp") {
-                cpps.push_back(e.filename());
+    // 1. The canonical shape: static skip + pipes + plain control flow.
+    // NOTE: a directory hidden by a downstream filter never reaches the body,
+    // so it cannot be dynamically pruned — prune statically via opts.skip,
+    // or filter in the body (see 1b).
+    {
+        bld::fs::Controller ctl;
+        ctl.opts.skip = {"build", "gen"};
+        std::vector<std::string> cpps;
+        for (const auto &entry :
+             bld::fs::walk_dir(src, ctl) | bld::fs::only_extensions("cpp", "hpp", "cppm") | bld::fs::not_name("main.cpp")) {
+            if (entry.is_file()) {
+                cpps.push_back(entry.filename());
             }
-            return bld::fs::Act::next;
-        });
-        !r) {
-        bld::log::e("walk failed: {}", r.error().message());
+        }
+        if (ctl.failed()) {
+            bld::log::e("walk failed: {}", ctl.error().message());
+        }
+        bld::log::i("cpps (gen skipped, main.cpp excluded): {}", cpps.size()); // 1: util.hpp
     }
-    bld::log::i("cpps (gen pruned): {}", cpps.size()); // 1: main.cpp
 
-    // 2. Dynamic prune: decide per directory, inside the callback.
-    std::vector<std::string> kept;
-    std::ignore = bld::fs::walk(
-        src, {}, [&](const auto &e) {
-            if (e.is_dir() && e.filename() == "gen") {
-                return bld::fs::Act::prune; // neither visited nor descended
+    // 1b. Dynamic prune: no ext filter upstream, so gen reaches the body.
+    {
+        bld::fs::Controller ctl;
+        std::vector<std::string> kept;
+        for (const auto &entry : bld::fs::walk_dir(src, ctl)) {
+            if (entry.is_dir() && entry.filename() == "gen") {
+                ctl.dont_recurse = true;
+                continue;
             }
-            if (e.is_file()) {
-                kept.push_back(e.filename());
+            if (entry.is_file() && entry.extension() == ".cpp") {
+                kept.push_back(entry.filename());
             }
-            return bld::fs::Act::next;
-        });
-    bld::log::i("kept (gen pruned): {}", kept.size()); // 2: main.cpp, util.hpp
+        }
+        bld::log::i("kept (gen pruned in-body): {}", kept.size()); // 1: main.cpp
+    }
 
-    // 3. stop: first match ends the walk cleanly (success, not an error).
-    std::string first_hpp;
-    if (auto r = bld::fs::walk(src, {}, [&](const auto &e) {
+    // 2. break ends cleanly: no error recorded.
+    {
+        std::string first_hpp;
+        bld::fs::Controller ctl;
+        for (const auto &e : bld::fs::walk_dir(src, ctl)) {
             if (e.is_file() && e.extension() == ".hpp") {
                 first_hpp = e.filename();
-                return bld::fs::Act::stop;
+                break;
             }
-            return bld::fs::Act::next;
-        });
-        !r) {
-        bld::log::e("walk failed: {}", r.error().message());
-    }
-    bld::log::i("first hpp: {}", first_hpp); // util.hpp
-
-    // 4. fail: abort everything with a USER error (distinct from fs errors).
-    auto bad = bld::fs::walk(src, {}, [](const auto &) { return bld::fs::Act::fail; });
-    if (!bad) {
-        bld::log::i("aborted: user={} msg='{}'", bad.error().is_user_error(), bad.error().message());
+        }
+        bld::log::i("first hpp: {} (failed={})", first_hpp, ctl.failed()); // util.hpp, false
     }
 
-    // 5. Library failure looks different: missing root is an fs error.
-    auto missing = bld::fs::walk(root + "/nope", {}, [](const auto &) { return bld::fs::Act::next; });
-    if (!missing) {
-        bld::log::i("missing root: fs={} msg='{}'", missing.error().is_fs_error(), missing.error().message());
+    // 3. abort() quits with a USER error (distinct from fs errors).
+    {
+        bld::fs::Controller ctl;
+        for (const auto &e : bld::fs::walk_dir(src, ctl)) {
+            (void)e;
+            ctl.abort("nope");
+            break;
+        }
+        bld::log::i("aborted: user={} msg='{}'", ctl.failed() && ctl.error().is_user_error(), ctl.error().message());
     }
 
-    // 6. Eager one-liners for the common case.
+    // 4. Library failure looks different: missing root is an fs error.
+    {
+        bld::fs::Controller ctl;
+        for (const auto &e : bld::fs::walk_dir(root + "/nope", ctl)) {
+            (void)e;
+        }
+        bld::log::i("missing root: fs={} msg='{}'", ctl.failed() && ctl.error().is_fs_error(), ctl.error().message());
+    }
+
+    // 5. Eager one-liners for the common case.
     bld::log::i("files(): {}", bld::fs::files(src).size());
     auto by_ext = bld::fs::find_by_ext(src, "cpp", ".hpp");
     bld::log::i("find_by_ext: {}", by_ext ? by_ext->size() : 0);
