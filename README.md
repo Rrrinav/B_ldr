@@ -161,11 +161,15 @@ auto srcs = bld::fs::find_by_ext(".", ".cpp");  // expected<vector<string>>
 bld::fs::Controller wctl;
 wctl.opts.skip = {"build", ".git"};
 std::vector<bld::fs::Dir_entry> found;
-for (const auto &e : bld::fs::walk_dir("src", wctl)) {
-    if (e.is_file() && (e.extension() == ".cpp" || e.extension() == ".hpp")) {
+for (const auto &e : bld::fs::walk_dir("src", wctl)
+     | bld::fs::only_extensions("cpp", "hpp") | bld::fs::not_name("main.cpp")) {
+    if (e.is_file()) {
         found.push_back(e);
     }
 }
+// wctl.opts.sorted = true;       // deterministic filename order per dir
+// wctl.opts.abort_on_error = true; // first unreadable dir fails (fs error)
+// if (wctl.failed()) { /* wctl.error(): Kind::fs vs Kind::user */ }
 ```
 
 ### Unified runs and compile databases
@@ -220,7 +224,7 @@ g++ -std=c++23 -I. examples/hello.cpp -o hello
 | `examples/commands.cpp` | Sync/async runs, exit codes, file redirection |
 | `examples/capture.cpp` | Merged capture, stdin injection, CRLF normalization |
 | `examples/files.cpp` | Reading/writing, directories, `walk`, find helpers |
-| `examples/walk.cpp` | Callback traversal: prune, stop, fail, error kinds |
+| `examples/walk.cpp` | Controller traversal: prune, stop, abort, adaptors, error kinds |
 | `examples/config.cpp` | Options, types, choices, `--help`, proxy reads |
 | `examples/tasks.cpp` | Parallel task batches, failure handling |
 | `examples/build_system.cpp` | A small incremental build of several files |

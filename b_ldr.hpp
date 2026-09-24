@@ -1420,6 +1420,12 @@ struct Walk_opts
     bool follow_symlinks = false;
     int max_depth = std::numeric_limits<int>::max();
     std::vector<std::string> skip{};
+    // First unreadable directory aborts the walk with an fs error instead
+    // of being skipped. Default skips and keeps going.
+    bool abort_on_error = false;
+    // Sort entries by filename within each directory. Lazy per directory,
+    // so streaming still works; gives deterministic build order.
+    bool sorted = false;
 };
 
 // Traversal controller for walk_dir(): owns its Walk_opts, is steered from
@@ -1468,6 +1474,16 @@ private:
         err_ = std::move(e);
     }
     friend Walker walk_dir(std::string_view, Controller &);
+    // Recursive worker behind walk_dir(). Owns no lambdas (coroutine frames
+    // must not hold lambda types). chain holds the canonical dirs on the
+    // current descent path for the symlink-cycle guard.
+    static auto walk_tree(
+        std::filesystem::path dir,
+        int depth,
+        Controller &ctl,
+        std::unordered_set<std::string> &chain,
+        std::filesystem::directory_options iter_opts,
+        bool is_root) -> Walker;
 };
 
 // Lazy traversal: a genuine input range, so std views and algorithms compose
@@ -1539,6 +1555,26 @@ template <typename... Names>
     not_name_t t{.names = {std::string{names}...}};
     return t;
 }
+// The two most common predicates as one-word adaptors (anything else is a
+// views::filter away).
+struct only_files_t : std::ranges::range_adaptor_closure<only_files_t>
+{
+    template <std::ranges::input_range R>
+    auto operator()(R &&r) const
+    {
+        return std::forward<R>(r) | std::views::filter([](const Dir_entry &e) { return e.is_file(); });
+    }
+};
+inline constexpr only_files_t only_files{};
+struct only_dirs_t : std::ranges::range_adaptor_closure<only_dirs_t>
+{
+    template <std::ranges::input_range R>
+    auto operator()(R &&r) const
+    {
+        return std::forward<R>(r) | std::views::filter([](const Dir_entry &e) { return e.is_dir(); });
+    }
+};
+inline constexpr only_dirs_t only_dirs{};
 
 // "src/main.cpp" -> "main"
 [[nodiscard]] auto stem(std::string_view path) noexcept -> std::string;
@@ -6376,6 +6412,14 @@ inline auto wrap_value(Op &&op, std::format_string<Args...> fmt, Args &&...args)
     std::error_code ignored;
     return Dir_entry{.path = raw.path(), .type = raw.symlink_status(ignored).type(), .depth = depth};
 }
+// Orders directory siblings by filename (walk_dir sorted mode).
+struct by_filename
+{
+    [[nodiscard]] bool operator()(const std::filesystem::directory_entry &a, const std::filesystem::directory_entry &b) const
+    {
+        return a.path().filename() < b.path().filename();
+    }
+};
 template <typename Op, typename... Args>
 inline auto wrap_void(Op &&op, std::format_string<Args...> fmt, Args &&...args) noexcept -> std::expected<void, bld::Err>
 {
@@ -6522,6 +6566,7 @@ Walk_error Controller::error() const
 void Controller::abort(std::string reason)
 {
     if (!err_.has_value()) {
+        bld::log::e("walk_dir: aborted: {}", reason);
         err_ = Walk_error{
             .kind = Walk_error::Kind::user,
             .code = std::make_error_code(std::errc::operation_canceled),
@@ -6540,69 +6585,107 @@ auto walk_dir(std::string_view root, Controller &ctl) -> Walker
         co_return;
     }
 
-    std::error_code ec;
-    const auto iter_opts = ctl.opts.follow_symlinks ? fs::directory_options::skip_permission_denied | fs::directory_options::follow_directory_symlink
-                                               : fs::directory_options::skip_permission_denied;
+    std::unordered_set<std::string> chain;
+    {
+        std::error_code ec;
+        if (auto rc = fs::canonical(fs::path{root}, ec); !ec) {
+            chain.insert(rc.string());
+        }
+    }
+    // Strict mode surfaces OS errors instead of suppressing them, so
+    // abort_on_error can actually observe unreadable directories.
+    auto iter_opts = ctl.opts.follow_symlinks ? fs::directory_options::skip_permission_denied | fs::directory_options::follow_directory_symlink
+                                              : fs::directory_options::skip_permission_denied;
+    if (ctl.opts.abort_on_error) {
+        iter_opts &= ~fs::directory_options::skip_permission_denied;
+    }
+    co_yield std::ranges::elements_of(Controller::walk_tree(fs::path{root}, 0, ctl, chain, iter_opts, true));
+}
 
-    // Static skip, evaluated inline (no local lambdas: coroutine frames must
-    // not hold lambda types).
-    if (!ctl.opts.recursive) {
-        fs::directory_iterator it{fs::path{root}, iter_opts, ec};
-        if (ec) {
-            bld::log::w("walk_dir: cannot read '{}': {}", root, ec.message());
-            ctl.set_error(Walk_error{.kind = Walk_error::Kind::fs, .code = ec});
+auto Controller::walk_tree(
+    std::filesystem::path dir,
+    int depth,
+    Controller &ctl,
+    std::unordered_set<std::string> &chain,
+    std::filesystem::directory_options iter_opts,
+    bool is_root) -> Walker
+{
+    namespace fs = std::filesystem;
+
+    std::error_code ec;
+    fs::directory_iterator it{dir, iter_opts, ec};
+    if (ec) {
+        // Root failure is always an error; subdirectories obey abort_on_error.
+        std::string msg = std::format("walk_dir: cannot read '{}': {}", dir.string(), ec.message());
+        if (is_root) {
+            bld::log::w("{}", msg);
+        } else if (ctl.opts.abort_on_error) {
+            bld::log::e("{}", msg);
+        } else {
+            bld::log::w("walk_dir: skipping unreadable '{}': {}", dir.string(), ec.message());
             co_return;
         }
-        for (const auto &raw : it) {
-            if (ctl.stop_requested()) {
-                co_return;
-            }
-            Dir_entry e = detail::make_walk_entry(raw, 0);
-            if (e.is_dir() && std::ranges::find(ctl.opts.skip, e.filename()) != ctl.opts.skip.end()) {
-                continue;
-            }
-            if (!e.is_dir() && !ctl.opts.include_hidden && e.is_hidden()) {
-                continue;
-            }
-            co_yield e;
-            if (ctl.stop_requested()) {
-                bld::log::e("walk_dir: aborted: {}", ctl.err_->detail);
-                co_return;
-            }
-            ctl.dont_recurse = false;
-        }
+        ctl.set_error(Walk_error{.kind = Walk_error::Kind::fs, .code = ec, .detail = std::move(msg)});
         co_return;
     }
-
-    fs::recursive_directory_iterator it{fs::path{root}, iter_opts, ec};
-    if (ec) {
-        bld::log::w("walk_dir: cannot read '{}': {}", root, ec.message());
-        ctl.set_error(Walk_error{.kind = Walk_error::Kind::fs, .code = ec});
-        co_return;
+    // Buffer siblings so sorted mode can order them; yields stay lazy per
+    // directory (streaming still works, one dir at a time).
+    std::vector<fs::directory_entry> kids{it, fs::directory_iterator{}};
+    if (ctl.opts.sorted) {
+        std::ranges::sort(kids, detail::by_filename{});
     }
-    for (const auto &raw : it) {
+    for (const auto &raw : kids) {
         if (ctl.stop_requested()) {
             co_return;
         }
-        const int d = it.depth();
-        if (d >= ctl.opts.max_depth) {
-            it.disable_recursion_pending();
-        }
-        Dir_entry e = detail::make_walk_entry(raw, d);
+        Dir_entry e = detail::make_walk_entry(raw, depth);
         if (e.is_dir() && std::ranges::find(ctl.opts.skip, e.filename()) != ctl.opts.skip.end()) {
-            it.disable_recursion_pending();
-            continue;
+            continue; // statically skipped: neither yielded nor descended
         }
         if (!e.is_dir() && !ctl.opts.include_hidden && e.is_hidden()) {
             continue;
         }
+        // Symlink-to-directory still descends when following (as
+        // recursive_directory_iterator did); anything unresolvable is
+        // probed once, here, and never descended.
+        bool descend = false;
+        std::string canon;
+        if (e.is_dir()) {
+            descend = true;
+        } else if (e.is_symlink() && ctl.opts.follow_symlinks) {
+            std::error_code sec;
+            auto st = raw.status(sec);
+            if (!sec && st.type() == fs::file_type::directory) {
+                descend = true;
+            }
+        }
+        if (descend && (!ctl.opts.recursive || depth >= ctl.opts.max_depth)) {
+            descend = false;
+        }
+        if (descend && ctl.opts.follow_symlinks) {
+            // Cycle guard: canonical dirs on the current chain are never
+            // descended twice (only reachable via symlinks or bind mounts).
+            std::error_code cec;
+            auto rc = fs::canonical(raw.path(), cec);
+            if (!cec) {
+                if (!chain.insert(rc.string()).second) {
+                    bld::log::w("walk_dir: skipping symlink cycle at '{}'", raw.path().string());
+                    descend = false;
+                } else {
+                    canon = rc.string();
+                }
+            }
+            // Unresolvable: descend anyway, the child read handles errors.
+        }
         co_yield e;
         if (ctl.stop_requested()) {
-            bld::log::e("walk_dir: aborted: {}", ctl.err_->detail);
             co_return;
         }
-        if (std::exchange(ctl.dont_recurse, false) && e.is_dir()) {
-            it.disable_recursion_pending();
+        if (!std::exchange(ctl.dont_recurse, false) && descend) {
+            co_yield std::ranges::elements_of(walk_tree(raw.path(), depth + 1, ctl, chain, iter_opts, false));
+        }
+        if (!canon.empty()) {
+            chain.erase(canon);
         }
     }
 }

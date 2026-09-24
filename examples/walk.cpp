@@ -43,8 +43,9 @@ int main()
         bld::fs::Controller ctl;
         ctl.opts.skip = {"build", "gen"};
         std::vector<std::string> cpps;
-        for (const auto &entry :
-             bld::fs::walk_dir(src, ctl) | bld::fs::only_extensions("cpp", "hpp", "cppm") | bld::fs::not_name("main.cpp")) {
+        for (const auto &entry : bld::fs::walk_dir(src, ctl)
+                               | bld::fs::only_extensions("cpp", "hpp", "cppm")
+                               | bld::fs::not_name("main.cpp")) {
             if (entry.is_file()) {
                 cpps.push_back(entry.filename());
             }
@@ -108,6 +109,21 @@ int main()
     bld::log::i("files(): {}", bld::fs::files(src).size());
     auto by_ext = bld::fs::find_by_ext(src, "cpp", ".hpp");
     bld::log::i("find_by_ext: {}", by_ext ? by_ext->size() : 0);
+
+    // 6. Deterministic order + file-only adaptor.
+    {
+        bld::fs::Controller ctl;
+        ctl.opts.sorted = true;
+        std::vector<std::string> names;
+        for (const auto &e : bld::fs::walk_dir(src, ctl) | bld::fs::only_files) {
+            names.push_back(e.filename());
+        }
+        std::string flat;
+        for (const auto &n : names) {
+            flat += flat.empty() ? n : std::string{", "} + n;
+        }
+        bld::log::i("sorted files: {}", flat);
+    }
 
     fs::remove_all(root);
     return EXIT_SUCCESS;

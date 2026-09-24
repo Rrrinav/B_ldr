@@ -1,5 +1,9 @@
 #include <fstream>
 
+#ifndef _WIN32
+#include <unistd.h>
+#endif
+
 #define B_LDR_IMPLEMENTATION
 #include "b_ldr.hpp"
 
@@ -429,6 +433,109 @@ auto test_file_queries() -> TestSuite
     return suite;
 }
 
+auto test_walk_opts() -> TestSuite
+{
+    TestSuite suite{.function = "walk_opts"};
+
+    auto root = SANDBOX + "opts/";
+    std::ignore = bld::fs::make_dirs(root + "sub", root + "locked");
+    std::ignore = bld::fs::write_file(root + "z.txt", "z");
+    std::ignore = bld::fs::write_file(root + "a.txt", "a");
+    std::ignore = bld::fs::write_file(root + "m.txt", "m");
+    std::ignore = bld::fs::write_file(root + "sub/b.txt", "b");
+
+    // only_files / only_dirs adaptors.
+    {
+        bld::fs::Controller ctl;
+        std::size_t files = 0, dirs = 0;
+        for (const auto &e : bld::fs::walk_dir(root, ctl) | bld::fs::only_files) {
+            (void)e;
+            ++files;
+        }
+        suite.expect(!ctl.failed() && files == 4, "only_files should find 4 files");
+    }
+    {
+        bld::fs::Controller ctl;
+        std::size_t dirs = 0;
+        for (const auto &e : bld::fs::walk_dir(root, ctl) | bld::fs::only_dirs) {
+            (void)e;
+            ++dirs;
+        }
+        suite.expect(!ctl.failed() && dirs == 2, "only_dirs should find sub + locked");
+    }
+
+    // sorted: deterministic filename order within each directory.
+    // Per-directory order: root files sorted, sub files sorted.
+    {
+        bld::fs::Controller ctl;
+        ctl.opts.sorted = true;
+        ctl.opts.recursive = false;
+        std::vector<std::string> flat;
+        for (const auto &e : bld::fs::walk_dir(root, ctl)) {
+            if (e.is_file()) {
+                flat.push_back(e.filename());
+            }
+        }
+        suite.expect(
+            !ctl.failed() && flat == std::vector<std::string>{"a.txt", "m.txt", "z.txt"},
+            "sorted flat walk should yield a.txt, m.txt, z.txt in order");
+    }
+
+#ifndef _WIN32
+    // Symlink cycle terminates under follow_symlinks (guard), still finds files.
+    {
+        auto cyc = SANDBOX + "cyc/";
+        std::ignore = bld::fs::make_dirs(cyc + "sub");
+        std::ignore = bld::fs::write_file(cyc + "sub/f.txt", "x");
+        std::ignore = bld::fs::create_symlink("..", cyc + "sub/up");
+        bld::fs::Controller ctl;
+        ctl.opts.follow_symlinks = true;
+        std::size_t n = 0;
+        for (const auto &e : bld::fs::walk_dir(cyc, ctl)) {
+            if (e.is_file()) {
+                ++n;
+            }
+        }
+        suite.expect(!ctl.failed() && n == 1, "symlink cycle must terminate and find f.txt once");
+    }
+
+    // Unreadable directory: skipped by default, fatal with abort_on_error.
+    // chmod is meaningless for root, so skip there.
+    if (::geteuid() != 0) {
+        std::error_code ec;
+        std::filesystem::permissions(
+            root + "locked", std::filesystem::perms::none, std::filesystem::perm_options::replace, ec);
+        suite.expect(!ec, "chmod setup failed");
+        {
+            bld::fs::Controller ctl;
+            std::size_t n = 0;
+            for (const auto &e : bld::fs::walk_dir(root, ctl)) {
+                if (e.is_file()) {
+                    ++n;
+                }
+            }
+            suite.expect(!ctl.failed() && n == 4, "unreadable dir should be skipped by default");
+        }
+        {
+            bld::fs::Controller ctl;
+            ctl.opts.abort_on_error = true;
+            for (const auto &e : bld::fs::walk_dir(root, ctl)) {
+                (void)e;
+            }
+            suite.expect(ctl.failed() && ctl.error().is_fs_error(), "abort_on_error should fail with an fs error");
+        }
+        std::filesystem::permissions(
+            root + "locked",
+            std::filesystem::perms::owner_all | std::filesystem::perms::group_all | std::filesystem::perms::others_all,
+            std::filesystem::perm_options::replace,
+            ec);
+    } else {
+        suite.expect(true, "skipped permission tests (running as root)");
+    }
+#endif
+    return suite;
+}
+
 int main(int argc, char *argv[])
 {
     if (auto res = bld::rebuild_this_when_needed_ext(argc, argv, {"-I."}); !res) {
@@ -452,6 +559,8 @@ int main(int argc, char *argv[])
     suite = test_file_queries();
     suite.serialize(out);
     suite = test_walk_advanced();
+    suite.serialize(out);
+    suite = test_walk_opts();
     suite.serialize(out);
 
     std::filesystem::remove_all(SANDBOX);
