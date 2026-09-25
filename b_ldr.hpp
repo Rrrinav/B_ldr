@@ -676,8 +676,6 @@ struct Proc
 private:
     friend class Proc_group;
     auto update_status(int wstatus) -> void;
-    // Deprecated alias kept for source compat (no threads remain to join).
-    auto join_drain() -> void;
 #ifdef _WIN32
     // Fetches the Win32 exit code, closes the process handle, finishes string
     // capture and marks the handle null. Shared by wait()/try_wait().
@@ -2762,11 +2760,6 @@ auto bld::Proc::finish_capture() -> void
     if (err != nullptr && err != out) {
         *err = bld::str::replace_all(*err, "\r\n", "\n");
     }
-}
-
-auto bld::Proc::join_drain() -> void
-{
-    finish_capture();
 }
 
 #ifdef _WIN32
@@ -6034,16 +6027,6 @@ auto bld::Config::parse(int argc, char *argv[]) -> std::expected<Parse_outcome, 
     for (const auto &[flag, opt] : options) {
         data[flag] = opt.default_val;
     }
-    // Reset accumulated String_arr defaults so repeated parses don't append
-    // to leftovers (data was just rebuilt from defaults, but be explicit).
-    for (const auto &[flag, opt] : options) {
-        if (opt.type == String_arr) {
-            data[flag] = std::vector<std::string>{};
-            if (auto *p = std::get_if<std::vector<std::string>>(&opt.default_val); p && !p->empty()) {
-                data[flag] = *p;
-            }
-        }
-    }
 
     auto assign_typed = [&](const std::string &nkey, std::string_view val) -> std::expected<void, bld::Err> {
         auto oit = options.find(nkey);
@@ -6101,7 +6084,7 @@ auto bld::Config::parse(int argc, char *argv[]) -> std::expected<Parse_outcome, 
             continue;
         }
         if (curr == "--") {
-            continue;
+            break; // POSIX convention: options end here, the rest is ignored.
         }
         auto eq_idx = curr.find('=');
 

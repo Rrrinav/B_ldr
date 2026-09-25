@@ -171,11 +171,11 @@ int main()
             bld::log::e("1d io_in failed: {}", proc.error());
         }
         if (auto proc = bld::run(bld::Cmd{"cat"}, bld::io_in{"demo_build/in.txt"}); !proc) {
-            bld::log::e("1d lazy_in failed: {}", proc.error());
+            bld::log::e("1d path-in failed: {}", proc.error());
         }
         auto owned = bld::Owned_Fd::open("demo_build/in.txt", bld::Open_mode::read).value();
         if (auto proc = bld::run(bld::Cmd{"cat"}, bld::io_in{owned}); !proc) {
-            bld::log::e("1d in_fd failed: {}", proc.error());
+            bld::log::e("1d fd-in failed: {}", proc.error());
         }
         // in_str feeds literal content (fed synchronously, then EOF).
         std::string from_str;

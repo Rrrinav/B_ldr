@@ -268,6 +268,32 @@ auto test_walk() -> TestSuite
     }
     suite.expect(miss_ctl.failed() && miss_ctl.error().is_fs_error(), "missing root should record an fs error");
 
+    bld::fs::Controller empty_ctl;
+    for (const auto &e : bld::fs::walk_dir("", empty_ctl)) {
+        (void)e;
+    }
+    suite.expect(empty_ctl.failed() && empty_ctl.error().is_fs_error(), "empty root should record an fs error");
+
+    // files() on a regular file (not a dir): empty, no crash.
+    suite.expect(bld::fs::files(root + "root_file.hpp").empty(), "files() on a file should be empty");
+
+    // dont_recurse on a file is ignored; abort() keeps the first reason.
+    {
+        bld::fs::Controller ctl;
+        std::size_t n = 0;
+        for (const auto &e : bld::fs::walk_dir(root, ctl)) {
+            if (e.is_file() && e.filename() == "root_file.hpp") {
+                ctl.dont_recurse = true;
+                ++n;
+                break;
+            }
+        }
+        suite.expect(!ctl.failed() && n == 1, "dont_recurse on a file should be ignored");
+        ctl.abort("first");
+        ctl.abort("second");
+        suite.expect(ctl.failed() && ctl.error().message() == "first", "double abort should keep the first reason");
+    }
+
     // 10. files() eager + high-level wrappers
     suite.expect(bld::fs::files(root).size() == 5, "files() should find exactly 5 files");
     suite.expect(bld::fs::files(SANDBOX + "nope/").empty(), "files() on missing root should be empty");
@@ -306,6 +332,13 @@ auto test_walk_advanced() -> TestSuite
 
     auto cnt = count_files(root, {}, [](const auto &) { return true; });
     suite.expect(cnt.first && cnt.second == 2, "count should be 2 without hidden");
+
+    // max_depth 0 yields only direct children (sub/b.txt excluded).
+    auto depth0 = count_files(
+        root,
+        bld::fs::Walk_opts{.max_depth = 0},
+        [](const auto &) { return true; });
+    suite.expect(depth0.first && depth0.second == 1, "max_depth 0 should find only a.txt");
 
     // any/none via early break.
     bool any = false;
@@ -411,6 +444,31 @@ auto test_copy_rename_links() -> TestSuite
     suite.expect(bld::fs::same_file(link, src), "symlink should be same file as target");
     suite.expect(bld::fs::create_hard_link(src, hard), "create_hard_link failed");
     suite.expect(bld::fs::same_file(hard, src), "hard link should be same file as target");
+    // Linked dirs are listed but not descended unless following.
+    std::ignore = bld::fs::make_dirs(SANDBOX + "follow/real");
+    std::ignore = bld::fs::write_file(SANDBOX + "follow/real/f.txt", "x");
+    suite.expect(bld::fs::create_symlink("real", SANDBOX + "follow/link"), "dir symlink failed");
+    {
+        bld::fs::Controller ctl;
+        std::size_t n = 0;
+        for (const auto &e : bld::fs::walk_dir(SANDBOX + "follow", ctl)) {
+            if (e.is_file()) {
+                ++n;
+            }
+        }
+        suite.expect(!ctl.failed() && n == 1, "without follow, linked dir is listed, not descended");
+    }
+    {
+        bld::fs::Controller ctl;
+        ctl.opts.follow_symlinks = true;
+        std::size_t n = 0;
+        for (const auto &e : bld::fs::walk_dir(SANDBOX + "follow", ctl)) {
+            if (e.is_file()) {
+                ++n;
+            }
+        }
+        suite.expect(!ctl.failed() && n == 2, "follow_symlinks should descend into the linked dir");
+    }
 #endif
     return suite;
 }

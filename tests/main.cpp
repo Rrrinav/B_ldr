@@ -485,6 +485,25 @@ auto run_tests() -> int
               }
               return {};
          }},
+        {"config_double_dash_and_null_argv",
+         []() -> std::expected<void, std::string> {
+              auto &c = bld::Config::get();
+              c.data.clear();
+              c.options.clear();
+              c.add_option("jobs", bld::Config::Int, "Concurrencies", 4);
+              std::vector<const char *> dash = {"./bld", "jobs=8", "--", "--bogus"};
+              if (auto r = c.parse(dash.size(), const_cast<char **>(dash.data())); !r) {
+                  return std::unexpected(std::format("parse failed: {}", r.error()));
+              }
+              if (int(c["jobs"]) != 8) {
+                  return std::unexpected("-- should stop parsing but keep earlier values");
+              }
+              std::vector<const char *> nullargv = {"./bld"};
+              if (c.parse(-1, const_cast<char **>(nullargv.data()))) {
+                  return std::unexpected("negative argc should fail");
+              }
+              return {};
+         }},
         {"config_types_choices_and_help",
          []() -> std::expected<void, std::string> {
               auto &c = bld::Config::get();
@@ -800,6 +819,64 @@ auto run_tests() -> int
              }
              return {};
          }},
+        {"large_output_capture",
+         []() -> std::expected<void, std::string> {
+             // ~1.4MB through the pipes: pumps must drain while the child runs.
+             std::string out;
+             auto proc = bld::run(bld::Cmd_loc{bld::Cmd{"seq", "1", "200000"}}, bld::io_out{&out});
+             if (!proc) {
+                 return std::unexpected(std::format("large run failed: {}", proc.error()));
+             }
+             if (out.size() < 1000000 || out.compare(out.size() - 7, 7, "200000\n") != 0) {
+                 return std::unexpected(std::format("large stdout truncated ({} bytes)", out.size()));
+             }
+             auto merged = bld::capture(bld::Cmd_loc{bld::Cmd{"seq", "1", "200000"}});
+             if (!merged || merged->size() < 1000000) {
+                 return std::unexpected("large merged capture truncated");
+             }
+             return {};
+         }},
+        {"capture_failure_carries_output",
+         []() -> std::expected<void, std::string> {
+             auto out = bld::capture(bld::Cmd_loc{bld::Cmd{"sh", "-c", "echo hello-out; echo hello-err >&2; exit 3"}});
+             if (out) {
+                 return std::unexpected("failing capture unexpectedly succeeded");
+             }
+             if (out.error().output.find("hello-out") == std::string::npos) {
+                 return std::unexpected("Err::output missing stdout");
+             }
+             if (out.error().output.find("hello-err") == std::string::npos) {
+                 return std::unexpected("Err::output missing stderr");
+             }
+             return {};
+         }},
+        {"proc_try_wait_kill_and_failing_wait_all",
+         []() -> std::expected<void, std::string> {
+             auto proc = bld::run(bld::Cmd_loc{bld::Cmd{"sleep", "30"}}, bld::async{});
+             if (!proc) {
+                 return std::unexpected("async spawn failed");
+             }
+             auto status = proc->try_wait();
+             if (!status || !proc->is_running()) {
+                 return std::unexpected("try_wait should report still-running");
+             }
+             proc->kill();
+             if (auto w = proc->wait(); !w || proc->is_running()) {
+                 return std::unexpected("kill+wait should reap");
+             }
+             auto ok = bld::run(bld::Cmd_loc{true_cmd()}, bld::async{});
+             auto bad = bld::run(bld::Cmd_loc{false_cmd()}, bld::async{});
+             if (!ok || !bad) {
+                 return std::unexpected("async spawns failed");
+             }
+             std::vector<bld::Proc> procs;
+             procs.push_back(std::move(*ok));
+             procs.push_back(std::move(*bad));
+             if (bld::wait_all(std::span<bld::Proc>{procs})) {
+                 return std::unexpected("wait_all should report the failure");
+             }
+             return {};
+         }},
         {"run_io_out_captures_stdout_only",
          []() -> std::expected<void, std::string> {
              bld::Cmd cmd = echo_cmd("out_data", "err_data");
@@ -1035,6 +1112,41 @@ auto run_tests() -> int
               }
               return {};
          }},
+        {"proc_group_signal_and_bad_ids",
+         []() -> std::expected<void, std::string> {
+              bld::Proc_group group;
+              auto a = group.run_new(bld::Cmd{"sleep", "30"});
+              auto b = group.run_new(bld::Cmd{"sleep", "30"});
+              if (!a || !b) {
+                  return std::unexpected("group spawns failed");
+              }
+              if (group.size() != 2) {
+                  return std::unexpected("group size should be 2");
+              }
+              group.signal(SIGTERM);
+              std::size_t reaped = 0;
+              while (!group.empty()) {
+                  auto done = group.wait_any();
+                  if (!done) {
+                      break;
+                  }
+                  group.remove(*done);
+                  ++reaped;
+              }
+              if (reaped != 2 || !group.empty()) {
+                  return std::unexpected("signal should reap both children");
+              }
+              if (group.wait_any()) {
+                  return std::unexpected("wait_any on empty group should fail");
+              }
+              if (group.get(999999)) {
+                  return std::unexpected("get on unknown id should fail");
+              }
+              if (group.remove(999999)) {
+                  return std::unexpected("remove on unknown id should return false");
+              }
+              return {};
+         }},
         {"proc_group_wait_any_reaps_all",
          []() -> std::expected<void, std::string> {
              // wait_any blocks until any group child exits; each id resolves once.
@@ -1255,6 +1367,53 @@ auto run_tests() -> int
               }
               if (bld::resolve_parallel_width(1000000) != max) {
                   return std::unexpected("huge value should be capped by max");
+              }
+              return {};
+         }},
+        {"log_min_level_filtering",
+         []() -> std::expected<void, std::string> {
+              std::ostringstream trap;
+              auto *saved = bld::Logger::ostream.ptr;
+              bld::Logger::ostream = trap;
+              bld::log::set_min_level(bld::Logger::Level::err);
+              bld::log::i("hidden info");
+              bld::log::w("hidden warn");
+              bld::log::e("shown error");
+              bld::log::set_min_level(bld::Logger::Level::inf);
+              bld::Logger::ostream.ptr = saved;
+              std::string logs = trap.str();
+              if (logs.find("hidden info") != std::string::npos || logs.find("hidden warn") != std::string::npos) {
+                  return std::unexpected("below-minimum messages leaked through");
+              }
+              if (logs.find("shown error") == std::string::npos) {
+                  return std::unexpected("error message was filtered");
+              }
+              return {};
+         }},
+        {"cmd_formatter_modes",
+         []() -> std::expected<void, std::string> {
+              bld::Cmd cmd{"echo", "a b", "c"};
+              std::string plain = std::format("{}", cmd);
+              std::string unquoted = std::format("{:q}", cmd);
+              std::string debug = std::format("{:?}", cmd);
+              if (plain.size() < 2 || plain.front() != '"' || plain.back() != '"') {
+                  return std::unexpected(std::format("plain mode should double-quote, got '{}'", plain));
+              }
+              if (unquoted.find('[') != std::string::npos) {
+                  return std::unexpected(std::format("unquoted mode should be raw, got '{}'", unquoted));
+              }
+              if (debug.find("\"a b\"") == std::string::npos) {
+                  return std::unexpected(std::format("debug mode should list argv, got '{}'", debug));
+              }
+              return {};
+         }},
+        {"write_compile_commands_failure",
+         []() -> std::expected<void, std::string> {
+              bld::Plan plan;
+              plan.add("x", true_cmd());
+              auto res = bld::run(plan, bld::write_compile_commands{"/nonexistent-dir-xyz/cc.json"});
+              if (res) {
+                  return std::unexpected("unwritable db path unexpectedly succeeded");
               }
               return {};
          }},
