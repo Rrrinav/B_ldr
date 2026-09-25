@@ -560,15 +560,20 @@ inline constexpr Proc_id INVALID_PROC_ID = 0;
 
 struct Task
 {
-    // An unrun Proc: a name plus what to spawn. No dependency info —
-    // ordering lives in Plan's side tables (or not at all for a bare span,
-    // which always runs everything in parallel).
+    // An unrun Proc: a name plus what to spawn — or a group of subtasks, in
+    // which case the group itself spawns nothing and its children run as
+    // dotted-name leaves ("build.compile") sharing the group's graph edges.
+    // A task with both a command and subtasks is an error (ordering would
+    // be undefined). No dependency info: ordering lives only in Plan.
     std::string name;
     Exec_spec spec;
+    std::vector<Task> subtasks;
 
     Task() = default;
     template <typename... Configs>
     explicit Task(Cmd_loc cl, Configs &&...confs);
+
+    auto sub(Task t) -> Task &;
 };
 
 struct Proc
@@ -1126,6 +1131,7 @@ struct Compilation_database
 namespace details {
 auto run_tasks(std::span<bld::Task> tasks, const bld::Run_config &cfg) -> std::expected<bld::Run_result, bld::Err>;
 auto run_plan(Plan &plan, const bld::Run_config &cfg) -> std::expected<bld::Run_result, bld::Err>;
+auto run_plan_flat(Plan &plan, const bld::Run_config &cfg) -> std::expected<bld::Run_result, bld::Err>;
 auto load_compile_commands(const bld::Compilation_database &database) -> std::expected<bld::Plan, bld::Err>;
 } // namespace details
 template <typename T>
@@ -3501,6 +3507,11 @@ auto bld::Proc::spawn(const Exec_spec &spec, Proc_gid gid) -> std::expected<Proc
 }
 auto bld::Proc::spawn(const Task &task, Proc_gid gid) -> std::expected<Proc, Err>
 {
+    if (!task.subtasks.empty()) {
+        return std::unexpected(Err::erc(
+            std::errc::invalid_argument,
+            std::format("cannot spawn group task '{}' directly; run it via run()", task.name)));
+    }
     return spawn(task.spec, gid);
 }
 
@@ -3649,6 +3660,11 @@ auto bld::Proc_group::size() const -> std::size_t
 }
 auto bld::Proc_group::run_new(const Task &task) -> std::expected<Proc_id, Err>
 {
+    if (!task.subtasks.empty()) {
+        return std::unexpected(Err::erc(
+            std::errc::invalid_argument,
+            std::format("cannot spawn group task '{}' directly; run it via run()", task.name)));
+    }
     return run_new(task.spec);
 }
 auto bld::Proc_group::run_new(const Exec_spec &spec) -> std::expected<Proc_id, Err>
@@ -4283,6 +4299,11 @@ auto bld::force::operator()(Run_config &cfg) const -> void
 auto bld::write_compile_commands::operator()(Run_config &cfg) const -> void
 {
     cfg.write_compile_commands = path;
+}
+auto bld::Task::sub(Task t) -> Task &
+{
+    subtasks.push_back(std::move(t));
+    return *this;
 }
 
 // IMPL SECTION 04 — Execution (bld::run, bld::capture, bld::Task)
@@ -5185,6 +5206,45 @@ auto load_compile_commands(const bld::Compilation_database &database) -> std::ex
     return plan;
 }
 
+// Group expansion: a group task dissolves into dotted-name leaves
+// ("build.compile"), each sharing the group's graph position. A task with
+// both a command and subtasks is an error (ordering would be undefined);
+// an empty group flattens to nothing. Specs copy: borrowed capture state
+// stays borrowed (still owned by the caller).
+inline auto flatten_task(const bld::Task &t, const std::string &prefix, std::vector<bld::Task> &out)
+    -> std::expected<void, bld::Err>
+{
+    // Unnamed tasks stay unnamed (auto-named later); otherwise every
+    // unnamed child would inherit the group name and collide.
+    std::string name = t.name.empty() ? "" : (prefix.empty() ? t.name : prefix + "." + t.name);
+    if (t.subtasks.empty()) {
+        bld::Task leaf = t;
+        leaf.name = std::move(name);
+        out.push_back(std::move(leaf));
+        return {};
+    }
+    if (!t.spec.cmd.empty()) {
+        return std::unexpected(
+            Err::erc(std::errc::invalid_argument, std::format("task '{}' has both a command and subtasks", name)));
+    }
+    for (auto &s : t.subtasks) {
+        if (auto r = flatten_task(s, name, out); !r) {
+            return std::unexpected(std::move(r.error()));
+        }
+    }
+    return {};
+}
+inline auto flatten_tasks(std::span<const bld::Task> tasks) -> std::expected<std::vector<bld::Task>, bld::Err>
+{
+    std::vector<bld::Task> out;
+    for (auto &t : tasks) {
+        if (auto r = flatten_task(t, "", out); !r) {
+            return std::unexpected(std::move(r.error()));
+        }
+    }
+    return out;
+}
+
 // Shared scheduler pieces for run_tasks/run_plan. Behavior-preserving:
 // identical messages, ordering, and progress format; graph + dirty vectors
 // are built by the callers, execution is unified here.
@@ -5430,30 +5490,36 @@ inline auto run_schedule(
 
 auto run_tasks(std::span<bld::Task> tasks, const bld::Run_config &cfg) -> std::expected<bld::Run_result, bld::Err>
 {
-    // span<Task>: a bag of unrun Procs. No graph, no skipping — everything
-    // runs in parallel. Ordering and up-to-date checks belong to Plan.
+    // span<Task>: a bag of unrun Procs. Groups expand to dotted-name leaves
+    // first; then no graph, no skipping — everything runs in parallel.
+    // Ordering and up-to-date checks belong to Plan.
     // Waiting is done via Proc_group (procs owned by the group).
+    auto flat_exp = flatten_tasks(tasks);
+    if (!flat_exp) {
+        return std::unexpected(std::move(flat_exp.error()));
+    }
+    auto flat = std::move(*flat_exp);
     if (!cfg.write_compile_commands.empty()) {
-        auto written = write_database(tasks, cfg.write_compile_commands);
+        auto written = write_database(std::span<bld::Task>{flat}, cfg.write_compile_commands);
         if (!written) {
             return std::unexpected(written.error());
         }
     }
     bld::Run_result result{};
-    result.tasks.resize(tasks.size());
-    if (tasks.empty()) {
+    result.tasks.resize(flat.size());
+    if (flat.empty()) {
         return result;
     }
     // ensure names (output -> cmd) already done in Plan::add/run_tasks for span, but do here too for direct span
-    ensure_task_names(tasks);
+    ensure_task_names(std::span<bld::Task>{flat});
     // Every task needs a runnable command — name the culprit, not just the index.
-    if (auto ok = check_empty_commands(tasks); !ok) {
+    if (auto ok = check_empty_commands(std::span<bld::Task>{flat}); !ok) {
         return std::unexpected(std::move(ok.error()));
     }
     // Names must be unique (logging and results key off them).
     {
         std::unordered_set<std::string> seen;
-        for (auto &t : tasks) {
+        for (auto &t : flat) {
             if (!seen.insert(t.name).second) {
                 return std::unexpected(
                     Err::erc(std::errc::invalid_argument, std::format("duplicate task name '{}'", t.name)));
@@ -5463,13 +5529,116 @@ auto run_tasks(std::span<bld::Task> tasks, const bld::Run_config &cfg) -> std::e
     // Single-threaded scheduler: up to <width> child processes live at once.
     // Effective width = min(resolved parallel width, resolved async cap).
     std::size_t width = resolve_sched_width(cfg);
-    std::vector<std::vector<std::size_t>> children(tasks.size());
-    std::vector<std::size_t> indegree(tasks.size(), 0);
-    std::vector<bool> dirty(tasks.size(), true);
-    return run_schedule(tasks, children, indegree, dirty, cfg, result, width);
+    std::vector<std::vector<std::size_t>> children(flat.size());
+    std::vector<std::size_t> indegree(flat.size(), 0);
+    std::vector<bool> dirty(flat.size(), true);
+    return run_schedule(std::span<bld::Task>{flat}, children, indegree, dirty, cfg, result, width);
+}
+
+// Expands group tasks to dotted-name leaves and rewrites the side tables
+// onto leaf names. Exact leaf matches win; group names fan out for after
+// and needs. produces() on a group name is an error — outputs belong to
+// the command that creates them, so declare them on subtasks.
+inline auto expand_plan(const bld::Plan &plan) -> std::expected<bld::Plan, bld::Err>
+{
+    bld::Plan flat;
+    for (auto &t : plan.tasks) {
+        std::vector<bld::Task> exp;
+        if (auto r = flatten_task(t, "", exp); !r) {
+            return std::unexpected(std::move(r.error()));
+        }
+        for (auto &l : exp) {
+            flat.tasks.push_back(std::move(l));
+        }
+    }
+    auto leaves_of = [&](std::string_view n) {
+        std::vector<std::string> out;
+        for (auto &l : flat.tasks) {
+            if (l.name == n
+                || (l.name.size() > n.size() && l.name.compare(0, n.size(), n) == 0 && l.name[n.size()] == '.')) {
+                out.push_back(l.name);
+            }
+        }
+        return out;
+    };
+    auto is_group = [&](std::string_view n) {
+        for (auto &l : flat.tasks) {
+            if (l.name.size() > n.size() && l.name.compare(0, n.size(), n) == 0 && l.name[n.size()] == '.') {
+                return true;
+            }
+        }
+        return false;
+    };
+    auto is_leaf = [&](std::string_view n) {
+        for (auto &l : flat.tasks) {
+            if (l.name == n) {
+                return true;
+            }
+        }
+        return false;
+    };
+    for (auto &[tname, vals] : plan.task_inputs) {
+        if (is_leaf(tname)) {
+            flat.task_inputs[tname].insert(flat.task_inputs[tname].end(), vals.begin(), vals.end());
+        } else if (is_group(tname)) {
+            for (auto &leaf : leaves_of(tname)) {
+                flat.task_inputs[leaf].insert(flat.task_inputs[leaf].end(), vals.begin(), vals.end());
+            }
+        }
+        // Unknown names: ignored (existing behavior).
+    }
+    for (auto &[tname, vals] : plan.task_outputs) {
+        if (is_leaf(tname)) {
+            flat.task_outputs[tname].insert(flat.task_outputs[tname].end(), vals.begin(), vals.end());
+        } else if (is_group(tname)) {
+            return std::unexpected(bld::Err::erc(
+                std::errc::invalid_argument,
+                std::format("task '{}' is a group; declare outputs on its subtasks", tname)));
+        }
+        // Unknown names: ignored (existing behavior).
+    }
+    for (auto &[tname, deps] : plan.task_after) {
+        std::vector<std::string> holders = is_leaf(tname) ? std::vector<std::string>{tname} : leaves_of(tname);
+        for (auto &holder : holders) {
+            for (auto &d : deps) {
+                if (is_leaf(d)) {
+                    flat.task_after[holder].push_back(d);
+                } else {
+                    for (auto &leaf : leaves_of(d)) {
+                        flat.task_after[holder].push_back(leaf);
+                    }
+                    // Unknown dep names pass through; the graph build below
+                    // reports them ("unknown task"), as before.
+                    if (leaves_of(d).empty()) {
+                        flat.task_after[holder].push_back(d);
+                    }
+                }
+            }
+        }
+    }
+    for (auto &n : plan.compile_commands) {
+        if (is_leaf(n)) {
+            flat.compile_commands.insert(n);
+        } else {
+            for (auto &leaf : leaves_of(n)) {
+                flat.compile_commands.insert(leaf);
+            }
+        }
+    }
+    return flat;
 }
 
 auto run_plan(Plan &plan, const Run_config &cfg) -> std::expected<Run_result, Err>
+{
+    // Groups expand to dotted-name leaves first; everything below sees flat tasks.
+    auto expanded = expand_plan(plan);
+    if (!expanded) {
+        return std::unexpected(std::move(expanded.error()));
+    }
+    return run_plan_flat(*expanded, cfg);
+}
+
+auto run_plan_flat(Plan &plan, const Run_config &cfg) -> std::expected<Run_result, Err>
 {
     // Plan always builds its own graph from needs/produces/after.
     auto &tasks = plan.tasks;

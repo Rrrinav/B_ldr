@@ -29,6 +29,24 @@ int main()
         bld::log::e("run failed: {}", bad.error());
     }
 
+    // A group task holds subtasks instead of a command: they run as
+    // dotted-name leaves ("build.compile") sharing the group's edges.
+    bld::Task build;
+    build.name = "build";
+    bld::Task compile{bld::Cmd{"sleep", "0.5"}};
+    compile.name = "compile";
+    bld::Task link{bld::Cmd{"sleep", "0.5"}};
+    link.name = "link";
+    build.sub(std::move(compile)).sub(std::move(link));
+
+    bld::Plan plan;
+    plan.add(std::move(build));
+    plan.add("test", bld::Cmd{"true"});
+    plan.after("test", "build"); // runs after BOTH leaves
+    if (auto grouped = bld::run(plan, bld::jobs{4}); grouped) {
+        bld::log::i("grouped plan ran={} skipped={}", grouped->ran, grouped->skipped);
+    }
+
     // jobs{} (default) => max-1. jobs{n} => exactly n, clamped to the machine.
     // A bare span always runs everything; use a Plan for ordered builds.
     bld::log::i("default parallelism would be {} procs", bld::max_parallel_count());

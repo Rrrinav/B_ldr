@@ -175,8 +175,9 @@ for (const auto &e : bld::fs::walk_dir("src", wctl)
 ### Task batches, plans, and compile databases
 
 ```cpp
-// A Task is an unrun Proc: name + command. A bare span runs everything
-// in parallel, no questions asked.
+// A Task is an unrun Proc: name + command — or a group of subtasks, which
+// run as dotted-name leaves ("build.compile") sharing the group's edges.
+// A bare span runs everything in parallel, no questions asked.
 std::vector<bld::Task> tasks;
 tasks.emplace_back(bld::Cmd{"g++", "-c", "a.cpp", "-o", "a.o"});
 tasks.emplace_back(bld::Cmd{"g++", "-c", "b.cpp", "-o", "b.o"});

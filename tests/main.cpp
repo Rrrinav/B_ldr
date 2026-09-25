@@ -1073,6 +1073,114 @@ auto run_tests() -> int
              }
              return {};
          }},
+        {"span_group_runs_leaves_in_parallel",
+         []() -> std::expected<void, std::string> {
+             bld::Task g;
+             g.name = "g";
+             g.sub(bld::Task{true_cmd()}).sub(bld::Task{true_cmd()});
+             std::vector<bld::Task> tasks;
+             tasks.push_back(std::move(g));
+             tasks.emplace_back(true_cmd());
+             auto report = bld::run(tasks, bld::jobs{4});
+             if (!report || report->ran != 3) {
+                 return std::unexpected("group span did not run all 3 leaves");
+             }
+             return {};
+         }},
+        {"nested_groups_flatten_with_dotted_names",
+         []() -> std::expected<void, std::string> {
+             bld::Task inner;
+             inner.name = "inner";
+             inner.sub(bld::Task{true_cmd()});
+             bld::Task outer;
+             outer.name = "outer";
+             outer.sub(std::move(inner));
+             outer.sub(bld::Task{true_cmd()});
+             std::vector<bld::Task> tasks;
+             tasks.push_back(std::move(outer));
+             auto report = bld::run(tasks, bld::jobs{4});
+             if (!report || report->ran != 2) {
+                 return std::unexpected("nested groups did not run both leaves");
+             }
+             return {};
+         }},
+        {"command_plus_subtasks_rejected",
+         []() -> std::expected<void, std::string> {
+             bld::Task g{true_cmd()};
+             g.name = "g";
+             g.sub(bld::Task{true_cmd()});
+             std::vector<bld::Task> tasks;
+             tasks.push_back(std::move(g));
+             auto report = bld::run(tasks);
+             if (report) {
+                 return std::unexpected("command+subtasks unexpectedly ran");
+             }
+             if (report.error().msg.find("both a command and subtasks") == std::string::npos) {
+                 return std::unexpected(std::format("wrong error: '{}'", report.error().msg));
+             }
+             return {};
+         }},
+        {"plan_group_orders_as_one_node",
+         []() -> std::expected<void, std::string> {
+             std::filesystem::remove("test_sandbox/g1.o");
+             std::filesystem::remove("test_sandbox/g2.o");
+             std::filesystem::remove("test_sandbox/gout.o");
+             bld::Plan plan;
+             bld::Task g;
+             g.name = "g";
+             bld::Task g1{bld::Cmd{"sh", "-c", "echo 1 > test_sandbox/g1.o"}};
+             g1.name = "g1";
+             bld::Task g2{bld::Cmd{"sh", "-c", "echo 2 > test_sandbox/g2.o"}};
+             g2.name = "g2";
+             g.sub(std::move(g1));
+             g.sub(std::move(g2));
+             plan.add(std::move(g));
+             plan.add("out", bld::Cmd{"sh", "-c", "cat test_sandbox/g1.o test_sandbox/g2.o > test_sandbox/gout.o"});
+             plan.after("out", "g");
+             auto report = bld::run(plan, bld::jobs{2});
+             if (!report || report->ran != 3) {
+                 return std::unexpected("plan group did not run all 3 leaves");
+             }
+             auto content = bld::fs::read_file("test_sandbox/gout.o");
+             if (!content || content->find("1") == std::string::npos || content->find("2") == std::string::npos) {
+                 return std::unexpected("'out' did not run after the whole group");
+             }
+             return {};
+         }},
+        {"plan_group_outputs_rejected",
+         []() -> std::expected<void, std::string> {
+             bld::Plan plan;
+             bld::Task g;
+             g.name = "g";
+             bld::Task g1{true_cmd()};
+             g1.name = "g1";
+             g.sub(std::move(g1));
+             plan.add(std::move(g));
+             plan.produces("g", "test_sandbox/g.o");
+             auto report = bld::run(plan);
+             if (report) {
+                 return std::unexpected("group outputs unexpectedly accepted");
+             }
+             if (report.error().msg.find("declare outputs on its subtasks") == std::string::npos) {
+                 return std::unexpected(std::format("wrong error: '{}'", report.error().msg));
+             }
+             return {};
+         }},
+        {"group_cannot_spawn_directly",
+         []() -> std::expected<void, std::string> {
+             bld::Task g;
+             g.name = "g";
+             g.sub(bld::Task{true_cmd()});
+             bld::Proc_group group;
+             auto id = group.run_new(g);
+             if (id) {
+                 return std::unexpected("group spawn unexpectedly succeeded");
+             }
+             if (id.error().msg.find("group task") == std::string::npos) {
+                 return std::unexpected(std::format("wrong error: '{}'", id.error().msg));
+             }
+             return {};
+         }},
         {"empty_command_names_task",
          []() -> std::expected<void, std::string> {
              std::vector<bld::Task> tasks;
