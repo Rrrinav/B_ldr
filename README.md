@@ -230,6 +230,7 @@ g++ -std=c++23 -I. examples/hello.cpp -o hello
 | `examples/walk.cpp` | Controller traversal: prune, stop, abort, adaptors, error kinds |
 | `examples/config.cpp` | Options, types, choices, `--help`, proxy reads |
 | `examples/tasks.cpp` | Parallel task batches, failure handling |
+| `examples/groups.cpp` | Group tasks: nested leaves, one-node deps, misuse errors |
 | `examples/build_system.cpp` | A small incremental build of several files |
 | `examples/run.cpp` | Scheduler behavior and error cases |
 | `examples/showcase.cpp` | Self-rebuilding script, options, plans, capture in one file |
