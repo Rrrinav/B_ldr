@@ -3,7 +3,7 @@
 // bld::capture always captures merged stdout+stderr and returns it:
 //   bld::capture(cmd) -> expected<string, Err>  (merged output, exit 0 only)
 // Optional stdin modifiers:
-//   in_str{text}    feed text to the child's stdin
+//   io_in{&text}    feed text to the child's stdin (borrowed, copied at spawn)
 //   io_in{...}      stdin from a borrowed fd, a path, or an eager io_in::open
 //   label{...}      label for logging
 //   raw_crlf{}      keep "\r\n" as-is (default normalizes to "\n").
@@ -32,7 +32,8 @@ int main()
     }
 
     // Pipe data INTO the child.
-    if (auto result = bld::capture(bld::Cmd{"tr", "a-z", "A-Z"}, bld::in_str{"hello world"}); !result) {
+    std::string hello = "hello world";
+    if (auto result = bld::capture(bld::Cmd{"tr", "a-z", "A-Z"}, bld::io_in{&hello}); !result) {
         bld::log::e("capture failed: {}", result.error());
         return EXIT_FAILURE;
     } else {

@@ -23,13 +23,13 @@ static_assert(bld::Config_modifier_c<bld::io_err>);
 static_assert(bld::Config_modifier_c<bld::io_out_err>);
 static_assert(!bld::Config_modifier_c<bld::jobs>);
 static_assert(bld::Config_modifier_c<bld::dry_run>);
-static_assert(bld::Config_modifier_c<bld::in_str>);
+static_assert(bld::Config_modifier_c<bld::io_in>);
 static_assert(bld::Run_modifier_c<bld::jobs>);
 static_assert(bld::Run_modifier_c<bld::keep_going>);
 static_assert(!bld::Run_modifier_c<bld::io_out>);
 static_assert(!bld::Run_modifier_c<bld::io_in>);
 static_assert(!bld::Run_modifier_c<bld::io_out_err>);
-static_assert(bld::Capture_modifier_c<bld::in_str>);
+static_assert(bld::Capture_modifier_c<bld::io_in>);
 static_assert(bld::Capture_modifier_c<bld::label>);
 static_assert(bld::Capture_modifier_c<bld::io_in>);
 static_assert(!bld::Capture_modifier_c<bld::jobs>);
@@ -1010,19 +1010,22 @@ auto run_tests() -> int
          []() -> std::expected<void, std::string> {
               // Plumbing everywhere: a child that ignores stdin must still
               // succeed (and an early exit must not kill us via SIGPIPE).
-              if (auto proc = bld::run(bld::Cmd_loc{true_cmd()}, bld::in_str{"hello"}); !proc) {
-                  return std::unexpected(std::format("run with in_str failed: {}", proc.error()));
+              std::string hello = "hello";
+              if (auto proc = bld::run(bld::Cmd_loc{true_cmd()}, bld::io_in{&hello}); !proc) {
+                  return std::unexpected(std::format("run with io_in content failed: {}", proc.error()));
               }
               // Empty content behaves like unset (inherit), mirroring capture().
-              if (auto proc = bld::run(bld::Cmd_loc{true_cmd()}, bld::in_str{""}); !proc) {
-                  return std::unexpected(std::format("run with empty in_str failed: {}", proc.error()));
+              std::string empty;
+              if (auto proc = bld::run(bld::Cmd_loc{true_cmd()}, bld::io_in{&empty}); !proc) {
+                  return std::unexpected(std::format("run with empty io_in content failed: {}", proc.error()));
               }
 #ifndef _WIN32
               // Content roundtrip through a stdin reader.
               std::string out;
-              auto proc = bld::run(bld::Cmd_loc{bld::Cmd{"cat"}}, bld::in_str{"hi\n"}, bld::io_out{&out});
+              std::string hi = "hi\n";
+              auto proc = bld::run(bld::Cmd_loc{bld::Cmd{"cat"}}, bld::io_in{&hi}, bld::io_out{&out});
               if (!proc) {
-                  return std::unexpected(std::format("run cat with in_str failed: {}", proc.error()));
+                  return std::unexpected(std::format("run cat with io_in content failed: {}", proc.error()));
               }
               if (out != "hi\n") {
                   return std::unexpected(std::format("stdin content wrong: '{}'", out));
@@ -1031,11 +1034,13 @@ auto run_tests() -> int
               return {};
          }},
         {"capture_stdin_and_raw_crlf",         []() -> std::expected<void, std::string> {
-              auto in = bld::capture(bld::Cmd_loc{true_cmd()}, bld::in_str{"hello"});
+              std::string hello_in = "hello";
+              auto in = bld::capture(bld::Cmd_loc{true_cmd()}, bld::io_in{&hello_in});
               if (!in) {
-                  return std::unexpected(std::format("capture with in_str failed: {}", in.error()));
+                  return std::unexpected(std::format("capture with io_in content failed: {}", in.error()));
               }
-              auto echo_in = bld::capture(bld::Cmd_loc{echo_cmd("out_data", "err_data")}, bld::in_str{"ignored"});
+              std::string ignored = "ignored";
+              auto echo_in = bld::capture(bld::Cmd_loc{echo_cmd("out_data", "err_data")}, bld::io_in{&ignored});
               if (!echo_in || echo_in->find("out_data") == std::string::npos) {
                   return std::unexpected("stdin pipe broke merged capture");
               }

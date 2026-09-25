@@ -91,8 +91,9 @@ std::string out, err, merged;
 bld::run(gcc, bld::io_out{&out}, bld::io_err{&err});
 bld::run(gcc, bld::io_out_err{&merged});
 
-// feed stdin from a string (fed while waiting, then EOF)
-bld::run(bld::Cmd{"cat"}, bld::in_str{"hello"});
+// feed stdin from a string (borrowed, copied at spawn, then EOF)
+std::string hello = "hello";
+bld::run(bld::Cmd{"cat"}, bld::io_in{&hello});
 
 // dry_run: log-only preview, spawns nothing
 bld::run(gcc, bld::dry_run{});
@@ -106,7 +107,8 @@ bld::run(gcc, bld::dry_run{});
 auto out = bld::capture(bld::Cmd{"git", "status"});
 if (out) { bld::log::i("{}", *out); }
 
-auto merged = bld::capture(bld::Cmd{"clang", "-x", "c++", "-"}, bld::in_str{"int main(){}"});
+std::string src = "int main(){}";
+auto merged = bld::capture(bld::Cmd{"clang", "-x", "c++", "-"}, bld::io_in{&src});
 
 // Captured output is normalized (\r\n -> \n); pass raw_crlf{} to keep bytes as-is.
 // dry_run logs what would run, spawns nothing, returns empty success.

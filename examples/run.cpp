@@ -17,15 +17,14 @@
 //   dry_run{}               log-only preview: log what would run, spawn nothing
 //                           (also on capture() and per-Task in batches)
 //   io_in{...}              stdin: borrowed fd, lazy path, or eager io_in::open
-//   in_str{text}            stdin content: fed synchronously, then EOF
+//   io_in{&text}             stdin content: borrowed, copied at spawn, then EOF
 //                           (empty behaves like unset, like capture())
 //   io_out{...}             stdout: borrowed fd, lazy path, eager io_out::open,
 //                           or capture string via io_out{&s} (borrowed,
 //                           must outlive wait)
 //   io_err{...}             stderr: same shapes as io_out
 //   io_out_err{...}            one route for merged stdout+stderr (implies merging)
-//   Rules: <=1 of each; io_out_err conflicts with io_out/io_err; io_in conflicts
-//   with in_str.
+//   Rules: <=1 of each; io_out_err conflicts with io_out/io_err.
 //
 // RUN MODIFIERS (whole batch only — Run_modifier_c, consume Run_config):
 //   jobs{[opt]int}         nullopt=>max-1; value=>exactly that, clamped [1, max]
@@ -177,12 +176,13 @@ int main()
         if (auto proc = bld::run(bld::Cmd{"cat"}, bld::io_in{owned}); !proc) {
             bld::log::e("1d fd-in failed: {}", proc.error());
         }
-        // in_str feeds literal content (fed synchronously, then EOF).
+        // io_in{&text} feeds content (borrowed, copied at spawn, then EOF).
+        std::string from_string = "from string\n";
         std::string from_str;
-        if (auto proc = bld::run(bld::Cmd{"cat"}, bld::in_str{"from string\n"}, bld::io_out{&from_str}); !proc) {
-            bld::log::e("1d in_str failed: {}", proc.error());
+        if (auto proc = bld::run(bld::Cmd{"cat"}, bld::io_in{&from_string}, bld::io_out{&from_str}); !proc) {
+            bld::log::e("1d io_in content failed: {}", proc.error());
         } else {
-            bld::log::i("1d in_str out='{}'", bld::str::trim(from_str));
+            bld::log::i("1d io_in content out='{}'", bld::str::trim(from_str));
         }
     }
 
@@ -614,7 +614,7 @@ int main()
     //   bld::run(cmd, bld::io_out{"a"}, bld::io_out{"b"});         // two out routes
     //   bld::run(cmd, bld::io_out{&s}, bld::io_out_err{"b"});         // io_out_err conflicts with io_out
     //   bld::run(cmd, bld::io_out_err{fd}, bld::io_err{"e"});         // io_out_err conflicts with io_err
-    //   bld::run(cmd, bld::io_in{"a"}, bld::in_str{"b"});         // two stdin routes
+    //   bld::run(cmd, bld::io_in{"a"}, bld::io_in{"b"});         // two stdin routes
     //   bld::wait_all(procs, bld::keep_going{});      // wait_all takes no modifiers
 
     return 0;

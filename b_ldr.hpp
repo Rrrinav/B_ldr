@@ -501,11 +501,14 @@ struct Proc_config
     Io_slot io_out;
     Io_slot io_err;
     bool merge_err_and_out{false};
-    // Stdin content for run(cmd, in_str{...}): fed to the child, then EOF.
-    // Empty means unset (inherit), mirroring capture()'s in_str. Borrowed —
+    // Stdin content for run(cmd, io_in{&text}): fed to the child, then EOF.
+    // Empty means unset (inherit). Borrowed —
     // like Cmd, it must outlive the run()/Task call (feeding is synchronous
     // inside spawn, so it never outlives the call itself).
-    std::string_view in_str_content{""};
+    std::string_view in_content{""};
+    // Captured output is normalized from CRLF to LF (matches capture();
+    // no-op on Linux). capture() clears it for raw_crlf.
+    bool normalize_crlf{true};
 };
 
 struct Cmd_loc
@@ -608,7 +611,7 @@ struct Proc
     std::string *cap_out_{nullptr};
     std::string *cap_err_{nullptr};
 
-    // Stdin content (in_str): the parent holds the write end and feeds the
+    // Stdin content: the parent holds the write end and feeds the
     // owned copy below through the same single-threaded pumps, closing it
     // for EOF when done (or when the child exits first). Owned so async
     // procs stay valid after the caller's string goes away.
@@ -689,14 +692,14 @@ private:
 // validate_*): that way the helpful message prints first, ahead of any follow-on error.
 #define B_LDR_PROC_MODIFIERS_MSG \
     "API ERROR: bad modifier for run(cmd)/Task/run_new. Proc modifiers: async, label, cwd, dry_run, " \
-    "io_in, io_out, io_err, io_out_err, in_str. " \
+    "io_in, io_out, io_err, io_out_err. " \
     "Run modifiers go to run(batch,...); raw_crlf goes to capture()."
 #define B_LDR_RUN_MODIFIERS_MSG \
     "API ERROR: bad modifier for run(batch). Run modifiers: jobs, " \
     "keep_going, dry_run, force, write_compile_commands. Put io/label/cwd on the Task. " \
     "No run(span<Proc>): use wait_all(procs)."
 #define B_LDR_CAPTURE_MODIFIERS_MSG \
-    "API ERROR: bad modifier for capture(cmd). Capture takes: io_in, in_str, label, " \
+    "API ERROR: bad modifier for capture(cmd). Capture takes: io_in, label, " \
     "dry_run, raw_crlf. Output is always merged; to capture from run(), use run(cmd, io_out{&s})."
 
 // Forward declaration: the full dry_run modifier (a Run/Proc/Capture modifier)
@@ -787,9 +790,9 @@ struct Capture_config
     std::string label{""};
     std::source_location loc{std::source_location::current()};
     // Unified stdin routing: unset (inherit), borrowed fd, path, or shared owned fd.
-    // Use io_in; setting in_str as well is an error.
+    // Use io_in routing or io_in{&content}, never both (duplicate io_in).
     Io_slot io_in;
-    std::string_view in_str{""};
+    std::string_view in_content{""};
     /// Captured output is normalized from CRLF to LF. Always on: Windows programs emit CRLF,
     /// so captured text compares cleanly against "\n"-terminated strings (a no-op on Linux).
     bool normalize_crlf{true};
@@ -853,16 +856,26 @@ struct label
 //                                          // (borrowed, must outlive wait)
 //   if (auto f = io_out::open("log.txt"); f) run(cmd, *f);  // eager + checked
 //   capture(cmd, io_in{"in.txt"})          // stdin routing for capture
-//   capture(cmd, in_str{"hello"})          // stdin content for capture
+//   capture(cmd, io_in{&text})             // stdin content for capture
+//                                          // (borrowed, copied at spawn)
 //
 // At most one of each per call; io_out_err conflicts with io_out/io_err.
 struct io_in
 {
     Io_slot slot{std::monostate{}};
+    // Stdin content (borrowed view): fed to the child, then EOF. Set only by
+    // the pointer form below; empty means unset (inherit). Like Cmd, it must
+    // outlive the run()/Task call — spawn copies it synchronously, so it
+    // never outlives the call itself.
+    std::string_view content_{};
     io_in() = default;
     explicit io_in(Fd_view f);
     explicit io_in(std::string_view path);
     explicit io_in(const Shared_fd &fd);
+    // Stdin content from a borrowed string: io_in{&text}. The pointer form
+    // is content (a path can't be spelled with &); spawn copies the bytes,
+    // so async procs stay valid after the caller's string goes away.
+    explicit io_in(const std::string *text);
     // Eager open now; the io value keeps the fd alive. Manual error handling:
     //   if (auto f = io_in::open("in.txt"); f) run(cmd, *f);
     // (*f unwraps the expected to the modifier run() takes.)
@@ -907,16 +920,6 @@ struct io_out_err
         -> std::expected<io_out_err, Err>;
     auto operator()(Proc_config &cfg) const -> void;
 };
-/// Stdin content for run() and capture(): fed to the child, then EOF.
-/// Empty behaves like unset (inherit). Works sync, async, and in batches —
-/// content is consumed through the same single-threaded pumps as capture.
-struct in_str
-{
-    std::string_view val;
-    explicit in_str(std::string_view s);
-    auto operator()(Proc_config& cfg) const -> void;
-    auto operator()(Capture_config& cfg) const -> void;
-};
 /// Opts out of the default CRLF -> LF normalization of captured output.
 struct raw_crlf
 {
@@ -942,15 +945,13 @@ constexpr bool is_io_err_v = std::is_same_v<std::remove_cvref_t<T>, io_err>;
 template <typename T>
 constexpr bool is_io_out_err_v = std::is_same_v<std::remove_cvref_t<T>, io_out_err>;
 
-// Stdin for run(): io_in routing or in_str content (at most one per call).
+// Stdin for run(): io_in routing or io_in{&content} (at most one per call).
 template <typename T>
-constexpr bool is_run_in_v =
-    std::is_same_v<std::remove_cvref_t<T>, io_in> || std::is_same_v<std::remove_cvref_t<T>, in_str>;
+constexpr bool is_run_in_v = std::is_same_v<std::remove_cvref_t<T>, io_in>;
 
-// Capture stdin: io_in routing or in_str content (at most one per capture).
+// Capture stdin: io_in routing or io_in{&content} (at most one per capture).
 template <typename T>
-constexpr bool is_cap_in_v =
-    std::is_same_v<std::remove_cvref_t<T>, io_in> || std::is_same_v<std::remove_cvref_t<T>, in_str>;
+constexpr bool is_cap_in_v = std::is_same_v<std::remove_cvref_t<T>, io_in>;
 
 template <typename T>
 constexpr bool is_async_mod_v = std::is_same_v<std::remove_cvref_t<T>, async>;
@@ -973,7 +974,7 @@ constexpr auto validate_capture_configs() -> void;
 
 template <typename... Configs>
 // Merged-only capture: returns merged stdout+stderr as a string on success (exit 0).
-// Takes no out routing — only io_in/in_str, label, dry_run, raw_crlf.
+// Takes no out routing — only io_in, label, dry_run, raw_crlf.
 auto capture(Cmd_loc cl, Configs &&...confs) -> std::expected<std::string, bld::Err>;
 
 auto wait_all(std::span<bld::Proc> procs) -> std::expected<std::size_t, bld::Err>;
@@ -2158,7 +2159,7 @@ constexpr auto validate_run_configs() -> void
     constexpr int label_count = (bld::is_label_mod_v<Configs> + ... + 0);
     constexpr int cwd_count = (bld::is_cwd_mod_v<Configs> + ... + 0);
     constexpr int dry_run_count = (bld::is_dry_run_mod_v<Configs> + ... + 0);
-    static_assert(in_count <= 1, "API ERROR: duplicate stdin routing (at most one of io_in/in_str).");
+    static_assert(in_count <= 1, "API ERROR: duplicate stdin routing (at most one io_in).");
     static_assert(
         out_count + merged_count <= 1,
         "API ERROR: duplicate stdout routing (io_out and io_out_err conflict; at most one).");
@@ -2191,7 +2192,7 @@ constexpr auto validate_capture_configs() -> void
     // NOTE: modifier-category is asserted inline by capture() via
     // B_LDR_CAPTURE_MODIFIERS_MSG.
     constexpr int in_count = (bld::is_cap_in_v<Configs> + ... + 0);
-    static_assert(in_count <= 1, "API ERROR: duplicate capture stdin (at most one of io_in/in_str).");
+    static_assert(in_count <= 1, "API ERROR: duplicate capture stdin (at most one io_in).");
     constexpr int dry_run_count = (bld::is_dry_run_mod_v<Configs> + ... + 0);
     static_assert(dry_run_count <= 1, "API ERROR: duplicate dry_run (at most one per capture).");
 }
@@ -2751,9 +2752,13 @@ auto bld::Proc::finish_capture() -> void
         stdin_text_.clear();
         stdin_done_ = 0;
     }
-    // Captured text matches capture(): CRLF -> LF (no-op on Linux).
+    // Captured text is normalized CRLF -> LF unless the config opts out
+    // (capture()'s raw_crlf); a no-op on Linux either way.
     auto *out = std::exchange(cap_out_, nullptr);
     auto *err = std::exchange(cap_err_, nullptr);
+    if (!spec.cfg.normalize_crlf) {
+        return;
+    }
     if (out != nullptr) {
         *out = bld::str::replace_all(*out, "\r\n", "\n");
     }
@@ -3169,11 +3174,11 @@ auto bld::Proc::spawn(const Exec_spec &spec, Proc_gid gid) -> std::expected<Proc
         return std::unexpected(Err::erc(
             std::errc::invalid_argument, "same string captures both stdout and stderr without merging; use io_out_err{&s}"));
     }
-    // Stdin content (in_str) and io_in routing are mutually exclusive
+    // Stdin content and io_in routing are mutually exclusive
     // (compile-time checked; guard hand-built configs too).
-    if (!cfg.in_str_content.empty() && io_is_set(cfg.io_in)) {
+    if (!cfg.in_content.empty() && io_is_set(cfg.io_in)) {
         return details::fail(
-            std::errc::invalid_argument, "Conflicting stdin routing for run: use at most one of io_in/in_str");
+            std::errc::invalid_argument, "Conflicting stdin routing for run: use at most one of io_in routing/content");
     }
     // Resolve one Io_slot per stream. A slot holds a single alternative
     // (unset / borrowed fd / path / shared owned fd / string target), so
@@ -3202,10 +3207,10 @@ auto bld::Proc::spawn(const Exec_spec &spec, Proc_gid gid) -> std::expected<Proc
     }
     Fd_view eff_in = r_in->first;
     Owned_Fd opened_in = std::move(r_in->second);
-    // Stdin content (in_str): pipe it so the child reads the text, then EOF.
-    // Empty means unset (inherit), mirroring capture()'s in_str.
+    // Stdin content: pipe it so the child reads the text, then EOF.
+    // Empty means unset (inherit).
     int stdin_pipe[2]{-1, -1};
-    const bool feed_stdin = !cfg.in_str_content.empty();
+    const bool feed_stdin = !cfg.in_content.empty();
     if (feed_stdin) {
         if (auto res = details::make_pipe(stdin_pipe, "stdin"); !res) {
             return std::unexpected(std::move(res.error()));
@@ -3378,7 +3383,7 @@ auto bld::Proc::spawn(const Exec_spec &spec, Proc_gid gid) -> std::expected<Proc
     }
     p.status_ = Status{.state = State::running};
     attach_capture(p);
-    // Stdin content (in_str): hand the write end to the Proc with an owned
+    // Stdin content: hand the write end to the Proc with an owned
     // copy of the text; the single-threaded pumps feed it while waiting
     // (sync, async, and batch alike) and close it for EOF when done.
     if (feed_stdin) {
@@ -3387,11 +3392,11 @@ auto bld::Proc::spawn(const Exec_spec &spec, Proc_gid gid) -> std::expected<Proc
         details::set_nonblocking(stdin_pipe[1]);
         p.stdin_fd_ = stdin_pipe[1];
         stdin_pipe[1] = -1; // ownership moved to Proc
-        p.stdin_text_ = std::string{cfg.in_str_content};
+        p.stdin_text_ = std::string{cfg.in_content};
         p.stdin_done_ = 0;
         // Borrowed view no longer needed and must not dangle in the stored
         // spec (async procs outlive the caller's string).
-        p.spec.cfg.in_str_content = {};
+        p.spec.cfg.in_content = {};
     }
     return p;
 #else
@@ -3462,7 +3467,7 @@ auto bld::Proc::spawn(const Exec_spec &spec, Proc_gid gid) -> std::expected<Proc
     }
     p.status_ = Status{.state = State::running};
     attach_capture(p);
-    // Stdin content (in_str): hand the write end to the Proc with an owned
+    // Stdin content: hand the write end to the Proc with an owned
     // copy of the text; the single-threaded pumps feed it while waiting
     // (sync, async, and batch alike) and close it for EOF when done.
     if (feed_stdin) {
@@ -3471,11 +3476,11 @@ auto bld::Proc::spawn(const Exec_spec &spec, Proc_gid gid) -> std::expected<Proc
         details::set_nonblocking(stdin_pipe[1]);
         p.stdin_fd_ = stdin_pipe[1];
         stdin_pipe[1] = -1; // ownership moved to Proc
-        p.stdin_text_ = std::string{cfg.in_str_content};
+        p.stdin_text_ = std::string{cfg.in_content};
         p.stdin_done_ = 0;
         // Borrowed view no longer needed and must not dangle in the stored
         // spec (async procs outlive the caller's string).
-        p.spec.cfg.in_str_content = {};
+        p.spec.cfg.in_content = {};
     }
     return p;
 #endif
@@ -4062,6 +4067,8 @@ bld::io_in::io_in(const Shared_fd &fd)
 {
     bld::details::assign_single(slot, fd);
 }
+bld::io_in::io_in(const std::string *text) : content_(text != nullptr ? std::string_view{*text} : std::string_view{})
+{}
 auto bld::io_in::open(std::string_view path) -> std::expected<bld::io_in, bld::Err>
 {
     auto fd = bld::details::open_shared_for_read(path);
@@ -4073,10 +4080,12 @@ auto bld::io_in::open(std::string_view path) -> std::expected<bld::io_in, bld::E
 auto bld::io_in::operator()(Proc_config &cfg) const -> void
 {
     cfg.io_in = slot;
+    cfg.in_content = content_;
 }
 auto bld::io_in::operator()(Capture_config &cfg) const -> void
 {
     cfg.io_in = slot;
+    cfg.in_content = content_;
 }
 
 // --- io_out ---
@@ -4151,19 +4160,6 @@ auto bld::io_out_err::operator()(Proc_config &cfg) const -> void
     cfg.io_out = slot;
     cfg.io_err = slot;
     cfg.merge_err_and_out = true;
-}
-
-bld::in_str::in_str(std::string_view s) : val(s)
-{}
-
-auto bld::in_str::operator()(Proc_config &cfg) const -> void
-{
-    cfg.in_str_content = val;
-}
-
-auto bld::in_str::operator()(Capture_config &cfg) const -> void
-{
-    cfg.in_str = val;
 }
 
 auto bld::raw_crlf::operator()(Capture_config &cfg) const -> void
@@ -4335,85 +4331,6 @@ auto bld::details::execute(const bld::Cmd &cmd, const Proc_config &cfg, std::sou
         });
 }
 
-namespace bld::details {
-// One round of stdin feeding for capture_execute's pump loop. Write semantics
-// are OS-specific and preserved verbatim; close_in() is invoked when stdin
-// reaches EOF, the child closes the pipe, or a fatal error occurs.
-template <typename Close_fn>
-inline void feed_capture_stdin(int write_fd, std::string_view in_str, std::size_t &written, Close_fn close_in)
-{
-#ifdef _WIN32
-    // CRT pipes are blocking: feed in small chunks so a full pipe
-    // stalls for at most one chunk while the child catches up.
-    // True non-blocking stdin would need overlapped I/O.
-    constexpr unsigned int chunk = 4096;
-    std::size_t left = in_str.size() - written;
-    unsigned int want = left < chunk ? static_cast<unsigned int>(left) : chunk;
-    int n = details::write_fd(write_fd, in_str.data() + written, want);
-    if (n > 0) {
-        written += static_cast<std::size_t>(n);
-    } else if (n == 0) {
-        close_in();
-    } else if (errno == EPIPE || errno == EINVAL) {
-        close_in(); // child closed stdin / exited
-    }
-    if (written >= in_str.size()) {
-        close_in(); // child sees EOF on stdin
-    }
-#else
-    while (written < in_str.size()) {
-        unsigned int left = static_cast<unsigned int>(in_str.size() - written);
-        int n = details::write_fd(write_fd, in_str.data() + written, left);
-        if (n > 0) {
-            written += static_cast<std::size_t>(n);
-            continue;
-        }
-        if (n == -1 && errno == EINTR) {
-            continue;
-        }
-        if (n == -1 && (errno == EAGAIN || errno == EWOULDBLOCK)) {
-            break; // pipe full: read more output, retry next round
-        }
-        break; // EPIPE (child exited) or fatal: stop feeding
-    }
-    if (written >= in_str.size()) {
-        close_in(); // child sees EOF on stdin
-    }
-#endif
-}
-
-// Idle-wait slice for capture_execute's pump loop: poll the live fds so the
-// parent wakes when the child writes, without busy-spinning.
-inline void rest_capture_loop(bool out_eof, bool in_closed, bool child_done, [[maybe_unused]] int out_fd, [[maybe_unused]] int in_fd)
-{
-#ifndef _WIN32
-    if (!out_eof || !in_closed) {
-        struct pollfd pfds[2];
-        int n = 0;
-        if (!out_eof) {
-            pfds[n].fd = out_fd;
-            pfds[n].events = POLLIN;
-            pfds[n].revents = 0;
-            ++n;
-        }
-        if (!in_closed) {
-            pfds[n].fd = in_fd;
-            pfds[n].events = POLLOUT;
-            pfds[n].revents = 0;
-            ++n;
-        }
-        ::poll(pfds, static_cast<nfds_t>(n), 10);
-    } else if (!child_done) {
-        details::sleep_ms(1);
-    }
-#else
-    if (!out_eof || !in_closed || !child_done) {
-        details::sleep_ms(1);
-    }
-#endif
-}
-} // namespace bld::details
-
 auto bld::details::capture_execute(const bld::Cmd &cmd, bld::Capture_config &cap_cfg, std::source_location loc)
     -> std::expected<std::string, bld::Err>
 {
@@ -4421,129 +4338,43 @@ auto bld::details::capture_execute(const bld::Cmd &cmd, bld::Capture_config &cap
 
     // Only stdin modifiers are allowed (enforced at compile time via
     // validate_capture_configs). Guard hand-built Capture_config too:
-    // io_in slot and in_str are mutually exclusive.
-    if (!cap_cfg.in_str.empty() && io_is_set(cap_cfg.io_in)) {
-        bld::log::e("capture {:?}: conflicting stdin routing (at most one of io_in/in_str)", cmd);
+    // io_in routing and io_in{&content} are mutually exclusive.
+    if (!cap_cfg.in_content.empty() && io_is_set(cap_cfg.io_in)) {
+        bld::log::e("capture {:?}: conflicting stdin routing (at most one of io_in routing/content)", cmd);
         return details::fail(
-            std::errc::invalid_argument, "Conflicting stdin routing for capture: use at most one of io_in/in_str");
+            std::errc::invalid_argument, "Conflicting stdin routing for capture: use at most one of io_in routing/content");
     }
 
     if (cap_cfg.dry_run) {
         // Preview only: no pipes, no spawn, empty output.
-        bld::log::i("dry run (would capture {:?}, {} stdin bytes)", cmd, cap_cfg.in_str.size());
+        bld::log::i("dry run (would capture {:?}, {} stdin bytes)", cmd, cap_cfg.in_content.size());
         return std::string{};
     }
 
-    int pipe_out[2]{-1, -1}, pipe_in[2]{-1, -1};
+    // Merged capture through the run machinery: spawn() owns the string
+    // pipes and stdin feeding, wait() pumps everything single-threaded.
+    // async stays true so execute() returns the running Proc for us to reap.
+    std::string merged;
     Proc_config run_cfg{};
     run_cfg.label = cap_cfg.label;
     run_cfg.async = true;
     run_cfg.loc = cap_cfg.loc;
     run_cfg.io_in = cap_cfg.io_in;
-
-    if (!cap_cfg.in_str.empty()) {
-        if (auto res = details::make_pipe(pipe_in, "stdin"); !res) {
-            return std::unexpected(res.error());
-        }
-        run_cfg.io_in = Io_slot{Fd_view{pipe_in[0]}};
-        bld::log::d("Created stdin pipe (read: {}, write: {})", pipe_in[0], pipe_in[1]);
-    }
-
-    // Merged capture: stdout goes to a pipe, stderr is merged into it.
-    if (auto res = details::make_pipe(pipe_out, "stdout"); !res) {
-        if (!cap_cfg.in_str.empty()) {
-            details::close_fd(pipe_in[0]);
-            details::close_fd(pipe_in[1]);
-        }
-        return std::unexpected(res.error());
-    }
-    run_cfg.io_out = Io_slot{Fd_view{pipe_out[1]}};
+    run_cfg.in_content = cap_cfg.in_content;
+    run_cfg.io_out = make_str_slot(&merged);
+    run_cfg.io_err = make_str_slot(&merged);
     run_cfg.merge_err_and_out = true;
-    bld::log::d("Created merged stdout+stderr pipe (read: {}, write: {})", pipe_out[0], pipe_out[1]);
+    run_cfg.normalize_crlf = cap_cfg.normalize_crlf;
 
     auto proc_res = bld::details::execute(cmd, run_cfg, loc);
-
-    // The parent must immediately close the child's ends of the pipes,
-    // otherwise the pump loop below never sees EOF.
-    details::close_fd(pipe_out[1]);
-    pipe_out[1] = -1;
-    if (!cap_cfg.in_str.empty()) {
-        details::close_fd(pipe_in[0]);
-        pipe_in[0] = -1;
-    }
-
     if (!proc_res) {
-        details::close_fd(pipe_out[0]);
-        if (!cap_cfg.in_str.empty()) {
-            details::close_fd(pipe_in[1]);
-        }
-        return std::unexpected(proc_res.error());
+        // execute() already waited (and pumped) when it fails late; attach
+        // whatever was captured, exactly like the wait-failure path below.
+        auto err = std::move(proc_res.error());
+        err.output = std::move(merged);
+        return std::unexpected(std::move(err));
     }
-
-    // Single-threaded pump: interleave stdin writes, stdout reads and
-    // child reaping so large inputs+outputs never deadlock (no threads).
     auto &proc = *proc_res;
-    std::string merged;
-    const bool have_in = !cap_cfg.in_str.empty();
-    std::size_t written = 0;
-    bool in_closed = !have_in;
-    bool out_eof = false;
-    bool child_done = false;
-    bld::Proc::Status child_status{};
-    details::set_nonblocking(pipe_out[0]);
-    if (have_in) {
-        details::set_nonblocking(pipe_in[1]);
-    }
-    auto close_in = [&]() {
-        if (pipe_in[1] >= 0) {
-            details::close_fd(pipe_in[1]);
-            pipe_in[1] = -1;
-        }
-        in_closed = true;
-    };
-    auto close_out = [&]() {
-        if (pipe_out[0] >= 0) {
-            details::close_fd(pipe_out[0]);
-            pipe_out[0] = -1;
-        }
-        out_eof = true;
-    };
-    while (!out_eof || !in_closed || !child_done) {
-        // Drain output first so the child never stalls on a full pipe
-        // while we are trying to feed it stdin (matters on Windows where
-        // _write can block: pipe_out was just drained, giving room).
-        if (!out_eof) {
-            if (details::pump_fd_nonblocking(pipe_out[0], merged)) {
-                close_out();
-            }
-        }
-        if (!in_closed) {
-            details::feed_capture_stdin(pipe_in[1], cap_cfg.in_str, written, close_in);
-        }
-        if (!child_done) {
-            auto st = proc.try_wait();
-            if (!st) {
-                close_out();
-                close_in();
-                auto err = std::move(st.error());
-                err.output = std::move(merged);
-                return std::unexpected(std::move(err));
-            }
-            if (!proc.is_running()) {
-                child_done = true;
-                child_status = *st;
-            }
-        }
-        if (out_eof && in_closed && child_done) {
-            break;
-        }
-        details::rest_capture_loop(out_eof, in_closed, child_done, pipe_out[0], pipe_in[1]);
-    }
-
-    if (cap_cfg.normalize_crlf) {
-        merged = bld::str::replace_all(merged, "\r\n", "\n");
-    }
-
     auto status = proc.wait();
     if (!status) {
         bld::log::e("capture {:?}: wait failed: {}", cmd, status.error());
@@ -4551,7 +4382,6 @@ auto bld::details::capture_execute(const bld::Cmd &cmd, bld::Capture_config &cap
         err.output = std::move(merged);
         return std::unexpected(std::move(err));
     }
-    (void)child_status;
     if (status->code != 0) {
         bld::log::e("capture {:?}: exited with code {}", cmd, status->code);
         auto err = bld::Err::erc(std::errc::io_error, std::format("command {:?} exited with code {}", cmd, status->code));
