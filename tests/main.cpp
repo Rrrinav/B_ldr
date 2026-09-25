@@ -14,7 +14,7 @@
 #include "../b_ldr.hpp"
 
 // Modifier-category classification guards: these drive the guided static_asserts
-// in run/capture/wait_all/Task/run_new. If a modifier ever gains/loses an
+// in run/wait_all/Task/run_new. If a modifier ever gains/loses an
 // overload, these fail at compile time next to the mistake.
 static_assert(bld::Config_modifier_c<bld::io_in>);
 static_assert(bld::Config_modifier_c<bld::label>);
@@ -23,20 +23,11 @@ static_assert(bld::Config_modifier_c<bld::io_err>);
 static_assert(bld::Config_modifier_c<bld::io_out_err>);
 static_assert(!bld::Config_modifier_c<bld::jobs>);
 static_assert(bld::Config_modifier_c<bld::dry_run>);
-static_assert(bld::Config_modifier_c<bld::io_in>);
 static_assert(bld::Run_modifier_c<bld::jobs>);
 static_assert(bld::Run_modifier_c<bld::keep_going>);
 static_assert(!bld::Run_modifier_c<bld::io_out>);
 static_assert(!bld::Run_modifier_c<bld::io_in>);
 static_assert(!bld::Run_modifier_c<bld::io_out_err>);
-static_assert(bld::Capture_modifier_c<bld::io_in>);
-static_assert(bld::Capture_modifier_c<bld::label>);
-static_assert(bld::Capture_modifier_c<bld::io_in>);
-static_assert(!bld::Capture_modifier_c<bld::jobs>);
-static_assert(bld::Capture_modifier_c<bld::dry_run>);
-static_assert(!bld::Capture_modifier_c<bld::io_out>);
-static_assert(!bld::Capture_modifier_c<bld::io_err>);
-static_assert(!bld::Capture_modifier_c<bld::io_out_err>);
 
 namespace bld::test {
 struct Test_case
@@ -676,13 +667,14 @@ auto run_tests() -> int
                   return std::unexpected(std::format("fs test build failed: {}", built.error()));
               }
               // Just becuase I wanted to supress the output
+              std::string fs_out;
 #ifdef _WIN32
-              auto cap = bld::capture(bld::Cmd{"./test_fs.exe"});
+              auto fs_proc = bld::run(bld::Cmd{"./test_fs.exe"}, bld::io_out_err{&fs_out});
 #else
-              auto cap = bld::capture(bld::Cmd{"./test_fs"});
+              auto fs_proc = bld::run(bld::Cmd{"./test_fs"}, bld::io_out_err{&fs_out});
 #endif
-              if (!cap) {
-                  return std::unexpected(std::format("fs test run failed: {}", cap.error()));
+              if (!fs_proc || fs_proc->status_code() != 0) {
+                  return std::unexpected("fs test run failed");
               }
               std::expected<std::vector<bld::test::Test_file_res>, std::string> parsed;
               {
@@ -728,13 +720,14 @@ auto run_tests() -> int
               {
                   return std::unexpected(std::format("str test build failed: {}", built.error()));
               }
+              std::string str_out;
 #ifdef _WIN32
-              auto cap = bld::capture(bld::Cmd{"./test_str.exe"});
+              auto str_proc = bld::run(bld::Cmd{"./test_str.exe"}, bld::io_out_err{&str_out});
 #else
-              auto cap = bld::capture(bld::Cmd{"./test_str"});
+              auto str_proc = bld::run(bld::Cmd{"./test_str"}, bld::io_out_err{&str_out});
 #endif
-              if (!cap) {
-                  return std::unexpected(std::format("str test run failed: {}", cap.error()));
+              if (!str_proc || str_proc->status_code() != 0) {
+                  return std::unexpected("str test run failed");
               }
               std::expected<std::vector<bld::test::Test_file_res>, std::string> parsed;
               {
@@ -788,34 +781,24 @@ auto run_tests() -> int
              }
              return {};
          }},
-        {"process_capture_stdout_and_stderr",
+        {"run_merged_capture_combines_streams",
          []() -> std::expected<void, std::string> {
              bld::Cmd cmd = echo_cmd("out_data", "err_data");
 
-             auto merged = bld::capture(bld::Cmd_loc{cmd});
-             if (!merged) {
-                 return std::unexpected(std::format("process execution failed during capture parsing: {}", merged.error()));
+             std::string merged;
+             auto proc = bld::run(bld::Cmd_loc{cmd}, bld::io_out_err{&merged});
+             if (!proc) {
+                 return std::unexpected(std::format("run failed: {}", proc.error()));
+             }
+             if (proc->status_code() != 0) {
+                 return std::unexpected("merged run should exit 0");
              }
 
-             if (merged->find("out_data") == std::string::npos) {
-                 return std::unexpected(std::format("stdout missing from merged capture: '{}'", *merged));
+             if (merged.find("out_data") == std::string::npos) {
+                 return std::unexpected(std::format("stdout missing from merged capture: '{}'", merged));
              }
-             if (merged->find("err_data") == std::string::npos) {
-                 return std::unexpected(std::format("stderr missing from merged capture: '{}'", *merged));
-             }
-             return {};
-         }},
-        {"process_capture_merged_streams",
-         []() -> std::expected<void, std::string> {
-             bld::Cmd cmd = echo_cmd("a", "b");
-
-             auto merged = bld::capture(bld::Cmd_loc{cmd});
-             if (!merged) {
-                 return std::unexpected(std::format("process execution failed during capture merge: {}", merged.error()));
-             }
-
-             if (merged->find("a") == std::string::npos || merged->find("b") == std::string::npos) {
-                 return std::unexpected(std::format("merge capture failed to combine streams: '{}'", *merged));
+             if (merged.find("err_data") == std::string::npos) {
+                 return std::unexpected(std::format("stderr missing from merged capture: '{}'", merged));
              }
              return {};
          }},
@@ -830,23 +813,30 @@ auto run_tests() -> int
              if (out.size() < 1000000 || out.compare(out.size() - 7, 7, "200000\n") != 0) {
                  return std::unexpected(std::format("large stdout truncated ({} bytes)", out.size()));
              }
-             auto merged = bld::capture(bld::Cmd_loc{bld::Cmd{"seq", "1", "200000"}});
-             if (!merged || merged->size() < 1000000) {
+             std::string merged;
+             auto mproc = bld::run(bld::Cmd_loc{bld::Cmd{"seq", "1", "200000"}}, bld::io_out_err{&merged});
+             if (!mproc || merged.size() < 1000000) {
                  return std::unexpected("large merged capture truncated");
              }
              return {};
          }},
-        {"capture_failure_carries_output",
+        {"run_failure_keeps_merged_output",
          []() -> std::expected<void, std::string> {
-             auto out = bld::capture(bld::Cmd_loc{bld::Cmd{"sh", "-c", "echo hello-out; echo hello-err >&2; exit 3"}});
-             if (out) {
-                 return std::unexpected("failing capture unexpectedly succeeded");
+             // run() reports non-zero exits via status, keeping the capture.
+             std::string merged;
+             auto proc = bld::run(
+                 bld::Cmd_loc{bld::Cmd{"sh", "-c", "echo hello-out; echo hello-err >&2; exit 3"}}, bld::io_out_err{&merged});
+             if (!proc) {
+                 return std::unexpected(std::format("run failed: {}", proc.error()));
              }
-             if (out.error().output.find("hello-out") == std::string::npos) {
-                 return std::unexpected("Err::output missing stdout");
+             if (proc->status_code() == 0) {
+                 return std::unexpected("failing run unexpectedly exited 0");
              }
-             if (out.error().output.find("hello-err") == std::string::npos) {
-                 return std::unexpected("Err::output missing stderr");
+             if (merged.find("hello-out") == std::string::npos) {
+                 return std::unexpected("merged output missing stdout");
+             }
+             if (merged.find("hello-err") == std::string::npos) {
+                 return std::unexpected("merged output missing stderr");
              }
              return {};
          }},
@@ -1033,15 +1023,18 @@ auto run_tests() -> int
 #endif
               return {};
          }},
-        {"capture_stdin_and_raw_crlf",         []() -> std::expected<void, std::string> {
+        {"run_stdin_content_merged",
+         []() -> std::expected<void, std::string> {
               std::string hello_in = "hello";
-              auto in = bld::capture(bld::Cmd_loc{true_cmd()}, bld::io_in{&hello_in});
-              if (!in) {
-                  return std::unexpected(std::format("capture with io_in content failed: {}", in.error()));
+              std::string out;
+              auto proc = bld::run(bld::Cmd_loc{true_cmd()}, bld::io_in{&hello_in}, bld::io_out{&out});
+              if (!proc) {
+                  return std::unexpected(std::format("run with io_in content failed: {}", proc.error()));
               }
               std::string ignored = "ignored";
-              auto echo_in = bld::capture(bld::Cmd_loc{echo_cmd("out_data", "err_data")}, bld::io_in{&ignored});
-              if (!echo_in || echo_in->find("out_data") == std::string::npos) {
+              std::string merged;
+              auto eproc = bld::run(bld::Cmd_loc{echo_cmd("out_data", "err_data")}, bld::io_in{&ignored}, bld::io_out_err{&merged});
+              if (!eproc || merged.find("out_data") == std::string::npos) {
                   return std::unexpected("stdin pipe broke merged capture");
               }
 #ifdef _WIN32
@@ -1049,13 +1042,10 @@ auto run_tests() -> int
 #else
               bld::Cmd crlf{"printf", "hi\r\n"};
 #endif
-              auto norm = bld::capture(bld::Cmd_loc{crlf});
-              auto raw = bld::capture(bld::Cmd_loc{crlf}, bld::raw_crlf{});
-              if (!norm || *norm != "hi\n") {
-                  return std::unexpected(std::format("CRLF normalization wrong: '{}'", norm ? *norm : "<err>"));
-              }
-              if (!raw || *raw != "hi\r\n") {
-                  return std::unexpected(std::format("raw_crlf wrong: '{}'", raw ? *raw : "<err>"));
+              std::string norm;
+              auto nproc = bld::run(bld::Cmd_loc{crlf}, bld::io_out{&norm});
+              if (!nproc || norm != "hi\n") {
+                  return std::unexpected(std::format("CRLF normalization wrong: '{}'", norm));
               }
               return {};
          }},
@@ -1485,18 +1475,6 @@ auto run_tests() -> int
              }
              return {};
          }},
-        {"capture_dry_run_returns_empty",
-         []() -> std::expected<void, std::string> {
-             // false_cmd fails when really run; dry-run must succeed empty.
-             auto out = bld::capture(bld::Cmd_loc{false_cmd()}, bld::dry_run{});
-             if (!out) {
-                 return std::unexpected(std::format("dry-run capture failed: {}", out.error()));
-             }
-             if (!out->empty()) {
-                 return std::unexpected(std::format("dry-run capture should be empty, got '{}'", *out));
-             }
-             return {};
-         }},
         {"batch_dry_run_spawns_nothing",
          []() -> std::expected<void, std::string> {
              // false_cmd exits 1 when really run; batch dry-run must succeed
@@ -1618,7 +1596,9 @@ auto run_tests() -> int
           }},
          {"compile_commands_real_roundtrip",
           []() -> std::expected<void, std::string> {
-              if (!bld::capture(bld::Cmd{"g++", "--version"})) {
+              std::string ignored;
+              auto has_gcc = bld::run(bld::Cmd{"g++", "--version"}, bld::io_out_err{&ignored});
+              if (!has_gcc || has_gcc->status_code() != 0) {
                   return {}; // no compiler on PATH; nothing to prove here
               }
               if (!bld::fs::write_file("test_sandbox/cc_a.cpp", "int cc_answer() { return 42; }\n")) {

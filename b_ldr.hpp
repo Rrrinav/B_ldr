@@ -83,7 +83,7 @@
 //   SECTION 01 — Errors & formatters ............. bld::Err
 //   SECTION 02 — Logging ......................... bld::Logger, bld::log
 //   SECTION 03 — Commands & Processes ............ bld::Cmd, bld::Proc, Fd_view
-//   SECTION 04 — Execution ....................... bld::run, bld::capture, Task
+//   SECTION 04 — Execution ....................... bld::run, bld::Task
 //   SECTION 05 — Rebuild helpers ................. is_outdated, rebuild_this_when_*
 //   SECTION 06 — Config .......................... bld::Config
 //   SECTION 07 — Test helpers .................... bld::test
@@ -102,9 +102,6 @@ struct Err
     using Error_pt = std::shared_ptr<Err>;
     std::error_code err;
     std::string msg{""};
-    // Captured child output for process failures (e.g. capture() on non-zero
-    // exit). Empty when there is no output to report.
-    std::string output{""};
     Error_pt cause_{nullptr};
 
     static auto erc(std::errc code, std::string message = "") -> Err;
@@ -506,9 +503,6 @@ struct Proc_config
     // like Cmd, it must outlive the run()/Task call (feeding is synchronous
     // inside spawn, so it never outlives the call itself).
     std::string_view in_content{""};
-    // Captured output is normalized from CRLF to LF (matches capture();
-    // no-op on Linux). capture() clears it for raw_crlf.
-    bool normalize_crlf{true};
 };
 
 struct Cmd_loc
@@ -603,7 +597,7 @@ struct Proc
     // String capture (io_out{&s}/io_err{&s}/io_out_err{&s}): the parent holds
     // the read ends of pipes whose write ends are the child's stdout/stderr.
     // The scheduler pumps them single-threaded (poll / PeekNamedPipe) in
-    // wait()/try_wait()/wait_any()/wait_all()/capture_execute — no reader
+    // wait()/try_wait()/wait_any()/wait_all() — no reader
     // threads are spawned. Targets are borrowed, never owned; they are
     // complete once the child is reaped and EOF is drained.
     int cap_out_fd_{-1};
@@ -687,22 +681,18 @@ private:
 };
 
 // Internal guided-error messages for modifier-category mistakes. static_assert needs a
-// string literal, so these are macros; they are undefined after the last run/capture
+// string literal, so these are macros; they are undefined after the last run
 // template definition below. Each is asserted INLINE in the caller body (not only inside
 // validate_*): that way the helpful message prints first, ahead of any follow-on error.
 #define B_LDR_PROC_MODIFIERS_MSG \
     "API ERROR: bad modifier for run(cmd)/Task/run_new. Proc modifiers: async, label, cwd, dry_run, " \
     "io_in, io_out, io_err, io_out_err. " \
-    "Run modifiers go to run(batch,...); raw_crlf goes to capture()."
+    "Run modifiers go to run(batch,...)."
 #define B_LDR_RUN_MODIFIERS_MSG \
     "API ERROR: bad modifier for run(batch). Run modifiers: jobs, " \
     "keep_going, dry_run, force, write_compile_commands. Put io/label/cwd on the Task. " \
     "No run(span<Proc>): use wait_all(procs)."
-#define B_LDR_CAPTURE_MODIFIERS_MSG \
-    "API ERROR: bad modifier for capture(cmd). Capture takes: io_in, label, " \
-    "dry_run, raw_crlf. Output is always merged; to capture from run(), use run(cmd, io_out{&s})."
-
-// Forward declaration: the full dry_run modifier (a Run/Proc/Capture modifier)
+// Forward declaration: the full dry_run modifier (a Run/Proc modifier)
 // is defined with the run modifiers below. run_new's template needs the name
 // for its dry_run rejection ahead of that definition.
 struct dry_run;
@@ -728,7 +718,7 @@ public:
         static_assert((Config_modifier_c<Configs> && ...), B_LDR_PROC_MODIFIERS_MSG);
         static_assert(
             !(std::is_same_v<std::remove_cvref_t<Configs>, dry_run> || ...),
-            "API ERROR: dry_run is per run() call, not per spawned proc (run_new always spawns); put dry_run{} on the run()/capture() call.");
+            "API ERROR: dry_run is per run() call, not per spawned proc (run_new always spawns); put dry_run{} on the run() call.");
         Exec_spec spec;
         spec.cmd = cl.cmd;
         spec.cfg.loc = cl.loc;
@@ -785,23 +775,7 @@ struct std::formatter<bld::Proc>
 
 namespace bld {
 
-struct Capture_config
-{
-    std::string label{""};
-    std::source_location loc{std::source_location::current()};
-    // Unified stdin routing: unset (inherit), borrowed fd, path, or shared owned fd.
-    // Use io_in routing or io_in{&content}, never both (duplicate io_in).
-    Io_slot io_in;
-    std::string_view in_content{""};
-    /// Captured output is normalized from CRLF to LF. Always on: Windows programs emit CRLF,
-    /// so captured text compares cleanly against "\n"-terminated strings (a no-op on Linux).
-    bool normalize_crlf{true};
-    /// Log-only preview: when true, capture() logs what would run and
-    /// returns an empty string without spawning. Set via bld::dry_run{}.
-    bool dry_run{false};
-};
-
-// SECTION 04 — Execution (bld::run, bld::capture, bld::Task)
+// SECTION 04 — Execution (bld::run, bld::Task)
 //   Declarations only. Definitions live in IMPL SECTION 04.
 namespace details {
 auto execute(const bld::Cmd &cmd, const Proc_config &cfg, std::source_location loc = std::source_location::current())
@@ -810,8 +784,8 @@ auto execute(const bld::Cmd &cmd, const Proc_config &cfg, std::source_location l
 // Validates a single task/proc config: working directory exists.
 auto check_proc_config(const Proc_config &cfg) -> std::expected<void, bld::Err>;
 
-// Cross-platform pipe helpers shared by capture_execute and Proc's
-// string capture (io_out{&s}/io_err{&s}/io_out_err{&s}). fds use -1 as empty.
+// Cross-platform pipe helpers shared by Proc's string capture
+// (io_out{&s}/io_err{&s}/io_out_err{&s}). fds use -1 as empty.
 // All capture I/O is single-threaded (poll / PeekNamedPipe); no helper
 // spawns threads.
 auto make_pipe(int fds[2], const char *name) -> std::expected<void, bld::Err>;
@@ -826,12 +800,6 @@ auto pump_fd_nonblocking(int fd, std::string &out) -> bool;
 // Milliseconds sleep used to avoid busy-spinning while waiting for a
 // child whose capture pipes have no data ready.
 auto sleep_ms(int ms) -> void;
-
-// Always captures merged stdout+stderr into one string.
-// Returns the merged output on exit-code 0; on non-zero exit returns an Err
-// with the merged output in Err::output.
-auto capture_execute(const bld::Cmd &cmd, bld::Capture_config &cap_cfg, std::source_location loc = std::source_location::current())
-    -> std::expected<std::string, bld::Err>;
 } // namespace details
 
 // clang-format off
@@ -843,7 +811,6 @@ struct label
 {
     std::string val{""};
     auto operator()(bld::Proc_config &cfg) const -> void;
-    auto operator()(bld::Capture_config &cfg) const -> void;
 };
 // Unified stream routing: one struct per stream, each accepting anything that
 // stream can take — borrowed fd, lazy path, eager shared fd — or, for
@@ -881,7 +848,6 @@ struct io_in
     // (*f unwraps the expected to the modifier run() takes.)
     [[nodiscard]] static auto open(std::string_view path) -> std::expected<io_in, Err>;
     auto operator()(Proc_config &cfg) const -> void;
-    auto operator()(Capture_config &cfg) const -> void;
 };
 struct io_out
 {
@@ -921,10 +887,6 @@ struct io_out_err
     auto operator()(Proc_config &cfg) const -> void;
 };
 /// Opts out of the default CRLF -> LF normalization of captured output.
-struct raw_crlf
-{
-    auto operator()(Capture_config& cfg) const -> void;
-};
 /// Executes a command in `path` without changing the build script's own directory.
 struct cwd
 {
@@ -949,10 +911,6 @@ constexpr bool is_io_out_err_v = std::is_same_v<std::remove_cvref_t<T>, io_out_e
 template <typename T>
 constexpr bool is_run_in_v = std::is_same_v<std::remove_cvref_t<T>, io_in>;
 
-// Capture stdin: io_in routing or io_in{&content} (at most one per capture).
-template <typename T>
-constexpr bool is_cap_in_v = std::is_same_v<std::remove_cvref_t<T>, io_in>;
-
 template <typename T>
 constexpr bool is_async_mod_v = std::is_same_v<std::remove_cvref_t<T>, async>;
 
@@ -965,17 +923,6 @@ constexpr bool is_cwd_mod_v = std::is_same_v<std::remove_cvref_t<T>, cwd>;
 
 template <typename... Configs>
 auto run(Cmd_loc cl, Configs &&...confs) -> std::expected<bld::Proc, bld::Err>;
-
-template <typename T>
-concept Capture_modifier_c = requires(T &&modifier, Capture_config &cfg) { modifier(cfg); };
-
-template <typename... Configs>
-constexpr auto validate_capture_configs() -> void;
-
-template <typename... Configs>
-// Merged-only capture: returns merged stdout+stderr as a string on success (exit 0).
-// Takes no out routing — only io_in, label, dry_run, raw_crlf.
-auto capture(Cmd_loc cl, Configs &&...confs) -> std::expected<std::string, bld::Err>;
 
 auto wait_all(std::span<bld::Proc> procs) -> std::expected<std::size_t, bld::Err>;
 
@@ -1085,7 +1032,6 @@ struct dry_run
 {
     auto operator()(Run_config &cfg) const -> void;
     auto operator()(Proc_config &cfg) const -> void;
-    auto operator()(Capture_config &cfg) const -> void;
 };
 struct force
 {
@@ -2187,38 +2133,12 @@ auto run(Cmd_loc cl, Configs &&...confs) -> std::expected<bld::Proc, bld::Err>
 }
 
 template <typename... Configs>
-constexpr auto validate_capture_configs() -> void
-{
-    // NOTE: modifier-category is asserted inline by capture() via
-    // B_LDR_CAPTURE_MODIFIERS_MSG.
-    constexpr int in_count = (bld::is_cap_in_v<Configs> + ... + 0);
-    static_assert(in_count <= 1, "API ERROR: duplicate capture stdin (at most one io_in).");
-    constexpr int dry_run_count = (bld::is_dry_run_mod_v<Configs> + ... + 0);
-    static_assert(dry_run_count <= 1, "API ERROR: duplicate dry_run (at most one per capture).");
-}
-
-template <typename... Configs>
-auto capture(Cmd_loc cl, Configs &&...confs) -> std::expected<std::string, bld::Err>
-{
-    static_assert((Capture_modifier_c<Configs> && ...), B_LDR_CAPTURE_MODIFIERS_MSG);
-    bld::validate_capture_configs<Configs...>();
-
-    Capture_config cap_cfg{};
-    (confs(cap_cfg), ...);
-    if (cap_cfg.loc.line() == std::source_location::current().line()) {
-        cap_cfg.loc = cl.loc;
-    }
-
-    return bld::details::capture_execute(cl.cmd, cap_cfg, cl.loc);
-}
-
-template <typename... Configs>
 Task::Task(Cmd_loc cl, Configs &&...confs)
 {
     static_assert((Config_modifier_c<Configs> && ...), B_LDR_PROC_MODIFIERS_MSG);
     static_assert(
         !(bld::is_dry_run_mod_v<Configs> || ...),
-        "API ERROR: dry_run is per run() call, not per Task; put dry_run{} on the run()/capture() call.");
+        "API ERROR: dry_run is per run() call, not per Task; put dry_run{} on the run() call.");
     spec.cmd = cl.cmd;
     spec.cfg.loc = cl.loc;
     spec.cfg.async = true;
@@ -2229,7 +2149,6 @@ Task::Task(Cmd_loc cl, Configs &&...confs)
 // Messages above were only needed by the run/capture/Task templates.
 #undef B_LDR_PROC_MODIFIERS_MSG
 #undef B_LDR_RUN_MODIFIERS_MSG
-#undef B_LDR_CAPTURE_MODIFIERS_MSG
 
 template <std::ranges::range Range>
     requires std::convertible_to<std::ranges::range_value_t<Range>, std::string_view>
@@ -2752,13 +2671,9 @@ auto bld::Proc::finish_capture() -> void
         stdin_text_.clear();
         stdin_done_ = 0;
     }
-    // Captured text is normalized CRLF -> LF unless the config opts out
-    // (capture()'s raw_crlf); a no-op on Linux either way.
+    // Captured text is normalized CRLF -> LF (no-op on Linux).
     auto *out = std::exchange(cap_out_, nullptr);
     auto *err = std::exchange(cap_err_, nullptr);
-    if (!spec.cfg.normalize_crlf) {
-        return;
-    }
     if (out != nullptr) {
         *out = bld::str::replace_all(*out, "\r\n", "\n");
     }
@@ -4012,11 +3927,6 @@ auto bld::label::operator()(bld::Proc_config &cfg) const -> void
     cfg.label = val;
 }
 
-auto bld::label::operator()(bld::Capture_config &cfg) const -> void
-{
-    cfg.label = val;
-}
-
 namespace bld::details {
 // Shared eager-open helpers for out/err/in/out_err_file. Messages and log
 // tags are parameters so the public wrappers keep byte-identical errors.
@@ -4078,11 +3988,6 @@ auto bld::io_in::open(std::string_view path) -> std::expected<bld::io_in, bld::E
     return io_in{*fd};
 }
 auto bld::io_in::operator()(Proc_config &cfg) const -> void
-{
-    cfg.io_in = slot;
-    cfg.in_content = content_;
-}
-auto bld::io_in::operator()(Capture_config &cfg) const -> void
 {
     cfg.io_in = slot;
     cfg.in_content = content_;
@@ -4160,11 +4065,6 @@ auto bld::io_out_err::operator()(Proc_config &cfg) const -> void
     cfg.io_out = slot;
     cfg.io_err = slot;
     cfg.merge_err_and_out = true;
-}
-
-auto bld::raw_crlf::operator()(Capture_config &cfg) const -> void
-{
-    cfg.normalize_crlf = false;
 }
 
 auto bld::cwd::operator()(Proc_config &cfg) const -> void
@@ -4255,10 +4155,6 @@ auto bld::dry_run::operator()(Proc_config &cfg) const -> void
 {
     cfg.dry_run = true;
 }
-auto bld::dry_run::operator()(Capture_config &cfg) const -> void
-{
-    cfg.dry_run = true;
-}
 auto bld::force::operator()(Run_config &cfg) const -> void
 {
     cfg.force = true;
@@ -4273,7 +4169,7 @@ auto bld::Task::sub(Task t) -> Task &
     return *this;
 }
 
-// IMPL SECTION 04 — Execution (bld::run, bld::capture, bld::Task)
+// IMPL SECTION 04 — Execution (bld::run, bld::Task)
 auto bld::details::execute(const bld::Cmd &cmd, const Proc_config &cfg, std::source_location loc) -> std::expected<bld::Proc, bld::Err>
 {
     auto log_slot = [](std::string_view name, const Io_slot &slot, const bld::Cmd &c) {
@@ -4329,67 +4225,6 @@ auto bld::details::execute(const bld::Cmd &cmd, const Proc_config &cfg, std::sou
             }
             return proc;
         });
-}
-
-auto bld::details::capture_execute(const bld::Cmd &cmd, bld::Capture_config &cap_cfg, std::source_location loc)
-    -> std::expected<std::string, bld::Err>
-{
-    bld::log::d("Setting up merged capture for cmd: {:?}", cmd);
-
-    // Only stdin modifiers are allowed (enforced at compile time via
-    // validate_capture_configs). Guard hand-built Capture_config too:
-    // io_in routing and io_in{&content} are mutually exclusive.
-    if (!cap_cfg.in_content.empty() && io_is_set(cap_cfg.io_in)) {
-        bld::log::e("capture {:?}: conflicting stdin routing (at most one of io_in routing/content)", cmd);
-        return details::fail(
-            std::errc::invalid_argument, "Conflicting stdin routing for capture: use at most one of io_in routing/content");
-    }
-
-    if (cap_cfg.dry_run) {
-        // Preview only: no pipes, no spawn, empty output.
-        bld::log::i("dry run (would capture {:?}, {} stdin bytes)", cmd, cap_cfg.in_content.size());
-        return std::string{};
-    }
-
-    // Merged capture through the run machinery: spawn() owns the string
-    // pipes and stdin feeding, wait() pumps everything single-threaded.
-    // async stays true so execute() returns the running Proc for us to reap.
-    std::string merged;
-    Proc_config run_cfg{};
-    run_cfg.label = cap_cfg.label;
-    run_cfg.async = true;
-    run_cfg.loc = cap_cfg.loc;
-    run_cfg.io_in = cap_cfg.io_in;
-    run_cfg.in_content = cap_cfg.in_content;
-    run_cfg.io_out = make_str_slot(&merged);
-    run_cfg.io_err = make_str_slot(&merged);
-    run_cfg.merge_err_and_out = true;
-    run_cfg.normalize_crlf = cap_cfg.normalize_crlf;
-
-    auto proc_res = bld::details::execute(cmd, run_cfg, loc);
-    if (!proc_res) {
-        // execute() already waited (and pumped) when it fails late; attach
-        // whatever was captured, exactly like the wait-failure path below.
-        auto err = std::move(proc_res.error());
-        err.output = std::move(merged);
-        return std::unexpected(std::move(err));
-    }
-    auto &proc = *proc_res;
-    auto status = proc.wait();
-    if (!status) {
-        bld::log::e("capture {:?}: wait failed: {}", cmd, status.error());
-        auto err = std::move(status.error());
-        err.output = std::move(merged);
-        return std::unexpected(std::move(err));
-    }
-    if (status->code != 0) {
-        bld::log::e("capture {:?}: exited with code {}", cmd, status->code);
-        auto err = bld::Err::erc(std::errc::io_error, std::format("command {:?} exited with code {}", cmd, status->code));
-        err.output = std::move(merged);
-        return std::unexpected(std::move(err));
-    }
-    bld::log::d("capture {:?}: {} bytes", cmd, merged.size());
-    return merged;
 }
 
 // IMPL SECTION 05 — Rebuild helpers (is_outdated, rebuild_this_when_needed)

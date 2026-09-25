@@ -15,10 +15,10 @@
 //   label{"name"}           log label (at most one)
 //   cwd{"dir"}              child working dir, must exist (at most one)
 //   dry_run{}               log-only preview: log what would run, spawn nothing
-//                           (also on capture() and per-Task in batches)
+//                           (also per-Task in batches)
 //   io_in{...}              stdin: borrowed fd, lazy path, or eager io_in::open
 //   io_in{&text}             stdin content: borrowed, copied at spawn, then EOF
-//                           (empty behaves like unset, like capture())
+//                           (empty behaves like unset)
 //   io_out{...}             stdout: borrowed fd, lazy path, eager io_out::open,
 //                           or capture string via io_out{&s} (borrowed,
 //                           must outlive wait)
@@ -283,15 +283,12 @@ int main()
             }
         }
 
-        // 1i. dry_run previews a single command or capture: logs only, spawns
-        // nothing (even `false` reports success, capture comes back empty).
+        // 1i. dry_run previews a single command: logs only, spawns nothing
+        // (even `false` reports success).
         if (auto proc = bld::run(bld::Cmd{"false"}, bld::dry_run{}); !proc || proc->status_code() != 0) {
             bld::log::e("1i single dry-run failed");
-        }
-        if (auto out = bld::capture(bld::Cmd{"echo", "hi"}, bld::dry_run{}); !out || !out->empty()) {
-            bld::log::e("1i capture dry-run failed");
         } else {
-            bld::log::i("1i dry-runs ok (nothing spawned)");
+            bld::log::i("1i dry-run ok (nothing spawned)");
         }
     }
 
@@ -604,7 +601,6 @@ int main()
     //    Each fires a static_assert naming the right modifier set.
     //   bld::run(tasks, bld::io_out{"x"});          // io routing is per-Task, not a Run modifier
     //   bld::run(cmd, bld::jobs{2});           // jobs is a Run modifier, not per-process
-    //   bld::capture(cmd, bld::io_out{"x"});        // capture has no out routing (merged string)
     //   tasks.emplace_back(cmd, bld::jobs{2}); // Task takes Proc modifiers, not Run modifiers
     //   grp.run_new(cmd, bld::keep_going{});          // run_new takes Proc modifiers, not Run modifiers
     //   bld::run(tasks, bld::jobs{2}, bld::jobs{3}); // duplicate flag

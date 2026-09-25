@@ -102,16 +102,17 @@ bld::run(gcc, bld::dry_run{});
 ### Capturing output
 
 ```cpp
-// Merged stdout+stderr, returned as a string on exit 0.
-// Non-zero exit becomes an Err carrying the output in Err::output.
-auto out = bld::capture(bld::Cmd{"git", "status"});
-if (out) { bld::log::i("{}", *out); }
+// No separate capture call: route merged output into a string with
+// io_out_err{&s} and check the exit status. Non-zero exit is not an Err.
+std::string out;
+auto proc = bld::run(bld::Cmd{"git", "status"}, bld::io_out_err{&out});
+if (proc && proc->status_code() == 0) { bld::log::i("{}", out); }
 
 std::string src = "int main(){}";
-auto merged = bld::capture(bld::Cmd{"clang", "-x", "c++", "-"}, bld::io_in{&src});
+std::string merged;
+auto clang = bld::run(bld::Cmd{"clang", "-x", "c++", "-"}, bld::io_in{&src}, bld::io_out_err{&merged});
 
-// Captured output is normalized (\r\n -> \n); pass raw_crlf{} to keep bytes as-is.
-// dry_run logs what would run, spawns nothing, returns empty success.
+// Captured output is normalized (\r\n -> \n), a no-op on Linux.
 ```
 
 ### Incremental dependency plan
@@ -234,7 +235,7 @@ g++ -std=c++23 -I. examples/hello.cpp -o hello
 | `examples/groups.cpp` | Group tasks: nested leaves, one-node deps, misuse errors |
 | `examples/build_system.cpp` | A small incremental build of several files |
 | `examples/run.cpp` | Scheduler behavior and error cases |
-| `examples/showcase.cpp` | Self-rebuilding script, options, plans, capture in one file |
+| `examples/showcase.cpp` | Self-rebuilding script, options, plans, output capture in one file |
 
 ## Author
 
