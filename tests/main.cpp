@@ -1012,14 +1012,14 @@ auto run_tests() -> int
               }
               return {};
          }},
-        {"max_async_and_wait_all",
+        {"jobs_width_and_wait_all",
          []() -> std::expected<void, std::string> {
               std::vector<bld::Task> tasks;
               tasks.emplace_back(bld::Cmd_loc{sleep_cmd()});
               tasks.emplace_back(bld::Cmd_loc{sleep_cmd()});
               tasks.emplace_back(bld::Cmd_loc{sleep_cmd()});
-              if (auto res = bld::run(tasks, bld::max_async{1}); !res) {
-                  return std::unexpected(std::format("max_async run failed: {}", res.error()));
+              if (auto res = bld::run(tasks, bld::jobs{1}); !res) {
+                  return std::unexpected(std::format("jobs-width run failed: {}", res.error()));
               }
               std::vector<bld::Proc> procs;
               for (int i = 0; i < 2; ++i) {
@@ -1255,12 +1255,6 @@ auto run_tests() -> int
               }
               if (bld::resolve_parallel_width(1000000) != max) {
                   return std::unexpected("huge value should be capped by max");
-              }
-              if (bld::resolve_async_cap(0, 4) != 4) {
-                  return std::unexpected("max_async 0 should follow parallel width");
-              }
-              if (bld::resolve_async_cap(3, 4) != 3) {
-                  return std::unexpected("explicit max_async should pass through");
               }
               return {};
          }},

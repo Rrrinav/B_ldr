@@ -29,7 +29,6 @@
 //
 // RUN MODIFIERS (whole batch only — Run_modifier_c, consume Run_config):
 //   jobs{[opt]int}         nullopt=>max-1; value=>exactly that, clamped [1, max]
-//   max_async{n}            0=>follow jobs width; >0=>absolute live-proc cap
 //   keep_going{}            run all possible despite failures (default: stop)
 //   dry_run{}               resolve + print, spawn nothing (composes with force)
 //   force{}                 ignore up-to-date, re-run everything
@@ -306,7 +305,7 @@ int main()
         show_result("2a defaults", res);
     }
 
-    // 2b. jobs forms: width caps live procs, max_async caps them too.
+    // 2b. jobs forms: width caps live procs.
     {
         bld::log::i(
             "2b max={} nullopt={} {{0}}={} {{2}}={} huge={}",
@@ -322,10 +321,8 @@ int main()
         show_result("2b jobs{2}", r1);
         auto r2 = bld::run(tasks, bld::jobs{0}); // 0 clamps to 1: serial
         show_result("2b jobs{0}=1", r2);
-        auto r3 = bld::run(tasks, bld::jobs{}, bld::max_async{1}); // serialize procs
-        show_result("2b async{1}", r3);
-        auto r4 = bld::run(tasks, bld::jobs{2}, bld::max_async{8}); // cap above jobs: jobs win
-        show_result("2b async{8}", r4);
+        auto r3 = bld::run(tasks, bld::jobs{1}); // serialize procs
+        show_result("2b jobs{1}", r3);
     }
 
     // 2c. Per-task config inside a batch: label/cwd/io each live on the Task.
@@ -446,7 +443,7 @@ int main()
         show_result("4 plan dry", dry);
         auto forced = bld::run(plan, bld::force{}, bld::jobs{2});
         show_result("4 plan forced", forced);
-        auto capped = bld::run(plan, bld::jobs{}, bld::max_async{4});
+        auto capped = bld::run(plan, bld::jobs{4});
         show_result("4 plan capped", capped);
     }
 

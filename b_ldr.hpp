@@ -694,7 +694,7 @@ private:
     "io_in, io_out, io_err, io_out_err, in_str. " \
     "Run modifiers go to run(batch,...); raw_crlf goes to capture()."
 #define B_LDR_RUN_MODIFIERS_MSG \
-    "API ERROR: bad modifier for run(batch). Run modifiers: jobs, max_async, " \
+    "API ERROR: bad modifier for run(batch). Run modifiers: jobs, " \
     "keep_going, dry_run, force, write_compile_commands. Put io/label/cwd on the Task. " \
     "No run(span<Proc>): use wait_all(procs)."
 #define B_LDR_CAPTURE_MODIFIERS_MSG \
@@ -1042,10 +1042,6 @@ struct Run_config
     //  nullopt => max_parallel_count() - 1 (leave one core free), min 1.
     //  value   => exactly that many, clamped to [1, max_parallel_count()].
     std::optional<std::size_t> jobs{std::nullopt};
-    // Cap on concurrently running async child processes (Proc_group size).
-    //  0 => follow resolved parallel width (coupled default, old behaviour).
-    //  >0 => absolute cap (may exceed CPU count for I/O-bound procs).
-    std::size_t max_async{0};
     Failure_policy failure_policy{Failure_policy::stop};
     bool dry_run{false};
     bool force{false};
@@ -1072,13 +1068,6 @@ namespace details {
     }
     return std::clamp(*jobs_val, std::size_t{1}, max_procs);
 }
-[[nodiscard]] inline auto resolve_async_cap(std::size_t max_async_val, std::size_t resolved_width) -> std::size_t
-{
-    if (max_async_val == 0) {
-        return resolved_width == 0 ? 1 : resolved_width;
-    }
-    return max_async_val;
-}
 // Run modifier: cap on concurrently running child processes. jobs{n} means
 // exactly n (clamped to the machine); jobs{} means max - 1.
 struct jobs
@@ -1086,13 +1075,6 @@ struct jobs
     std::optional<std::size_t> value{std::nullopt};
     jobs() = default;
     explicit jobs(std::size_t v) : value(v)
-    {}
-    auto operator()(Run_config &cfg) const -> void;
-};
-struct max_async
-{
-    std::size_t value{0};
-    explicit max_async(std::size_t v) : value(v)
     {}
     auto operator()(Run_config &cfg) const -> void;
 };
@@ -4272,10 +4254,6 @@ auto bld::jobs::operator()(Run_config &cfg) const -> void
 {
     cfg.jobs = value;
 }
-auto bld::max_async::operator()(Run_config &cfg) const -> void
-{
-    cfg.max_async = value;
-}
 auto bld::keep_going::operator()(Run_config &cfg) const -> void
 {
     cfg.failure_policy = Failure_policy::keep_going;
@@ -5285,13 +5263,8 @@ inline auto check_empty_commands(std::span<bld::Task> tasks) -> std::expected<vo
 
 [[nodiscard]] inline auto resolve_sched_width(const Run_config &cfg) -> std::size_t
 {
-    std::size_t parallel_budget = resolve_parallel_width(cfg.jobs);
-    std::size_t async_cap = resolve_async_cap(cfg.max_async, parallel_budget);
-    std::size_t width = parallel_budget < async_cap ? parallel_budget : async_cap;
-    if (width == 0) {
-        width = 1;
-    }
-    return width;
+    // One knob: scheduler width is exactly the resolved jobs budget (≥1).
+    return resolve_parallel_width(cfg.jobs);
 }
 
 inline auto topo_sort(const std::vector<std::vector<std::size_t>> &children, const std::vector<std::size_t> &indegree)
@@ -5332,6 +5305,7 @@ inline auto run_schedule(
     std::size_t width) -> std::expected<Run_result, bld::Err>
 {
     std::vector<std::size_t> remaining = indegree, queue;
+    queue.reserve(tasks.size());
     for (std::size_t i = 0; i < tasks.size(); ++i) {
         if (remaining[i] == 0) {
             queue.push_back(i);
@@ -5347,6 +5321,7 @@ inline auto run_schedule(
     };
     bld::Proc_group group;
     std::vector<Active> active;
+    active.reserve(width);
     bool stop = false;
     std::size_t cursor = 0;
     auto release = [&](std::size_t i) {
@@ -5356,6 +5331,7 @@ inline auto run_schedule(
             }
         }
     };
+    // Linear scan is intentional: active holds at most <width> entries.
     auto find_active = [&](bld::Proc_id pid) -> std::size_t {
         for (std::size_t k = 0; k < active.size(); ++k) {
             if (active[k].pid == pid) {
@@ -5429,7 +5405,9 @@ inline auto run_schedule(
             continue;
         }
         auto entry = active[k];
-        active.erase(active.begin() + static_cast<std::ptrdiff_t>(k));
+        // Order is irrelevant (active is a set keyed by pid): swap-remove.
+        active[k] = active.back();
+        active.pop_back();
         auto got = group.get(entry.pid);
         if (!got) {
             result.tasks[entry.index].state = bld::Task_state::failed;
@@ -5719,8 +5697,13 @@ auto run_plan_flat(Plan &plan, const Run_config &cfg) -> std::expected<Run_resul
     }
     auto topo = std::move(*topo_res);
     std::vector<bool> dirty(tasks.size(), cfg.force);
+    // Pass 1: self-dirty from outputs/inputs, in topo order (keeps the
+    // is_outdated warning logs in the same order as before).
     for (auto i : topo) {
-        if (!dirty[i]) {
+        if (dirty[i]) {
+            continue;
+        }
+        {
             auto it_out = plan.task_outputs.find(tasks[i].name);
             if (it_out == plan.task_outputs.end() || it_out->second.empty()) {
                 dirty[i] = true;
@@ -5746,14 +5729,19 @@ auto run_plan_flat(Plan &plan, const Run_config &cfg) -> std::expected<Run_resul
                 }
             }
         }
-        for (std::size_t p = 0; p < tasks.size() && !dirty[i]; ++p) {
-            for (auto ch : children[p]) {
-                if (ch == i && dirty[p]) {
-                    dirty[i] = true;
-                    break;
-                }
+    }
+    // Pass 2: push dirty flags along edges. Producers precede consumers in
+    // topo order, so one forward pass suffices — O(edges) total instead of
+    // re-scanning all producers per consumer.
+    for (auto i : topo) {
+        if (dirty[i]) {
+            for (auto child : children[i]) {
+                dirty[child] = true;
             }
         }
+    }
+    // Pass 3: mark the clean ones skipped, in topo order as before.
+    for (auto i : topo) {
         if (!dirty[i]) {
             result.tasks[i].state = Task_state::skipped;
             result.tasks[i].message = "up to date";

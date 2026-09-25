@@ -183,8 +183,7 @@ tasks.emplace_back(bld::Cmd{"g++", "-c", "a.cpp", "-o", "a.o"});
 tasks.emplace_back(bld::Cmd{"g++", "-c", "b.cpp", "-o", "b.o"});
 
 // jobs{} => max-1; jobs{n} => exactly n, clamped to the machine.
-// max_async{0} => follow jobs width; >0 => absolute proc cap.
-auto res = bld::run(tasks, bld::jobs{4}, bld::max_async{8});
+auto res = bld::run(tasks, bld::jobs{4});
 
 // Ordering and up-to-date checks live in Plan's side tables, not in Task.
 bld::Plan chain;
