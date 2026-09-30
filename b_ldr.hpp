@@ -27,6 +27,7 @@
 #include <algorithm>
 #include <atomic>
 #include <bit> // std::endian (bld::env)
+#include <cctype> // std::tolower (bld::prompt)
 #include <chrono>
 #include <cstddef>
 #include <cstdint>
@@ -305,6 +306,37 @@ namespace bld {
 auto panic(std::string s) -> void;
 // Does nothing if ".exe" is already present
 auto add_exe_on_win32([[maybe_unused]] std::string exec) -> std::string;
+
+// Asks a yes/no question; returns true only for `y`/`yes` (case-insensitive).
+// Prints "<msg>\nIs this OK? [y/N]: ", flushes, reads one line. Empty/EOF -> false.
+// The (in, out) overload exists for tests; the short form uses std::cin/std::cout.
+template <typename... Args>
+[[nodiscard]] auto prompt(std::istream &in, std::ostream &out, std::format_string<Args...> fmt, Args &&...args) -> bool
+{
+    std::string msg = std::format(fmt, std::forward<Args>(args)...);
+    std::print(out, "{}\nIs this OK? [y/N]: ", msg);
+    out.flush();
+    std::string line;
+    if (!std::getline(in, line)) {
+        return false;
+    }
+    std::size_t beg = line.find_first_not_of(" \t\r\n");
+    if (beg == std::string::npos) {
+        return false;
+    }
+    std::size_t end = line.find_last_not_of(" \t\r\n");
+    std::string ans = line.substr(beg, end - beg + 1);
+    for (char &c : ans) {
+        c = static_cast<char>(std::tolower(static_cast<unsigned char>(c)));
+    }
+    return ans == "y" || ans == "yes";
+}
+
+template <typename... Args>
+[[nodiscard]] auto prompt(std::format_string<Args...> fmt, Args &&...args) -> bool
+{
+    return prompt(std::cin, std::cout, fmt, std::forward<Args>(args)...);
+}
 }; // namespace bld
 
 // SECTION 03 — Commands & Processes (bld::Cmd, bld::Proc, Fd_view …)
@@ -417,35 +449,6 @@ using Io_slot = std::variant<std::monostate, Fd_view, std::string, Shared_fd, st
     return !std::holds_alternative<std::monostate>(slot);
 }
 
-[[nodiscard]] inline auto io_fd(const Io_slot &slot) noexcept -> Fd_view
-{
-    if (auto *f = std::get_if<Fd_view>(&slot)) {
-        return *f;
-    }
-    if (auto *s = std::get_if<Shared_fd>(&slot)) {
-        if (s && *s) {
-            return Fd_view{(*s)->handle_};
-        }
-    }
-    return Fd_view{Fd_view::INVALID};
-}
-
-[[nodiscard]] inline auto io_path(const Io_slot &slot) noexcept -> std::string_view
-{
-    if (auto *p = std::get_if<std::string>(&slot)) {
-        return std::string_view{*p};
-    }
-    return std::string_view{};
-}
-
-[[nodiscard]] inline auto io_shared(const Io_slot &slot) noexcept -> Shared_fd
-{
-    if (auto *s = std::get_if<Shared_fd>(&slot)) {
-        return *s;
-    }
-    return nullptr;
-}
-
 [[nodiscard]] inline auto io_str(const Io_slot &slot) noexcept -> std::string *
 {
     if (auto *s = std::get_if<std::string *>(&slot)) {
@@ -514,6 +517,11 @@ struct Cmd_loc
 
 template <typename T>
 concept Config_modifier_c = requires(T &&modifier, Proc_config &cfg) { modifier(cfg); };
+
+// Counts occurrences of modifier type T in a pack (for cross-type conflict
+// rules like io_out vs io_out_err; same-type dupes go through distinct_modifiers).
+template <typename T, typename... Ts>
+constexpr int count_of_v = (int(std::is_same_v<std::remove_cvref_t<Ts>, T>) + ... + 0);
 
 template <typename... Configs>
 constexpr auto validate_run_configs() -> void;
@@ -644,6 +652,8 @@ struct Proc
     [[nodiscard]]
     static auto spawn(const Exec_spec &spec, Proc_gid gid = {}) -> std::expected<Proc, bld::Err>;
     [[nodiscard]]
+    static auto spawn(Exec_spec &&spec, Proc_gid gid = {}) -> std::expected<Proc, bld::Err>;
+    [[nodiscard]]
     static auto spawn(const Task &task, Proc_gid gid = {}) -> std::expected<Proc, bld::Err>;
 
     [[nodiscard]]
@@ -717,7 +727,7 @@ public:
     {
         static_assert((Config_modifier_c<Configs> && ...), B_LDR_PROC_MODIFIERS_MSG);
         static_assert(
-            !(std::is_same_v<std::remove_cvref_t<Configs>, dry_run> || ...),
+            count_of_v<dry_run, Configs...> == 0,
             "API ERROR: dry_run is per run() call, not per spawned proc (run_new always spawns); put dry_run{} on the run() call.");
         Exec_spec spec;
         spec.cmd = cl.cmd;
@@ -725,10 +735,10 @@ public:
         spec.cfg.async = true;
         validate_run_configs<Configs...>();
         (confs(spec.cfg), ...);
-        return run_new(spec);
+        return run_new(std::move(spec));
     }
     auto run_new(const Task &task) -> std::expected<Proc_id, Err>;
-    auto run_new(const Exec_spec &spec) -> std::expected<Proc_id, Err>;
+    auto run_new(Exec_spec spec) -> std::expected<Proc_id, Err>;
 
     auto add(Proc &&proc) -> Proc_id;
     [[nodiscard]] auto get(Proc_id id) -> std::expected<std::reference_wrapper<Proc>, Err>;
@@ -738,16 +748,9 @@ public:
     auto terminate(int sig = SIGTERM) -> void;
 
 private:
-    struct Slot
-    {
-        Proc_id id{0};
-        Proc proc{};
-    };
     Proc_gid gid_{};
-    std::vector<Slot> hive_{};
-    std::vector<std::uint32_t> free_list_{};
-    std::uint32_t generation_{1};
-    std::size_t active_count_{0};
+    std::unordered_map<Proc_id, Proc> procs_{};
+    Proc_id next_id_{1};
 };
 } // namespace bld
 
@@ -827,65 +830,39 @@ struct label
 //                                          // (borrowed, copied at spawn)
 //
 // At most one of each per call; io_out_err conflicts with io_out/io_err.
-struct io_in
+enum class Io_kind { in, out, err, out_err };
+template <Io_kind K>
+struct Io
 {
+    static constexpr int std_fd = K == Io_kind::in ? STDIN_FILENO : K == Io_kind::err ? STDERR_FILENO : STDOUT_FILENO;
+    using Target = std::conditional_t<K == Io_kind::in, const std::string *, std::string *>;
     Io_slot slot{std::monostate{}};
-    // Stdin content (borrowed view): fed to the child, then EOF. Set only by
-    // the pointer form below; empty means unset (inherit). Like Cmd, it must
-    // outlive the run()/Task call — spawn copies it synchronously, so it
-    // never outlives the call itself.
+    // Stdin content (borrowed view, `in` only): fed to the child, then EOF.
+    // Set only by the pointer form; empty means unset (inherit). Like Cmd, it
+    // must outlive the run()/Task call — spawn copies it synchronously.
     std::string_view content_{};
-    io_in() = default;
-    explicit io_in(Fd_view f);
-    explicit io_in(std::string_view path);
-    explicit io_in(const Shared_fd &fd);
-    // Stdin content from a borrowed string: io_in{&text}. The pointer form
-    // is content (a path can't be spelled with &); spawn copies the bytes,
-    // so async procs stay valid after the caller's string goes away.
-    explicit io_in(const std::string *text);
+    Io() = default;
+    explicit Io(Fd_view f);
+    explicit Io(std::string_view path);
+    explicit Io(const Shared_fd &fd);
+    // Pointer form: content for `in` (io_in{&text}), capture target for the
+    // rest (a path can't be spelled with &). Spawn copies content bytes, so
+    // async procs stay valid after the caller's string goes away.
+    explicit Io(Target t);
     // Eager open now; the io value keeps the fd alive. Manual error handling:
-    //   if (auto f = io_in::open("in.txt"); f) run(cmd, *f);
+    //   if (auto f = io_out::open("log.txt"); f) run(cmd, *f);
     // (*f unwraps the expected to the modifier run() takes.)
-    [[nodiscard]] static auto open(std::string_view path) -> std::expected<io_in, Err>;
-    auto operator()(Proc_config &cfg) const -> void;
-};
-struct io_out
-{
-    Io_slot slot{std::monostate{}};
-    io_out() = default;
-    explicit io_out(Fd_view f);
-    explicit io_out(std::string_view path);
-    explicit io_out(const Shared_fd &fd);
-    explicit io_out(std::string *target);
-    [[nodiscard]] static auto open(std::string_view path, Open_mode mode = Open_mode::write)
-        -> std::expected<io_out, Err>;
-    auto operator()(Proc_config &cfg) const -> void;
-};
-struct io_err
-{
-    Io_slot slot{std::monostate{}};
-    io_err() = default;
-    explicit io_err(Fd_view f);
-    explicit io_err(std::string_view path);
-    explicit io_err(const Shared_fd &fd);
-    explicit io_err(std::string *target);
-    [[nodiscard]] static auto open(std::string_view path, Open_mode mode = Open_mode::write)
-        -> std::expected<io_err, Err>;
+    [[nodiscard]] static auto open(std::string_view path) -> std::expected<Io, Err>
+        requires(K == Io_kind::in);
+    [[nodiscard]] static auto open(std::string_view path, Open_mode mode = Open_mode::write) -> std::expected<Io, Err>
+        requires(K != Io_kind::in);
     auto operator()(Proc_config &cfg) const -> void;
 };
 // One route for merged stdout+stderr (implies merging).
-struct io_out_err
-{
-    Io_slot slot{std::monostate{}};
-    io_out_err() = default;
-    explicit io_out_err(Fd_view f);
-    explicit io_out_err(std::string_view path);
-    explicit io_out_err(const Shared_fd &fd);
-    explicit io_out_err(std::string *target);
-    [[nodiscard]] static auto open(std::string_view path, Open_mode mode = Open_mode::write)
-        -> std::expected<io_out_err, Err>;
-    auto operator()(Proc_config &cfg) const -> void;
-};
+using io_in = Io<Io_kind::in>;
+using io_out = Io<Io_kind::out>;
+using io_err = Io<Io_kind::err>;
+using io_out_err = Io<Io_kind::out_err>;
 /// Opts out of the default CRLF -> LF normalization of captured output.
 /// Executes a command in `path` without changing the build script's own directory.
 struct cwd
@@ -895,30 +872,6 @@ struct cwd
     auto operator()(bld::Proc_config &cfg) const -> void;
 };
 
-template <typename T>
-constexpr bool is_io_in_v = std::is_same_v<std::remove_cvref_t<T>, io_in>;
-
-template <typename T>
-constexpr bool is_io_out_v = std::is_same_v<std::remove_cvref_t<T>, io_out>;
-
-template <typename T>
-constexpr bool is_io_err_v = std::is_same_v<std::remove_cvref_t<T>, io_err>;
-
-template <typename T>
-constexpr bool is_io_out_err_v = std::is_same_v<std::remove_cvref_t<T>, io_out_err>;
-
-// Stdin for run(): io_in routing or io_in{&content} (at most one per call).
-template <typename T>
-constexpr bool is_run_in_v = std::is_same_v<std::remove_cvref_t<T>, io_in>;
-
-template <typename T>
-constexpr bool is_async_mod_v = std::is_same_v<std::remove_cvref_t<T>, async>;
-
-template <typename T>
-constexpr bool is_label_mod_v = std::is_same_v<std::remove_cvref_t<T>, label>;
-
-template <typename T>
-constexpr bool is_cwd_mod_v = std::is_same_v<std::remove_cvref_t<T>, cwd>;
 // clang-format on
 
 template <typename... Configs>
@@ -1056,17 +1009,13 @@ struct Compilation_database
 }
 
 namespace details {
-auto run_tasks(std::span<bld::Task> tasks, const bld::Run_config &cfg) -> std::expected<bld::Run_result, bld::Err>;
 auto run_plan(Plan &plan, const bld::Run_config &cfg) -> std::expected<bld::Run_result, bld::Err>;
 auto run_plan_flat(Plan &plan, const bld::Run_config &cfg) -> std::expected<bld::Run_result, bld::Err>;
 auto load_compile_commands(const bld::Compilation_database &database) -> std::expected<bld::Plan, bld::Err>;
+inline void ensure_task_names(std::span<bld::Task> tasks);
 } // namespace details
 template <typename T>
 concept Run_modifier_c = requires(T &&modifier, Run_config &cfg) { modifier(cfg); };
-
-// Shared with the proc/capture validators below (dry_run applies everywhere).
-template <typename T>
-constexpr bool is_dry_run_mod_v = std::is_same_v<std::remove_cvref_t<T>, dry_run>;
 
 namespace details {
 // Same-type duplicates rejected generically: at most one of each run
@@ -1102,7 +1051,18 @@ auto run(std::span<bld::Task> tasks, Options &&...options) -> std::expected<bld:
     validate_run_options<Options...>();
     Run_config cfg{};
     (options(cfg), ...);
-    return details::run_tasks(tasks, cfg);
+    // A bare span is a plan with no edges: every task runs (no outputs means
+    // always dirty in run_plan_flat). Mark all as compile commands so
+    // write_compile_commands covers the span, as before.
+    Plan plan;
+    for (auto &t : tasks) {
+        plan.tasks.push_back(t);
+    }
+    details::ensure_task_names(std::span<bld::Task>{plan.tasks});
+    for (auto &t : plan.tasks) {
+        plan.mark_compile_command(t.name);
+    }
+    return details::run_plan(plan, cfg);
 }
 template <typename... Options>
 auto run(Plan &plan, Options &&...options) -> std::expected<bld::Run_result, bld::Err>
@@ -1217,19 +1177,13 @@ public:
     auto parse(int argc, char *argv[]) -> std::expected<Parse_outcome, bld::Err>;
     template <typename T>
     auto get_val(std::string_view key) const -> std::expected<T, bld::Err>;
+    /// Human-readable dump of all parsed values (replaces formatting data directly).
+    [[nodiscard]] auto dump() const -> std::string;
 
 private:
     Config() = default;
 };
 } // namespace bld
-
-template <>
-struct std::formatter<std::unordered_map<std::string, bld::Config::value_type>>
-{
-    constexpr auto parse(std::format_parse_context &ctx) -> std::format_parse_context::iterator;
-    auto format(const std::unordered_map<std::string, bld::Config::value_type> &m, std::format_context &ctx) const
-        -> std::format_context::iterator;
-};
 
 // SECTION 07 — Test helpers (bld::test)
 //   Declarations only. Definitions live in IMPL SECTION 07.
@@ -1952,7 +1906,7 @@ namespace std {
 constexpr auto formatter<bld::Err>::parse(format_parse_context &ctx) -> format_parse_context::iterator
 {
     auto it = ctx.begin();
-    bld::details::parse_mode_flag(ctx, it, fmt, {{'?', mode::debug}, {'p', mode::plain}}, "invalid Cmd format");
+    bld::details::parse_mode_flag(ctx, it, fmt, {{'?', mode::debug}, {'p', mode::plain}}, "invalid Err format");
     return it;
 }
 
@@ -1982,12 +1936,6 @@ constexpr auto formatter<bld::Proc>::parse(format_parse_context &ctx) -> format_
         }
         ++it;
     }
-    return it;
-}
-
-constexpr auto formatter<unordered_map<string, bld::Config::value_type>>::parse(format_parse_context &ctx) -> format_parse_context::iterator
-{
-    auto it = ctx.begin();
     return it;
 }
 
@@ -2097,25 +2045,17 @@ constexpr auto validate_run_configs() -> void
     // NOTE: modifier-category is asserted inline by every caller
     // (run / Task / run_new) via B_LDR_PROC_MODIFIERS_MSG, so the helpful
     // message prints ahead of any follow-on error.
-    constexpr int in_count = (bld::is_run_in_v<Configs> + ... + 0);
-    constexpr int out_count = (bld::is_io_out_v<Configs> + ... + 0);
-    constexpr int err_count = (bld::is_io_err_v<Configs> + ... + 0);
-    constexpr int merged_count = (bld::is_io_out_err_v<Configs> + ... + 0);
-    constexpr int async_count = (bld::is_async_mod_v<Configs> + ... + 0);
-    constexpr int label_count = (bld::is_label_mod_v<Configs> + ... + 0);
-    constexpr int cwd_count = (bld::is_cwd_mod_v<Configs> + ... + 0);
-    constexpr int dry_run_count = (bld::is_dry_run_mod_v<Configs> + ... + 0);
-    static_assert(in_count <= 1, "API ERROR: duplicate stdin routing (at most one io_in).");
+    // Same-type duplicates are rejected generically; only the cross-type
+    // io_out/io_out_err (stdout) and io_err/io_out_err (stderr) conflicts
+    // need explicit counts.
     static_assert(
-        out_count + merged_count <= 1,
+        details::distinct_modifiers<Configs...>::value, "API ERROR: duplicate modifier (at most one of each per command).");
+    static_assert(
+        count_of_v<io_out, Configs...> + count_of_v<io_out_err, Configs...> <= 1,
         "API ERROR: duplicate stdout routing (io_out and io_out_err conflict; at most one).");
     static_assert(
-        err_count + merged_count <= 1,
+        count_of_v<io_err, Configs...> + count_of_v<io_out_err, Configs...> <= 1,
         "API ERROR: duplicate stderr routing (io_err and io_out_err conflict; at most one).");
-    static_assert(async_count <= 1, "API ERROR: duplicate async (at most one per command).");
-    static_assert(label_count <= 1, "API ERROR: duplicate label (at most one per command).");
-    static_assert(cwd_count <= 1, "API ERROR: duplicate cwd (at most one per command).");
-    static_assert(dry_run_count <= 1, "API ERROR: duplicate dry_run (at most one per command).");
 }
 
 template <typename... Configs>
@@ -2137,7 +2077,7 @@ Task::Task(Cmd_loc cl, Configs &&...confs)
 {
     static_assert((Config_modifier_c<Configs> && ...), B_LDR_PROC_MODIFIERS_MSG);
     static_assert(
-        !(bld::is_dry_run_mod_v<Configs> || ...),
+        count_of_v<dry_run, Configs...> == 0,
         "API ERROR: dry_run is per run() call, not per Task; put dry_run{} on the run() call.");
     spec.cmd = cl.cmd;
     spec.cfg.loc = cl.loc;
@@ -2698,7 +2638,7 @@ auto bld::Proc::reap_win_process() -> void
 auto bld::Proc::wait() -> std::expected<Status, bld::Err>
 {
 #ifdef _WIN32
-    if (!id_ || status_.state != State::running) {
+    if (!id_ || status_.state == State::exited || status_.state == State::signaled) {
         finish_capture();
         return status_;
     }
@@ -2709,22 +2649,9 @@ auto bld::Proc::wait() -> std::expected<Status, bld::Err>
         reap_win_process();
         return status_;
     }
-    // With string capture: pump pipes while waiting so the child never
-    // blocks on a full pipe. Short slices keep latency low.
-    while (true) {
-        pump_capture_nonblocking();
-        DWORD res = ::WaitForSingleObject(static_cast<HANDLE>(id_), 10);
-        if (res == WAIT_OBJECT_0) {
-            reap_win_process();
-            return status_;
-        }
-        if (res == WAIT_FAILED) {
-            return std::unexpected(bld::Err::erno(GetLastError(), "WaitForSingleObject failed"));
-        }
-        // WAIT_TIMEOUT: loop and pump again.
-    }
+    // Capture path: shared polling loop below (try_wait pumps the pipes).
 #else
-    if (id_ <= 0 || status_.state != State::running) {
+    if (id_ <= 0 || status_.state == State::exited || status_.state == State::signaled) {
         finish_capture();
         return status_;
     }
@@ -2742,58 +2669,27 @@ auto bld::Proc::wait() -> std::expected<Status, bld::Err>
         finish_capture();
         return status_;
     }
-    // With string capture: interleave non-blocking pipe pumps with
-    // waitpid(WNOHANG) + poll() so large outputs never deadlock.
-    while (true) {
-        pump_capture_nonblocking();
-        int wstatus = 0;
-        pid_t r = ::waitpid(id_, &wstatus, WNOHANG);
-        if (r == -1) {
-            if (errno == EINTR) {
-                continue;
-            }
-            if (errno == ECHILD) {
-                status_ = {State::exited, 255};
-                finish_capture();
-                return status_;
-            }
-            return std::unexpected(bld::Err::erno(errno, "waitpid failed"));
-        }
-        if (r > 0) {
-            update_status(wstatus);
-            if (status_.state == State::exited || status_.state == State::signaled) {
-                finish_capture();
-                return status_;
-            }
-            // Stopped/continued: keep pumping; child may write again.
-        }
-        if (!has_capture()) {
-            details::sleep_ms(1);
-            continue;
-        }
-        struct pollfd pfds[2];
-        int n = 0;
-        if (cap_out_fd_ >= 0) {
-            pfds[n].fd = cap_out_fd_;
-            pfds[n].events = POLLIN;
-            pfds[n].revents = 0;
-            ++n;
-        }
-        if (cap_err_fd_ >= 0 && cap_err_fd_ != cap_out_fd_) {
-            pfds[n].fd = cap_err_fd_;
-            pfds[n].events = POLLIN;
-            pfds[n].revents = 0;
-            ++n;
-        }
-        ::poll(pfds, static_cast<nfds_t>(n), 10);
-    }
+    // Capture path: shared polling loop below (try_wait pumps the pipes).
 #endif
+    // With string capture: poll via try_wait() (which pumps capture pipes)
+    // so the child never blocks on a full pipe. Stopped/continued children
+    // keep pumping; only exited/signaled finish.
+    while (true) {
+        auto st = try_wait();
+        if (!st) {
+            return std::unexpected(std::move(st.error()));
+        }
+        if (st->state == State::exited || st->state == State::signaled) {
+            return *st;
+        }
+        details::sleep_ms(10);
+    }
 }
 
 auto bld::Proc::try_wait() -> std::expected<Status, bld::Err>
 {
 #ifdef _WIN32
-    if (!id_ || status_.state != State::running) {
+    if (!id_ || status_.state == State::exited || status_.state == State::signaled) {
         finish_capture();
         return status_;
     }
@@ -2806,7 +2702,7 @@ auto bld::Proc::try_wait() -> std::expected<Status, bld::Err>
     }
     return status_;
 #else
-    if (id_ <= 0 || status_.state != State::running) {
+    if (id_ <= 0 || status_.state == State::exited || status_.state == State::signaled) {
         finish_capture();
         return status_;
     }
@@ -3065,7 +2961,7 @@ inline auto resolve_io_slot(const Io_slot &slot, int std_fd, Open_mode mode_for_
 }
 } // namespace bld::details
 
-auto bld::Proc::spawn(const Exec_spec &spec, Proc_gid gid) -> std::expected<Proc, Err>
+auto bld::Proc::spawn(Exec_spec &&spec, Proc_gid gid) -> std::expected<Proc, Err>
 {
     if (spec.cmd.empty()) {
         return std::unexpected(Err::erc(std::errc::invalid_argument, "Command cannot be empty"));
@@ -3191,6 +3087,7 @@ auto bld::Proc::spawn(const Exec_spec &spec, Proc_gid gid) -> std::expected<Proc
             cap_pipe_err[0] = -1; // ownership moved to Proc
         }
     };
+    Proc p;
 #ifdef _WIN32
     std::string cmd_str = cmd.str();
     std::string cwd_str{cfg.cwd};
@@ -3285,35 +3182,8 @@ auto bld::Proc::spawn(const Exec_spec &spec, Proc_gid gid) -> std::expected<Proc
     }
     ::ResumeThread(pi.hThread);
     CloseHandle(pi.hThread);
-    // Parent drops its write-end copies so pumps see EOF at child exit.
-    // (The child inherits its own duplicates; they close when it exits.
-    // Pumps finish only after reaping/exit-observe, so EOF is exact.)
-    close_cap_writes();
-    Proc p;
     p.id_ = pi.hProcess;
-    p.spec = spec;
     p.gid = gid;
-    if (p.spec.cfg.label.empty()) {
-        p.spec.cfg.label = cmd_str;
-    }
-    p.status_ = Status{.state = State::running};
-    attach_capture(p);
-    // Stdin content: hand the write end to the Proc with an owned
-    // copy of the text; the single-threaded pumps feed it while waiting
-    // (sync, async, and batch alike) and close it for EOF when done.
-    if (feed_stdin) {
-        details::close_fd(stdin_pipe[0]);
-        stdin_pipe[0] = -1;
-        details::set_nonblocking(stdin_pipe[1]);
-        p.stdin_fd_ = stdin_pipe[1];
-        stdin_pipe[1] = -1; // ownership moved to Proc
-        p.stdin_text_ = std::string{cfg.in_content};
-        p.stdin_done_ = 0;
-        // Borrowed view no longer needed and must not dangle in the stored
-        // spec (async procs outlive the caller's string).
-        p.spec.cfg.in_content = {};
-    }
-    return p;
 #else
     P_id pid = ::fork();
     if (pid < 0) {
@@ -3367,18 +3237,31 @@ auto bld::Proc::spawn(const Exec_spec &spec, Proc_gid gid) -> std::expected<Proc
     } else {
         ::setpgid(pid, gid.val);
     }
-    // Parent drops its write-end copies so pumps see EOF at child exit.
-    close_cap_writes();
-    Proc p;
     p.id_ = pid;
-    p.spec = spec;
     if (gid.is_valid() && gid.val == Proc_gid::CREATE_NEW) {
         p.gid = Proc_gid{pid};
     } else {
         p.gid = gid.is_valid() ? gid : Proc_gid{pid};
     }
-    if (p.spec.cfg.label.empty()) {
-        p.spec.cfg.label = cmd.str();
+#endif
+    // Common tail (both platforms): drop write ends so pumps see EOF at
+    // child exit, then label default, capture attach, stdin handoff.
+    // Parent drops its write-end copies so pumps see EOF at child exit.
+    // (The child inherits its own duplicates; they close when it exits.
+    // Pumps finish only after reaping/exit-observe, so EOF is exact.)
+    close_cap_writes();
+    std::string stdin_text;
+    if (feed_stdin) {
+        stdin_text = std::string{cfg.in_content};
+    }
+    bool need_label = spec.cfg.label.empty();
+    std::string label_src;
+    if (need_label) {
+        label_src = cmd.str();
+    }
+    p.spec = std::move(spec);
+    if (need_label) {
+        p.spec.cfg.label = std::move(label_src);
     }
     p.status_ = Status{.state = State::running};
     attach_capture(p);
@@ -3391,14 +3274,18 @@ auto bld::Proc::spawn(const Exec_spec &spec, Proc_gid gid) -> std::expected<Proc
         details::set_nonblocking(stdin_pipe[1]);
         p.stdin_fd_ = stdin_pipe[1];
         stdin_pipe[1] = -1; // ownership moved to Proc
-        p.stdin_text_ = std::string{cfg.in_content};
+        p.stdin_text_ = std::move(stdin_text);
         p.stdin_done_ = 0;
         // Borrowed view no longer needed and must not dangle in the stored
         // spec (async procs outlive the caller's string).
         p.spec.cfg.in_content = {};
     }
     return p;
-#endif
+}
+auto bld::Proc::spawn(const Exec_spec &spec, Proc_gid gid) -> std::expected<Proc, Err>
+{
+    Exec_spec s = spec;
+    return spawn(std::move(s), gid);
 }
 auto bld::Proc::spawn(const Task &task, Proc_gid gid) -> std::expected<Proc, Err>
 {
@@ -3521,8 +3408,7 @@ bld::Proc_group::~Proc_group()
 #endif
 }
 bld::Proc_group::Proc_group(Proc_group &&other) noexcept
-    : gid_(std::exchange(other.gid_, Proc_gid{})), hive_(std::move(other.hive_)), free_list_(std::move(other.free_list_)),
-      generation_(std::exchange(other.generation_, 1)), active_count_(std::exchange(other.active_count_, 0))
+    : gid_(std::exchange(other.gid_, Proc_gid{})), procs_(std::move(other.procs_)), next_id_(std::exchange(other.next_id_, 1))
 {}
 bld::Proc_group &bld::Proc_group::operator=(Proc_group &&other) noexcept
 {
@@ -3534,10 +3420,8 @@ bld::Proc_group &bld::Proc_group::operator=(Proc_group &&other) noexcept
         }
 #endif
         gid_ = std::exchange(other.gid_, Proc_gid{});
-        hive_ = std::move(other.hive_);
-        free_list_ = std::move(other.free_list_);
-        generation_ = std::exchange(other.generation_, 1);
-        active_count_ = std::exchange(other.active_count_, 0);
+        procs_ = std::move(other.procs_);
+        next_id_ = std::exchange(other.next_id_, 1);
     }
     return *this;
 }
@@ -3547,11 +3431,11 @@ auto bld::Proc_group::gid() const -> Proc_gid
 }
 auto bld::Proc_group::empty() const -> bool
 {
-    return active_count_ == 0;
+    return procs_.empty();
 }
 auto bld::Proc_group::size() const -> std::size_t
 {
-    return active_count_;
+    return procs_.size();
 }
 auto bld::Proc_group::run_new(const Task &task) -> std::expected<Proc_id, Err>
 {
@@ -3562,11 +3446,10 @@ auto bld::Proc_group::run_new(const Task &task) -> std::expected<Proc_id, Err>
     }
     return run_new(task.spec);
 }
-auto bld::Proc_group::run_new(const Exec_spec &spec) -> std::expected<Proc_id, Err>
+auto bld::Proc_group::run_new(Exec_spec spec) -> std::expected<Proc_id, Err>
 {
-    Exec_spec s = spec;
-    s.cfg.async = true;
-    auto proc = Proc::spawn(s, gid_);
+    // spawn() never reads cfg.async; no copy needed beyond the by-value move.
+    auto proc = Proc::spawn(std::move(spec), gid_);
     if (!proc) {
         return std::unexpected(proc.error());
     }
@@ -3593,41 +3476,25 @@ auto bld::Proc_group::add(Proc &&proc) -> Proc_id
 #endif
                 ));
     }
-    std::uint32_t idx;
-    if (!free_list_.empty()) {
-        idx = free_list_.back();
-        free_list_.pop_back();
-    } else {
-        idx = static_cast<std::uint32_t>(hive_.size());
-        hive_.emplace_back();
-    }
-    Proc_id nid = (static_cast<Proc_id>(generation_) << 32) | idx;
-    hive_[idx].id = nid;
-    hive_[idx].proc = std::move(proc);
-    ++active_count_;
-    return nid;
+    Proc_id id = next_id_++;
+    procs_.emplace(id, std::move(proc));
+    return id;
 }
 auto bld::Proc_group::get(Proc_id id) -> std::expected<std::reference_wrapper<Proc>, Err>
 {
-    std::uint32_t idx = static_cast<std::uint32_t>(id & 0xFFFFFFFF);
-    if (idx < hive_.size() && hive_[idx].id == id) {
-        return std::ref(hive_[idx].proc);
+    if (auto it = procs_.find(id); it != procs_.end()) {
+        return std::ref(it->second);
     }
     return std::unexpected(Err::erc(std::errc::invalid_argument, std::format("Invalid Proc_id {}", id)));
 }
 auto bld::Proc_group::remove(Proc_id id) -> bool
 {
-    std::uint32_t idx = static_cast<std::uint32_t>(id & 0xFFFFFFFF);
-    if (idx < hive_.size() && hive_[idx].id == id) {
-        hive_[idx].id = 0;
-        hive_[idx].proc = Proc{};
-        free_list_.push_back(idx);
-        --active_count_;
-        ++generation_;
+    if (auto it = procs_.find(id); it != procs_.end()) {
+        procs_.erase(it);
 #ifndef _WIN32
         // A pgid dies with its last member. Reset so the next spawn starts a
         // fresh group instead of joining a dead one (waitpid would ECHILD).
-        if (active_count_ == 0) {
+        if (procs_.empty()) {
             gid_ = Proc_gid{Proc_gid::CREATE_NEW};
         }
 #endif
@@ -3637,7 +3504,7 @@ auto bld::Proc_group::remove(Proc_id id) -> bool
 }
 auto bld::Proc_group::wait_any() -> std::expected<Proc_id, Err>
 {
-    if (active_count_ == 0) {
+    if (procs_.empty()) {
         return std::unexpected(Err::erc(std::errc::no_child_process, "Proc_group empty"));
     }
 #ifdef _WIN32
@@ -3647,11 +3514,11 @@ auto bld::Proc_group::wait_any() -> std::expected<Proc_id, Err>
     while (true) {
         std::vector<HANDLE> handles;
         std::vector<Proc_id> ids;
-        for (auto &slot : hive_) {
-            if (slot.id != 0 && slot.proc.is_running()) {
-                slot.proc.pump_capture_nonblocking();
-                handles.push_back(static_cast<HANDLE>(slot.proc.pid()));
-                ids.push_back(slot.id);
+        for (auto &[id, proc] : procs_) {
+            if (proc.is_running()) {
+                proc.pump_capture_nonblocking();
+                handles.push_back(static_cast<HANDLE>(proc.pid()));
+                ids.push_back(id);
             }
         }
         if (handles.empty()) {
@@ -3674,8 +3541,8 @@ auto bld::Proc_group::wait_any() -> std::expected<Proc_id, Err>
     }
 #else
     bool any_running = false;
-    for (auto &slot : hive_) {
-        if (slot.id != 0 && slot.proc.is_running()) {
+    for (auto &[id, proc] : procs_) {
+        if (proc.is_running()) {
             any_running = true;
             break;
         }
@@ -3684,8 +3551,8 @@ auto bld::Proc_group::wait_any() -> std::expected<Proc_id, Err>
         return std::unexpected(Err::erc(std::errc::no_child_process, "No running procs"));
     }
     bool any_capture = false;
-    for (auto &slot : hive_) {
-        if (slot.id != 0 && slot.proc.is_running() && slot.proc.has_capture()) {
+    for (auto &[id, proc] : procs_) {
+        if (proc.is_running() && proc.has_capture()) {
             any_capture = true;
             break;
         }
@@ -3700,10 +3567,10 @@ auto bld::Proc_group::wait_any() -> std::expected<Proc_id, Err>
                 }
                 return std::unexpected(Err::erno(errno, "waitpid on group failed"));
             }
-            for (auto &slot : hive_) {
-                if (slot.id != 0 && slot.proc.pid() == pid) {
-                    slot.proc.status_ = Proc::parse_status(wstatus);
-                    return slot.id;
+            for (auto &[id, proc] : procs_) {
+                if (proc.pid() == pid) {
+                    proc.status_ = Proc::parse_status(wstatus);
+                    return id;
                 }
             }
         }
@@ -3711,18 +3578,18 @@ auto bld::Proc_group::wait_any() -> std::expected<Proc_id, Err>
     // With string capture anywhere in the group: pump every member while
     // polling for exits so no pipe fills and deadlocks a sibling.
     while (true) {
-        for (auto &slot : hive_) {
-            if (slot.id != 0 && slot.proc.is_running()) {
-                slot.proc.pump_capture_nonblocking();
+        for (auto &[id, proc] : procs_) {
+            if (proc.is_running()) {
+                proc.pump_capture_nonblocking();
             }
         }
         int wstatus = 0;
         pid_t pid = ::waitpid(-gid_.val, &wstatus, WNOHANG);
         if (pid > 0) {
-            for (auto &slot : hive_) {
-                if (slot.id != 0 && slot.proc.pid() == pid) {
-                    slot.proc.status_ = Proc::parse_status(wstatus);
-                    return slot.id;
+            for (auto &[id, proc] : procs_) {
+                if (proc.pid() == pid) {
+                    proc.status_ = Proc::parse_status(wstatus);
+                    return id;
                 }
             }
             continue;
@@ -3732,12 +3599,12 @@ auto bld::Proc_group::wait_any() -> std::expected<Proc_id, Err>
         }
         struct pollfd pfds[64];
         int n = 0;
-        for (auto &slot : hive_) {
-            if (slot.id == 0 || !slot.proc.is_running() || n >= 64) {
+        for (auto &[id, proc] : procs_) {
+            if (!proc.is_running() || n >= 64) {
                 continue;
             }
-            if (slot.proc.cap_out_fd_ >= 0) {
-                pfds[n].fd = slot.proc.cap_out_fd_;
+            if (proc.cap_out_fd_ >= 0) {
+                pfds[n].fd = proc.cap_out_fd_;
                 pfds[n].events = POLLIN;
                 pfds[n].revents = 0;
                 ++n;
@@ -3745,8 +3612,8 @@ auto bld::Proc_group::wait_any() -> std::expected<Proc_id, Err>
                     break;
                 }
             }
-            if (slot.proc.cap_err_fd_ >= 0 && slot.proc.cap_err_fd_ != slot.proc.cap_out_fd_) {
-                pfds[n].fd = slot.proc.cap_err_fd_;
+            if (proc.cap_err_fd_ >= 0 && proc.cap_err_fd_ != proc.cap_out_fd_) {
+                pfds[n].fd = proc.cap_err_fd_;
                 pfds[n].events = POLLIN;
                 pfds[n].revents = 0;
                 ++n;
@@ -3775,10 +3642,7 @@ auto bld::Proc_group::signal(int sig) -> void
 auto bld::Proc_group::terminate(int sig) -> void
 {
     signal(sig);
-    hive_.clear();
-    free_list_.clear();
-    active_count_ = 0;
-    ++generation_;
+    procs_.clear();
 #ifndef _WIN32
     // Same as remove(): a drained pgid is dead, start fresh next spawn.
     gid_ = Proc_gid{Proc_gid::CREATE_NEW};
@@ -3968,103 +3832,73 @@ inline void assign_single(Io_slot &slot, const Shared_fd &fd)
 }
 } // namespace bld::details
 
-// --- io_in ---
-bld::io_in::io_in(Fd_view f) : slot(make_fd_slot(f, Fd_view::DEFAULT_IN))
+// --- Io<K> (one template for io_in/io_out/io_err/io_out_err) ---
+template <bld::Io_kind K>
+bld::Io<K>::Io(Fd_view f) : slot(make_fd_slot(f, std_fd))
 {}
-bld::io_in::io_in(std::string_view path) : slot(make_path_slot(std::string{path}))
+template <bld::Io_kind K>
+bld::Io<K>::Io(std::string_view path) : slot(make_path_slot(std::string{path}))
 {}
-bld::io_in::io_in(const Shared_fd &fd)
+template <bld::Io_kind K>
+bld::Io<K>::Io(const Shared_fd &fd)
 {
     bld::details::assign_single(slot, fd);
 }
-bld::io_in::io_in(const std::string *text) : content_(text != nullptr ? std::string_view{*text} : std::string_view{})
-{}
-auto bld::io_in::open(std::string_view path) -> std::expected<bld::io_in, bld::Err>
+template <bld::Io_kind K>
+bld::Io<K>::Io(Target t)
+{
+    if constexpr (K == Io_kind::in) {
+        content_ = t != nullptr ? std::string_view{*t} : std::string_view{};
+    } else {
+        slot = make_str_slot(t);
+    }
+}
+template <bld::Io_kind K>
+auto bld::Io<K>::open(std::string_view path) -> std::expected<Io, Err>
+    requires(K == Io_kind::in)
 {
     auto fd = bld::details::open_shared_for_read(path);
     if (!fd) {
         return std::unexpected(std::move(fd.error()));
     }
-    return io_in{*fd};
+    return Io{*fd};
 }
-auto bld::io_in::operator()(Proc_config &cfg) const -> void
+template <bld::Io_kind K>
+auto bld::Io<K>::open(std::string_view path, Open_mode mode) -> std::expected<Io, Err>
+    requires(K != Io_kind::in)
 {
-    cfg.io_in = slot;
-    cfg.in_content = content_;
-}
-
-// --- io_out ---
-bld::io_out::io_out(Fd_view f) : slot(make_fd_slot(f, Fd_view::DEFAULT_OUT))
-{}
-bld::io_out::io_out(std::string_view path) : slot(make_path_slot(std::string{path}))
-{}
-bld::io_out::io_out(const Shared_fd &fd)
-{
-    bld::details::assign_single(slot, fd);
-}
-bld::io_out::io_out(std::string *target) : slot(make_str_slot(target))
-{}
-auto bld::io_out::open(std::string_view path, Open_mode mode) -> std::expected<bld::io_out, bld::Err>
-{
-    auto fd = bld::details::open_shared_for_write(path, mode, "Parent directory for output file", "Opened out fd:");
+    std::string_view parent_err, log_tag;
+    if constexpr (K == Io_kind::out) {
+        parent_err = "Parent directory for output file";
+        log_tag = "Opened out fd:";
+    } else if constexpr (K == Io_kind::err) {
+        parent_err = "Parent directory for error log";
+        log_tag = "Opened err fd:";
+    } else {
+        parent_err = "Parent directory for out/err log";
+        log_tag = "Opened out_err fd:";
+    }
+    auto fd = bld::details::open_shared_for_write(path, mode, parent_err, log_tag);
     if (!fd) {
         return std::unexpected(std::move(fd.error()));
     }
-    return io_out{*fd};
+    return Io{*fd};
 }
-auto bld::io_out::operator()(Proc_config &cfg) const -> void
+template <bld::Io_kind K>
+auto bld::Io<K>::operator()(Proc_config &cfg) const -> void
 {
-    cfg.io_out = slot;
-}
-
-// --- io_err ---
-bld::io_err::io_err(Fd_view f) : slot(make_fd_slot(f, Fd_view::DEFAULT_ERR))
-{}
-bld::io_err::io_err(std::string_view path) : slot(make_path_slot(std::string{path}))
-{}
-bld::io_err::io_err(const Shared_fd &fd)
-{
-    bld::details::assign_single(slot, fd);
-}
-bld::io_err::io_err(std::string *target) : slot(make_str_slot(target))
-{}
-auto bld::io_err::open(std::string_view path, Open_mode mode) -> std::expected<bld::io_err, bld::Err>
-{
-    auto fd = bld::details::open_shared_for_write(path, mode, "Parent directory for error log", "Opened err fd:");
-    if (!fd) {
-        return std::unexpected(std::move(fd.error()));
+    if constexpr (K == Io_kind::in) {
+        cfg.io_in = slot;
+        cfg.in_content = content_;
+    } else if constexpr (K == Io_kind::out) {
+        cfg.io_out = slot;
+    } else if constexpr (K == Io_kind::err) {
+        cfg.io_err = slot;
+    } else {
+        cfg.io_out = slot;
+        cfg.io_err = slot;
+        cfg.merge_err_and_out = true;
     }
-    return io_err{*fd};
-}
-auto bld::io_err::operator()(Proc_config &cfg) const -> void
-{
-    cfg.io_err = slot;
-}
-
-// --- io_out_err (merged stdout+stderr) ---
-bld::io_out_err::io_out_err(Fd_view f) : slot(make_fd_slot(f, Fd_view::DEFAULT_OUT))
-{}
-bld::io_out_err::io_out_err(std::string_view path) : slot(make_path_slot(std::string{path}))
-{}
-bld::io_out_err::io_out_err(const Shared_fd &fd)
-{
-    bld::details::assign_single(slot, fd);
-}
-bld::io_out_err::io_out_err(std::string *target) : slot(make_str_slot(target))
-{}
-auto bld::io_out_err::open(std::string_view path, Open_mode mode) -> std::expected<bld::io_out_err, bld::Err>
-{
-    auto fd = bld::details::open_shared_for_write(path, mode, "Parent directory for out/err log", "Opened out_err fd:");
-    if (!fd) {
-        return std::unexpected(std::move(fd.error()));
-    }
-    return io_out_err{*fd};
-}
-auto bld::io_out_err::operator()(Proc_config &cfg) const -> void
-{
-    cfg.io_out = slot;
-    cfg.io_err = slot;
-    cfg.merge_err_and_out = true;
 }
 
 auto bld::cwd::operator()(Proc_config &cfg) const -> void
@@ -4209,7 +4043,7 @@ auto bld::details::execute(const bld::Cmd &cmd, const Proc_config &cfg, std::sou
     Exec_spec spec;
     spec.cmd = cmd;
     spec.cfg = cfg;
-    return bld::Proc::spawn(spec)
+    return bld::Proc::spawn(std::move(spec))
         .transform_error([&loc](bld::Err err) {
             bld::log::e("at: {}:{}: {}", loc.file_name(), loc.line(), err);
             return err;
@@ -4281,7 +4115,7 @@ inline auto rebuild_and_restart(
         cxx = bld::get_current_cxx_compiler().data();
     }
 
-    bld::Cmd build_cmd{cxx, "-o", target, source, "-std=c++23", "-O3", "-Wall", "-Wextra"};
+    bld::Cmd build_cmd{cxx, "-o", target, source, "-std=c++23", "-O1", "-Wall", "-Wextra"};
 #ifdef _WIN32
 #ifdef __GNUC__
     build_cmd.push("-lstdc++exp");
@@ -4358,11 +4192,12 @@ auto bld::wait_all(std::span<bld::Proc> procs) -> std::expected<std::size_t, bld
 {
     // Single-threaded pump: round-robin try_wait() (each pumps its own
     // capture pipes) so concurrent out_str/err_str captures never deadlock
-    // on a full pipe while another child is being reaped.
-#ifdef _WIN32
+    // on a full pipe while another child is being reaped. One body for both
+    // platforms: the pending vector holds the live procs.
     std::vector<bld::Proc *> pending;
     for (auto &proc : procs) {
-        if (proc.is_running() && proc.pid() != nullptr) {
+        auto s = proc.status().state;
+        if (s != bld::Proc::State::exited && s != bld::Proc::State::signaled) {
             pending.push_back(&proc);
         }
     }
@@ -4381,7 +4216,7 @@ auto bld::wait_all(std::span<bld::Proc> procs) -> std::expected<std::size_t, bld
             if (!st) {
                 return std::unexpected(std::move(st.error()));
             }
-            if (!p->is_running()) {
+            if (st->state == bld::Proc::State::exited || st->state == bld::Proc::State::signaled) {
                 ++completed;
                 int percentage = static_cast<int>((completed * 100) / total);
                 if (p->status_code() != 0) {
@@ -4404,58 +4239,6 @@ auto bld::wait_all(std::span<bld::Proc> procs) -> std::expected<std::size_t, bld
         return std::unexpected(bld::Err::erc(std::errc::operation_canceled, "One or more async processes failed"));
     }
     return completed;
-
-#else
-    std::size_t remaining{0};
-    for (const auto &proc : procs) {
-        if (proc.is_running()) {
-            remaining++;
-        }
-    }
-    const std::size_t total = remaining;
-    if (total == 0) {
-        return {};
-    }
-    bld::log::i("Waiting for {} processes, asynchronously", total);
-    std::size_t completed{0};
-    bool has_errors = false;
-    while (remaining > 0) {
-        bool progressed = false;
-        for (auto &proc : procs) {
-            if (!proc.is_running()) {
-                continue;
-            }
-            auto st = proc.try_wait();
-            if (!st) {
-                return std::unexpected(std::move(st.error()));
-            }
-            if (!proc.is_running()) {
-                remaining--;
-                completed = total - remaining;
-                int percentage = static_cast<int>((completed * 100) / total);
-                if (st->code != 0) {
-                    bld::log::e(
-                        "[{:>3}%] Process '{}' failed (pid: {}): exited with code {}",
-                        percentage,
-                        proc.spec.cfg.label,
-                        proc.pid(),
-                        st->code);
-                    has_errors = true;
-                } else {
-                    bld::log::i("[{:>3}%] Process '{}' (pid: {}): completed.", percentage, proc.spec.cfg.label, proc.pid());
-                }
-                progressed = true;
-            }
-        }
-        if (remaining > 0 && !progressed) {
-            details::sleep_ms(1);
-        }
-    }
-    if (has_errors) {
-        return std::unexpected(bld::Err::erc(std::errc::operation_canceled, "One or more async processes failed"));
-    }
-    return completed;
-#endif
 }
 
 namespace bld::details {
@@ -4681,7 +4464,7 @@ auto path_for(const bld::Task &task, std::string_view path) -> std::string
     }
     return (std::filesystem::path{task.spec.cfg.cwd} / std::filesystem::path{path}).string();
 }
-// Shared JSON entry writer for write_database(span) / write_database(Plan).
+// Shared JSON entry writer for write_database(Plan).
 // Byte-identical output: handles leading comma, directory/file/arguments,
 // and optional "output" field when `output` is non-null.
 inline void append_compile_entry(
@@ -4709,21 +4492,6 @@ inline void append_compile_entry(
         json += std::format(",\"output\":{}", escaped_json(*output));
     }
     json += '}';
-}
-auto write_database(std::span<bld::Task> tasks, std::string_view path) -> std::expected<void, bld::Err>
-{
-        // For span<Task> (Task carries no dep info), treat all as compile commands (no is_compile_command flag)
-    std::string json{"[\n"};
-    bool first = true;
-    for (const auto &task : tasks) {
-        // For span<Task>, inputs/outputs are not in Task, so source/output unknown — use name as file if needed
-        append_compile_entry(json, first, task.spec.cfg.cwd, task.name, task.spec.cmd.args_, nullptr);
-    }
-    json += "\n]\n";
-    if (!bld::fs::write_file(path, json)) {
-        return std::unexpected(bld::Err::erc(std::errc::io_error, std::format("Failed to write '{}'", path)));
-    }
-    return {};
 }
 auto write_database(Plan &plan, std::string_view path) -> std::expected<void, bld::Err>
 {
@@ -4870,18 +4638,8 @@ inline auto flatten_task(const bld::Task &t, const std::string &prefix, std::vec
     }
     return {};
 }
-inline auto flatten_tasks(std::span<const bld::Task> tasks) -> std::expected<std::vector<bld::Task>, bld::Err>
-{
-    std::vector<bld::Task> out;
-    for (auto &t : tasks) {
-        if (auto r = flatten_task(t, "", out); !r) {
-            return std::unexpected(std::move(r.error()));
-        }
-    }
-    return out;
-}
 
-// Shared scheduler pieces for run_tasks/run_plan. Behavior-preserving:
+// Shared scheduler pieces for run_plan. Behavior-preserving:
 // identical messages, ordering, and progress format; graph + dirty vectors
 // are built by the callers, execution is unified here.
 inline void ensure_task_names(std::span<bld::Task> tasks)
@@ -4971,15 +4729,14 @@ inline auto run_schedule(
     }
     // All waiting goes through Proc_group::wait_any, which blocks until any
     // child in the group exits. No polling, no timeouts.
-    struct Active
+    struct Active_info
     {
         std::size_t index;
-        bld::Proc_id pid;
         std::chrono::steady_clock::time_point started;
     };
     bld::Proc_group group;
-    std::vector<Active> active;
-    active.reserve(width);
+    std::unordered_map<bld::Proc_id, Active_info> active;
+    active.reserve(width * 2 + 1);
     bool stop = false;
     std::size_t cursor = 0;
     auto release = [&](std::size_t i) {
@@ -4988,15 +4745,6 @@ inline auto run_schedule(
                 queue.push_back(child);
             }
         }
-    };
-    // Linear scan is intentional: active holds at most <width> entries.
-    auto find_active = [&](bld::Proc_id pid) -> std::size_t {
-        for (std::size_t k = 0; k < active.size(); ++k) {
-            if (active[k].pid == pid) {
-                return k;
-            }
-        }
-        return active.size();
     };
     // Progress so far: terminal tasks (ran/failed/skipped/cancelled) over all
     // tasks, as a 0-100 percentage in wait_all's "[ 50%]" style.
@@ -5039,7 +4787,7 @@ inline auto run_schedule(
             }
             result.tasks[i].state = bld::Task_state::running;
             bld::log::d("task '{}': spawned {:?}", tasks[i].name, tasks[i].spec.cmd);
-            active.push_back(Active{i, *pid, std::chrono::steady_clock::now()});
+            active.emplace(*pid, Active_info{i, std::chrono::steady_clock::now()});
         }
         if (active.empty()) {
             break;
@@ -5047,26 +4795,24 @@ inline auto run_schedule(
         auto done = group.wait_any();
         if (!done) {
             bld::log::e("scheduler: wait failed: {}", done.error().msg);
-            for (auto &entry : active) {
+            for (auto &[pid, entry] : active) {
                 result.tasks[entry.index].state = bld::Task_state::failed;
                 result.tasks[entry.index].message = done.error().msg;
                 ++result.failed;
                 bld::log::e("[{:>3}%] Task '{}' failed: {}", progress_pct(), tasks[entry.index].name, done.error().msg);
-                group.remove(entry.pid);
+                group.remove(pid);
             }
             active.clear();
             break;
         }
-        const auto k = find_active(*done);
-        if (k == active.size()) {
+        auto ait = active.find(*done);
+        if (ait == active.end()) {
             group.remove(*done);
             continue;
         }
-        auto entry = active[k];
-        // Order is irrelevant (active is a set keyed by pid): swap-remove.
-        active[k] = active.back();
-        active.pop_back();
-        auto got = group.get(entry.pid);
+        auto entry = ait->second;
+        active.erase(ait);
+        auto got = group.get(*done);
         if (!got) {
             result.tasks[entry.index].state = bld::Task_state::failed;
             result.tasks[entry.index].message = got.error().msg;
@@ -5077,7 +4823,7 @@ inline auto run_schedule(
         }
         // wait_any already reaped; wait() returns the cached status (and joins drains).
         auto status = got->get().wait();
-        group.remove(entry.pid);
+        group.remove(*done);
         if (!status) {
             result.tasks[entry.index].state = bld::Task_state::failed;
             result.tasks[entry.index].message = status.error().msg;
@@ -5124,53 +4870,6 @@ inline auto run_schedule(
     return result;
 }
 
-auto run_tasks(std::span<bld::Task> tasks, const bld::Run_config &cfg) -> std::expected<bld::Run_result, bld::Err>
-{
-    // span<Task>: a bag of unrun Procs. Groups expand to dotted-name leaves
-    // first; then no graph, no skipping — everything runs in parallel.
-    // Ordering and up-to-date checks belong to Plan.
-    // Waiting is done via Proc_group (procs owned by the group).
-    auto flat_exp = flatten_tasks(tasks);
-    if (!flat_exp) {
-        return std::unexpected(std::move(flat_exp.error()));
-    }
-    auto flat = std::move(*flat_exp);
-    if (!cfg.write_compile_commands.empty()) {
-        auto written = write_database(std::span<bld::Task>{flat}, cfg.write_compile_commands);
-        if (!written) {
-            return std::unexpected(written.error());
-        }
-    }
-    bld::Run_result result{};
-    result.tasks.resize(flat.size());
-    if (flat.empty()) {
-        return result;
-    }
-    // ensure names (output -> cmd) already done in Plan::add/run_tasks for span, but do here too for direct span
-    ensure_task_names(std::span<bld::Task>{flat});
-    // Every task needs a runnable command — name the culprit, not just the index.
-    if (auto ok = check_empty_commands(std::span<bld::Task>{flat}); !ok) {
-        return std::unexpected(std::move(ok.error()));
-    }
-    // Names must be unique (logging and results key off them).
-    {
-        std::unordered_set<std::string> seen;
-        for (auto &t : flat) {
-            if (!seen.insert(t.name).second) {
-                return std::unexpected(
-                    Err::erc(std::errc::invalid_argument, std::format("duplicate task name '{}'", t.name)));
-            }
-        }
-    }
-    // Single-threaded scheduler: up to <width> child processes live at once.
-    // Effective width = min(resolved parallel width, resolved async cap).
-    std::size_t width = resolve_sched_width(cfg);
-    std::vector<std::vector<std::size_t>> children(flat.size());
-    std::vector<std::size_t> indegree(flat.size(), 0);
-    std::vector<bool> dirty(flat.size(), true);
-    return run_schedule(std::span<bld::Task>{flat}, children, indegree, dirty, cfg, result, width);
-}
-
 // Expands group tasks to dotted-name leaves and rewrites the side tables
 // onto leaf names. Exact leaf matches win; group names fan out for after
 // and needs. produces() on a group name is an error — outputs belong to
@@ -5187,31 +4886,35 @@ inline auto expand_plan(const bld::Plan &plan) -> std::expected<bld::Plan, bld::
             flat.tasks.push_back(std::move(l));
         }
     }
-    auto leaves_of = [&](std::string_view n) {
+    // One prefix map while flattening: leaves_of/is_group/is_leaf were linear
+    // scans called inside loops (quadratic). Exact leaf matches win as before.
+    std::unordered_set<std::string> leaf_set;
+    leaf_set.reserve(flat.tasks.size() * 2 + 1);
+    std::unordered_map<std::string, std::vector<std::string>> group_leaves;
+    for (auto &l : flat.tasks) {
+        leaf_set.insert(l.name);
+        std::size_t pos = 0;
+        while ((pos = l.name.find('.', pos)) != std::string::npos) {
+            group_leaves[l.name.substr(0, pos)].push_back(l.name);
+            ++pos;
+        }
+    }
+    auto leaves_of = [&](std::string_view n) -> std::vector<std::string> {
+        std::string key{n};
         std::vector<std::string> out;
-        for (auto &l : flat.tasks) {
-            if (l.name == n
-                || (l.name.size() > n.size() && l.name.compare(0, n.size(), n) == 0 && l.name[n.size()] == '.')) {
-                out.push_back(l.name);
-            }
+        if (leaf_set.contains(key)) {
+            out.push_back(key);
+        }
+        if (auto it = group_leaves.find(key); it != group_leaves.end()) {
+            out.insert(out.end(), it->second.begin(), it->second.end());
         }
         return out;
     };
     auto is_group = [&](std::string_view n) {
-        for (auto &l : flat.tasks) {
-            if (l.name.size() > n.size() && l.name.compare(0, n.size(), n) == 0 && l.name[n.size()] == '.') {
-                return true;
-            }
-        }
-        return false;
+        return group_leaves.contains(std::string{n});
     };
     auto is_leaf = [&](std::string_view n) {
-        for (auto &l : flat.tasks) {
-            if (l.name == n) {
-                return true;
-            }
-        }
-        return false;
+        return leaf_set.contains(std::string{n});
     };
     for (auto &[tname, vals] : plan.task_inputs) {
         if (is_leaf(tname)) {
@@ -5266,7 +4969,18 @@ inline auto expand_plan(const bld::Plan &plan) -> std::expected<bld::Plan, bld::
 
 auto run_plan(Plan &plan, const Run_config &cfg) -> std::expected<Run_result, Err>
 {
-    // Groups expand to dotted-name leaves first; everything below sees flat tasks.
+    // Fast path: no subtasks means expand_plan is the identity (plus table
+    // copies). Skip it entirely; groups expand to dotted-name leaves otherwise.
+    bool has_groups = false;
+    for (auto &t : plan.tasks) {
+        if (!t.subtasks.empty()) {
+            has_groups = true;
+            break;
+        }
+    }
+    if (!has_groups) {
+        return run_plan_flat(plan, cfg);
+    }
     auto expanded = expand_plan(plan);
     if (!expanded) {
         return std::unexpected(std::move(expanded.error()));
@@ -5356,7 +5070,8 @@ auto run_plan_flat(Plan &plan, const Run_config &cfg) -> std::expected<Run_resul
     auto topo = std::move(*topo_res);
     std::vector<bool> dirty(tasks.size(), cfg.force);
     // Pass 1: self-dirty from outputs/inputs, in topo order (keeps the
-    // is_outdated warning logs in the same order as before).
+    // is_outdated warning logs in the same order as before). Inputs are
+    // collected once per task and the range overload stats the target once.
     for (auto i : topo) {
         if (dirty[i]) {
             continue;
@@ -5366,22 +5081,22 @@ auto run_plan_flat(Plan &plan, const Run_config &cfg) -> std::expected<Run_resul
             if (it_out == plan.task_outputs.end() || it_out->second.empty()) {
                 dirty[i] = true;
             } else {
+                std::vector<std::string> inputs;
+                if (auto it_in = plan.task_inputs.find(tasks[i].name); it_in != plan.task_inputs.end()) {
+                    inputs.reserve(it_in->second.size());
+                    for (auto &in : it_in->second) {
+                        inputs.push_back(path_for(tasks[i], in));
+                    }
+                }
                 for (auto &out : it_out->second) {
                     auto target = path_for(tasks[i], out);
-                    if (!std::filesystem::exists(target)) {
+                    std::error_code ec;
+                    if (!std::filesystem::exists(target, ec) || ec) {
                         dirty[i] = true;
                         break;
                     }
-                    auto it_in = plan.task_inputs.find(tasks[i].name);
-                    if (it_in != plan.task_inputs.end()) {
-                        for (auto &in : it_in->second) {
-                            if (is_outdated(target, path_for(tasks[i], in))) {
-                                dirty[i] = true;
-                                break;
-                            }
-                        }
-                    }
-                    if (dirty[i]) {
+                    if (!inputs.empty() && is_outdated(target, inputs)) {
+                        dirty[i] = true;
                         break;
                     }
                 }
@@ -5506,41 +5221,29 @@ namespace bld::details {
     return "unknown";
 }
 
-// Trims ASCII whitespace (used for numeric/bool CLI values).
-[[nodiscard]] inline auto config_trim(std::string_view s) noexcept -> std::string_view
+// Shared value_type -> string mapping for Config::print_help and Config::dump.
+// Single std::visit instead of a get_if chain in two places.
+[[nodiscard]] inline auto format_config_value(const bld::Config::value_type &v) -> std::string
 {
-    std::size_t b = 0;
-    while (b < s.size() && (s[b] == ' ' || s[b] == '\t' || s[b] == '\n' || s[b] == '\r' || s[b] == '\f' || s[b] == '\v')) {
-        ++b;
-    }
-    std::size_t e = s.size();
-    while (e > b && (s[e - 1] == ' ' || s[e - 1] == '\t' || s[e - 1] == '\n' || s[e - 1] == '\r' || s[e - 1] == '\f' || s[e - 1] == '\v')) {
-        --e;
-    }
-    return s.substr(b, e - b);
-}
-
-// Case-insensitive bool parsing: true/1/yes/y <-> false/0/no/n.
-[[nodiscard]] inline auto config_parse_bool(std::string_view s) -> std::optional<bool>
-{
-    auto t = config_trim(s);
-    // Lowercase into a small buffer (bool words are short).
-    char buf[8]{};
-    if (t.size() >= sizeof(buf)) {
-        return std::nullopt;
-    }
-    for (std::size_t i = 0; i < t.size(); ++i) {
-        char c = t[i];
-        buf[i] = static_cast<char>(c >= 'A' && c <= 'Z' ? c - 'A' + 'a' : c);
-    }
-    std::string_view l{buf, t.size()};
-    if (l == "true" || l == "1" || l == "yes" || l == "y") {
-        return true;
-    }
-    if (l == "false" || l == "0" || l == "no" || l == "n") {
-        return false;
-    }
-    return std::nullopt;
+    return std::visit(
+        [](auto &&x) -> std::string {
+            using T = std::decay_t<decltype(x)>;
+            if constexpr (std::is_same_v<T, bool>) {
+                return x ? "true" : "false";
+            } else if constexpr (std::is_same_v<T, int> || std::is_same_v<T, double>) {
+                return std::format("{}", x);
+            } else if constexpr (std::is_same_v<T, std::string>) {
+                return std::format("\"{}\"", x);
+            } else if constexpr (std::is_same_v<T, std::vector<std::string>>) {
+                if (x.empty()) {
+                    return "[]";
+                }
+                return std::format("[{}]", bld::str::join(x, ", "));
+            } else {
+                return "null";
+            }
+        },
+        v);
 }
 
 // True when `sval` is an allowed choice (or no choices constrain the option).
@@ -5553,7 +5256,7 @@ namespace bld::details {
 // space-separated value like "-5" isn't mistaken for a flag.
 [[nodiscard]] inline auto config_looks_like_number(std::string_view s) noexcept -> bool
 {
-    auto t = config_trim(s);
+    auto t = bld::str::trim(s);
     if (t.empty()) {
         return false;
     }
@@ -5610,22 +5313,7 @@ auto bld::Config::print_help(std::string_view prog_name, std::string_view specif
     for (const auto &[flag, opt] : options) {
         std::string_view type_str = bld::details::config_type_name(opt.type);
 
-        std::string def_str = "null";
-        if (auto *p = std::get_if<int>(&opt.default_val); p) {
-            def_str = std::format("{}", *p);
-        } else if (auto *p = std::get_if<bool>(&opt.default_val); p) {
-            def_str = *p ? "true" : "false";
-        } else if (auto *p = std::get_if<double>(&opt.default_val); p) {
-            def_str = std::format("{}", *p);
-        } else if (auto *p = std::get_if<std::string>(&opt.default_val); p) {
-            def_str = std::format("\"{}\"", *p);
-        } else if (auto *p = std::get_if<std::vector<std::string>>(&opt.default_val); p) {
-            if (p->empty()) {
-                def_str = "[]";
-            } else {
-                def_str = std::format("[{}]", bld::str::join(*p, ", "));
-            }
-        }
+        std::string def_str = bld::details::format_config_value(opt.default_val);
 
         std::format_to(std::back_inserter(help_text), "\n  {:<15} [{:<8}] : {}", flag, type_str, opt.description);
 
@@ -5700,29 +5388,27 @@ auto bld::Config::parse(int argc, char *argv[]) -> std::expected<Parse_outcome, 
         }
         val_t expected_type = oit->second.type;
 
-        auto assign_num = [&]<typename T>(std::string_view noun) -> std::expected<void, bld::Err> {
-            std::string_view t = bld::details::config_trim(val);
-            T v{};
-            auto [p, ec] = std::from_chars(t.data(), t.data() + t.size(), v);
-            if (ec == std::errc{} && p == t.data() + t.size()) {
-                data[nkey] = v;
-                bld::log::d("Config: '{}' = {} ({}).", nkey, val, noun);
-                return {};
-            }
-            return details::fail(std::errc::invalid_argument, "Option '{}' expects {}, got '{}'", nkey, noun, val);
-        };
-
         if (expected_type == Bool) {
-            if (auto b = bld::details::config_parse_bool(val)) {
+            if (auto b = bld::str::parse_bool(val)) {
                 data[nkey] = *b;
                 bld::log::d("Config: '{}' = {}.", nkey, *b ? "true" : "false");
                 return {};
             }
             return details::fail(std::errc::invalid_argument, "Option '{}' expects a bool, got '{}'", nkey, val);
         } else if (expected_type == Int) {
-            return assign_num.template operator()<int>("an integer");
+            if (auto v = bld::str::parse_int(val)) {
+                data[nkey] = *v;
+                bld::log::d("Config: '{}' = {} (an integer).", nkey, val);
+                return {};
+            }
+            return details::fail(std::errc::invalid_argument, "Option '{}' expects an integer, got '{}'", nkey, val);
         } else if (expected_type == Double) {
-            return assign_num.template operator()<double>("a double");
+            if (auto v = bld::str::parse_double(val)) {
+                data[nkey] = *v;
+                bld::log::d("Config: '{}' = {} (a double).", nkey, val);
+                return {};
+            }
+            return details::fail(std::errc::invalid_argument, "Option '{}' expects a double, got '{}'", nkey, val);
         } else if (expected_type == String || expected_type == String_arr) {
             std::string sval(val);
             if (!bld::details::config_choice_ok(oit->second.choices, sval)) {
@@ -5849,25 +5535,11 @@ bld::Config::Proxy::operator std::vector<std::string>() const
     return get_or_throw<std::vector<std::string>>();
 }
 
-auto std::formatter<std::unordered_map<std::string, bld::Config::value_type>>::format(
-    const std::unordered_map<std::string, bld::Config::value_type> &m, std::format_context &ctx) const -> std::format_context::iterator
+auto bld::Config::dump() const -> std::string
 {
-    auto out = ctx.out();
-    for (const auto &[k, v] : m) {
-        std::format_to(out, "{}: ", k);
-        if (auto *p = std::get_if<int>(&v); p) {
-            std::format_to(out, "(i){}", *p);
-        } else if (auto *p = std::get_if<bool>(&v); p) {
-            std::format_to(out, "(b){}", *p);
-        } else if (auto *p = std::get_if<double>(&v); p) {
-            std::format_to(out, "(d){}", *p);
-        } else if (auto *p = std::get_if<std::string>(&v); p) {
-            std::format_to(out, "(s){}", *p);
-        } else if (auto *p = std::get_if<std::vector<std::string>>(&v); p) {
-            std::format_to(out, "(s[]){}", *p);
-        } else {
-            std::format_to(out, "unknown");
-        }
+    std::string out;
+    for (const auto &[k, v] : data) {
+        std::format_to(std::back_inserter(out), "{}: {}\n", k, bld::details::format_config_value(v));
     }
     return out;
 }
@@ -5902,7 +5574,7 @@ auto bld::test::compute_diff(std::span<const std::string_view> original, std::sp
     }
 
     std::vector<Frontier> history;
-    history.reserve(max_edits);
+    history.reserve(max_edits + 1);
 
     Frontier current_frontier{max_edits};
     bool reached_end = false;
@@ -5910,7 +5582,13 @@ auto bld::test::compute_diff(std::span<const std::string_view> original, std::sp
     std::ptrdiff_t end_y = 0;
 
     for (std::ptrdiff_t d = 0; d <= max_edits; ++d) {
-        history.push_back(current_frontier);
+        // Snapshot only the [-d, d] slice instead of the full
+        // 2*(n+m)+1 frontier: O(D^2) total instead of O(D*(N+M)).
+        Frontier snap{d};
+        for (std::ptrdiff_t k = -d; k <= d; ++k) {
+            snap[k] = current_frontier[k];
+        }
+        history.push_back(std::move(snap));
 
         for (std::ptrdiff_t k = -d; k <= d; k += 2) {
             std::ptrdiff_t x = 0;
@@ -6749,21 +6427,25 @@ std::vector<Cpp_module> scan_modules(const std::string &path, std::vector<std::s
             continue;
         }
 
-        // Tokenize
-        std::vector<std::string> tokens;
-        std::string token;
-        for (char c : content) {
-            if (std::isspace(static_cast<unsigned char>(c)) || c == ';') {
-                if (!token.empty()) {
-                    tokens.push_back(token);
-                    token.clear();
-                }
-                if (c == ';') {
-                    tokens.push_back(";");
-                }
-            } else {
-                token += c;
+        // Tokenize as views over the owned buffer (copied only into mod below).
+        std::vector<std::string_view> tokens;
+        std::size_t tpos = 0;
+        while (tpos < content.size()) {
+            char c = content[tpos];
+            if (std::isspace(static_cast<unsigned char>(c))) {
+                ++tpos;
+                continue;
             }
+            if (c == ';') {
+                tokens.emplace_back(content.data() + tpos, 1);
+                ++tpos;
+                continue;
+            }
+            std::size_t start = tpos;
+            while (tpos < content.size() && !std::isspace(static_cast<unsigned char>(content[tpos])) && content[tpos] != ';') {
+                ++tpos;
+            }
+            tokens.emplace_back(content.data() + start, tpos - start);
         }
 
         bld::fs::Cpp_module mod;
@@ -6783,7 +6465,7 @@ std::vector<Cpp_module> scan_modules(const std::string &path, std::vector<std::s
                     continue;
                 }
                 if (i + 1 < tokens.size()) {
-                    std::string dep = tokens[i + 1];
+                    std::string dep{tokens[i + 1]};
                     if (!dep.starts_with("std") && dep != ";" && !dep.empty()) {
                         if (dep.starts_with(":") && !primary_name.empty()) {
                             dep = primary_name + dep;
@@ -6794,7 +6476,7 @@ std::vector<Cpp_module> scan_modules(const std::string &path, std::vector<std::s
                     }
                 }
             } else if (tokens[i] == "export" && i + 2 < tokens.size() && tokens[i + 1] == "import") {
-                std::string dep = tokens[i + 2];
+                std::string dep{tokens[i + 2]};
                 if (!dep.starts_with("std") && dep != ";" && !dep.empty()) {
                     if (dep.starts_with(":") && !primary_name.empty()) {
                         dep = primary_name + dep;
