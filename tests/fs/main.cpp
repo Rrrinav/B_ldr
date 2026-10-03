@@ -517,6 +517,228 @@ auto test_file_queries() -> TestSuite
     return suite;
 }
 
+auto test_walk_hidden() -> TestSuite
+{
+    TestSuite suite{.function = "walk_hidden"};
+
+    auto root = SANDBOX + "hidden_test/";
+    std::ignore = bld::fs::make_dirs(root + "visdir", root + ".hdir/sub", root + ".hempty");
+    std::ignore = bld::fs::write_file(root + "visible.txt", "v");
+    std::ignore = bld::fs::write_file(root + ".hidden_file", "h");
+    std::ignore = bld::fs::write_file(root + "visdir/vis.txt", "v");
+    std::ignore = bld::fs::write_file(root + "visdir/.hidden_inner", "h");
+    std::ignore = bld::fs::write_file(root + ".hdir/inner.txt", "leak");
+    std::ignore = bld::fs::write_file(root + ".hdir/.nested_hidden", "h");
+    std::ignore = bld::fs::write_file(root + ".hdir/sub/deep.txt", "deep");
+
+    auto collect = [](const std::string &rt, bld::fs::Walk_opts opts) {
+        bld::fs::Controller ctl{std::move(opts)};
+        std::vector<bld::fs::Dir_entry> out;
+        for (const auto &e : bld::fs::walk_dir(rt, ctl)) {
+            out.push_back(e);
+        }
+        return std::pair{!ctl.failed(), std::move(out)};
+    };
+    auto filenames = [](const std::vector<bld::fs::Dir_entry> &v) {
+        std::vector<std::string> out;
+        for (const auto &e : v) {
+            out.push_back(e.filename());
+        }
+        std::ranges::sort(out);
+        return out;
+    };
+    auto has_path_substr = [](const std::vector<bld::fs::Dir_entry> &v, std::string_view sub) {
+        return std::ranges::any_of(v, [&](const auto &e) { return e.path.string().find(sub) != std::string::npos; });
+    };
+    auto count_kind = [](const std::vector<bld::fs::Dir_entry> &v, bool want_file, bool want_dir) {
+        std::size_t n = 0;
+        for (const auto &e : v) {
+            if (want_file && e.is_file()) {
+                ++n;
+            }
+            if (want_dir && e.is_dir()) {
+                ++n;
+            }
+        }
+        return n;
+    };
+
+    // 1. Default: hidden files excluded (pre-existing behavior).
+    {
+        auto [ok, v] = collect(root, {});
+        suite.expect(ok, "default walk should not fail");
+        suite.expect(!has_path_substr(v, ".hidden_file"), "default must hide top-level .hidden_file");
+        suite.expect(!has_path_substr(v, ".hidden_inner"), "default must hide visdir/.hidden_inner");
+        suite.expect(!has_path_substr(v, ".nested_hidden"), "default must hide .hdir/.nested_hidden");
+    }
+
+    // 2. Default: hidden dirs neither yielded nor descended (the fixed bug).
+    {
+        auto [ok, v] = collect(root, {});
+        suite.expect(ok, "default hidden-dir walk should not fail");
+        suite.expect(!has_path_substr(v, ".hdir"), "default must not yield .hdir itself");
+        suite.expect(!has_path_substr(v, ".hempty"), "default must not yield empty hidden dir .hempty");
+        suite.expect(!has_path_substr(v, "inner.txt"), "REGRESSION: .hdir/inner.txt leaked with include_hidden=false");
+        suite.expect(!has_path_substr(v, "deep.txt"), "REGRESSION: .hdir/sub/deep.txt leaked with include_hidden=false");
+        suite.expect(count_kind(v, true, false) == 2, "default should find exactly 2 files (visible.txt, vis.txt)");
+        suite.expect(count_kind(v, false, true) == 1, "default should yield exactly 1 dir (visdir)");
+        suite.expect(filenames(v) == std::vector<std::string>{"vis.txt", "visdir", "visible.txt"}, "default entry set wrong");
+    }
+
+    // 3. Flat walk still hides hidden dirs.
+    {
+        auto [ok, v] = collect(root, {.recursive = false});
+        suite.expect(ok, "flat walk should not fail");
+        suite.expect(count_kind(v, true, false) == 1, "flat default should find only visible.txt");
+        suite.expect(count_kind(v, false, true) == 1, "flat default should yield only visdir");
+        suite.expect(!has_path_substr(v, ".hdir"), "flat default must not yield .hdir");
+    }
+    {
+        auto [ok, v] = collect(root, {.recursive = false, .include_hidden = true});
+        suite.expect(ok, "flat hidden walk should not fail");
+        suite.expect(count_kind(v, true, false) == 2, "flat include_hidden should find visible.txt + .hidden_file");
+        suite.expect(count_kind(v, false, true) == 3, "flat include_hidden should yield visdir + .hdir + .hempty");
+    }
+
+    // 4. include_hidden=true finds everything, incl. through hidden dirs.
+    {
+        auto [ok, v] = collect(root, {.include_hidden = true});
+        suite.expect(ok, "include_hidden walk should not fail");
+        suite.expect(count_kind(v, true, false) == 7, "include_hidden should find all 7 files");
+        suite.expect(count_kind(v, false, true) == 4, "include_hidden should yield all 4 dirs (visdir, .hdir, sub, .hempty)");
+        suite.expect(has_path_substr(v, "inner.txt"), "include_hidden must find .hdir/inner.txt");
+        suite.expect(has_path_substr(v, "deep.txt"), "include_hidden must find .hdir/sub/deep.txt");
+        suite.expect(has_path_substr(v, ".nested_hidden"), "include_hidden must find .hdir/.nested_hidden");
+        // Depth: root children depth 0, .hdir/sub children depth 2.
+        for (const auto &e : v) {
+            if (e.filename() == "deep.txt") {
+                suite.expect(e.depth == 2, "deep.txt should be at depth 2");
+            }
+        }
+    }
+
+    // 5. is_hidden() is basename-based (documents the semantic).
+    {
+        auto [ok, v] = collect(root, {.include_hidden = true});
+        suite.expect(ok, "is_hidden probe walk should not fail");
+        auto flag_of = [&](std::string_view name) -> std::optional<bool> {
+            for (const auto &e : v) {
+                if (e.filename() == name) {
+                    return e.is_hidden();
+                }
+            }
+            return std::nullopt;
+        };
+        suite.expect(flag_of(".hidden_file") == std::optional<bool>{true}, ".hidden_file must be hidden");
+        suite.expect(flag_of(".hdir") == std::optional<bool>{true}, ".hdir must be hidden");
+        suite.expect(flag_of("visible.txt") == std::optional<bool>{false}, "visible.txt must not be hidden");
+        suite.expect(flag_of("inner.txt") == std::optional<bool>{false}, "inner.txt basename is visible (ancestor hidden, self not)");
+    }
+
+    // 6. Eager wrappers respect the default (hidden excluded).
+    {
+        suite.expect(bld::fs::files(root).size() == 2, "files() must exclude hidden subtree (2 files)");
+        auto all = bld::fs::find_all_files(root);
+        suite.expect(all.has_value() && all->size() == 2, "find_all_files must exclude hidden subtree (2 files)");
+        if (all.has_value()) {
+            suite.expect(
+                std::ranges::none_of(*all, [](const auto &p) { return p.find(".hdir") != std::string::npos; }),
+                "find_all_files leaked .hdir content");
+        }
+        auto by_ext = bld::fs::find_by_ext(root, ".txt");
+        suite.expect(by_ext.has_value() && by_ext->size() == 2, "find_by_ext(.txt) must find 2 visible files");
+        auto by_hidden_name = bld::fs::find_by_name(root, "inner.txt");
+        suite.expect(by_hidden_name.has_value() && by_hidden_name->empty(), "find_by_name(inner.txt) must be empty by default (no descent)");
+        auto by_hidden_file = bld::fs::find_by_name(root, ".hidden_file");
+        suite.expect(by_hidden_file.has_value() && by_hidden_file->empty(), "find_by_name(.hidden_file) must be empty by default");
+        auto by_vis = bld::fs::find_by_name(root, "visible.txt", "vis.txt");
+        suite.expect(by_vis.has_value() && by_vis->size() == 2, "find_by_name(visible) must find 2 files");
+    }
+
+    // 7. Explicitly walking a hidden root still works: only the entries'
+    // own names are filtered, not the explicitly passed ancestor.
+    {
+        auto [ok, v] = collect(root + ".hdir", {});
+        suite.expect(ok, "walking explicit hidden root should not fail");
+        suite.expect(has_path_substr(v, "inner.txt"), "explicit hidden root must still yield visible inner.txt");
+        suite.expect(has_path_substr(v, "deep.txt"), "explicit hidden root must still yield sub/deep.txt");
+        suite.expect(!has_path_substr(v, ".nested_hidden"), "explicit hidden root must still hide .nested_hidden by default");
+    }
+    {
+        auto [ok, v] = collect(root + ".hdir", {.include_hidden = true});
+        suite.expect(ok, "walking explicit hidden root with hidden should not fail");
+        suite.expect(has_path_substr(v, ".nested_hidden"), "explicit hidden root + include_hidden must yield .nested_hidden");
+    }
+
+    // 8. skip + sorted compose with hidden filtering.
+    {
+        auto [ok, v] = collect(root, {.skip = {"visdir"}});
+        suite.expect(ok, "skip walk should not fail");
+        suite.expect(count_kind(v, true, false) == 1, "skip visdir should leave only visible.txt");
+        suite.expect(!has_path_substr(v, "vis.txt"), "skipped visdir content leaked");
+        suite.expect(!has_path_substr(v, "inner.txt"), "hidden content leaked despite skip");
+    }
+    {
+        bld::fs::Controller ctl;
+        ctl.opts.sorted = true;
+        ctl.opts.recursive = false;
+        std::vector<std::string> flat_files;
+        std::vector<std::string> flat_dirs;
+        for (const auto &e : bld::fs::walk_dir(root, ctl)) {
+            if (e.is_file()) {
+                flat_files.push_back(e.filename());
+            }
+            if (e.is_dir()) {
+                flat_dirs.push_back(e.filename());
+            }
+        }
+        suite.expect(!ctl.failed(), "sorted hidden walk should not fail");
+        suite.expect(flat_files == std::vector<std::string>{"visible.txt"}, "sorted flat files must hide .hidden_file");
+        suite.expect(flat_dirs == std::vector<std::string>{"visdir"}, "sorted flat dirs must hide .hdir/.hempty");
+    }
+    {
+        // only_dirs / only_files adaptors also respect hidden.
+        bld::fs::Controller ctl;
+        std::size_t ndirs = 0;
+        for ([[maybe_unused]] const auto &e : bld::fs::walk_dir(root, ctl) | bld::fs::only_dirs) {
+            ++ndirs;
+        }
+        suite.expect(!ctl.failed() && ndirs == 1, "only_dirs by default must yield just visdir");
+        bld::fs::Controller ctl2{bld::fs::Walk_opts{.include_hidden = true}};
+        std::size_t nall = 0;
+        for ([[maybe_unused]] const auto &e : bld::fs::walk_dir(root, ctl2) | bld::fs::only_dirs) {
+            ++nall;
+        }
+        suite.expect(!ctl2.failed() && nall == 4, "only_dirs with hidden must yield 4 dirs");
+    }
+
+#ifndef _WIN32
+    // 9. Hidden symlinks: same rule as files/dirs.
+    {
+        std::ignore = bld::fs::write_file(root + "visdir/real.txt", "r");
+        std::ignore = bld::fs::create_symlink("visdir/vis.txt", root + "link_visible");
+        std::ignore = bld::fs::create_symlink("visdir/vis.txt", root + ".hidden_link");
+        std::ignore = bld::fs::create_symlink("visdir", root + ".hdir_link");
+        auto [ok, v] = collect(root, {});
+        suite.expect(ok, "symlink walk should not fail");
+        suite.expect(has_path_substr(v, "link_visible"), "visible symlink must be yielded by default");
+        suite.expect(!has_path_substr(v, ".hidden_link"), "hidden symlink must be skipped by default");
+        suite.expect(!has_path_substr(v, ".hdir_link"), "hidden dir symlink must be skipped by default");
+        auto [ok2, v2] = collect(root, {.include_hidden = true});
+        suite.expect(ok2, "hidden symlink walk should not fail");
+        suite.expect(has_path_substr(v2, ".hidden_link"), "include_hidden must yield .hidden_link");
+        suite.expect(has_path_substr(v2, ".hdir_link"), "include_hidden must yield .hdir_link");
+        // Hidden dir symlink must not be descended by default even when following.
+        auto [ok3, v3] = collect(root, {.follow_symlinks = true});
+        suite.expect(ok3, "follow walk should not fail");
+        suite.expect(!has_path_substr(v3, ".hdir_link"), "follow must still skip hidden dir symlink by default");
+        std::ignore = bld::fs::remove(root + "link_visible", root + ".hidden_link", root + ".hdir_link", root + "visdir/real.txt");
+    }
+#endif
+
+    return suite;
+}
+
 auto test_walk_opts() -> TestSuite
 {
     TestSuite suite{.function = "walk_opts"};
@@ -643,6 +865,8 @@ int main(int argc, char *argv[])
     suite = test_file_queries();
     suite.serialize(out);
     suite = test_walk_advanced();
+    suite.serialize(out);
+    suite = test_walk_hidden();
     suite.serialize(out);
     suite = test_walk_opts();
     suite.serialize(out);

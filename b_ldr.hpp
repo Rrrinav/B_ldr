@@ -1319,6 +1319,10 @@ using Walker = std::generator<Dir_entry>;
 struct Walk_opts
 {
     bool recursive = true;
+    // When false (default), hidden files, hidden directories and hidden
+    // symlinks are skipped entirely: a hidden directory is neither yielded
+    // nor descended, so nothing under it leaks. Basename-based
+    // (leading '.'; plus FILE_ATTRIBUTE_HIDDEN on Windows).
     bool include_hidden = false;
     bool follow_symlinks = false;
     int max_depth = std::numeric_limits<int>::max();
@@ -1346,9 +1350,12 @@ struct Walk_opts
 //   if (ctl.failed()) { /* ctl.error(): Kind::fs vs Kind::user */ }
 //
 // Dynamic pruning and abort live in the loop body; break ends cleanly
-// (success). Directories always reach the body (for dont_recurse) — unless a
-// downstream filter hides them first, in which case prune statically via
-// opts.skip or filter in the body instead. Files respect include_hidden.
+// (success). Hidden entries (files, dirs, symlinks) are skipped entirely
+// when include_hidden is false: neither yielded nor descended, so nothing
+// under a hidden directory leaks. dont_recurse still applies to the
+// visible directories that do reach the body — unless a downstream filter
+// hides them first, in which case prune statically via opts.skip or filter
+// in the body instead.
 // Errors are logged; the two failure points — library failure (Kind::fs)
 // vs abort (Kind::user) — are told apart by the outcome, checked once.
 struct Controller
@@ -6329,8 +6336,8 @@ auto Controller::walk_tree(
         if (e.is_dir() && std::ranges::find(ctl.opts.skip, e.filename()) != ctl.opts.skip.end()) {
             continue; // statically skipped: neither yielded nor descended
         }
-        if (!e.is_dir() && !ctl.opts.include_hidden && e.is_hidden()) {
-            continue;
+        if (!ctl.opts.include_hidden && e.is_hidden()) {
+            continue; // hidden files, dirs and symlinks: neither yielded nor descended
         }
         // Symlink-to-directory still descends when following (as
         // recursive_directory_iterator did); anything unresolvable is
