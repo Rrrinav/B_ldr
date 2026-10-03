@@ -15,6 +15,7 @@ no new tools, languages, or syntax to learn.
   plan, or a `compile_commands.json` file, all through the same scheduler.
 - **Config parsing**: declare options, get a generated `--help`, read values
   with `cfg["key"]`.
+- **Prompt**: `bld::prompt("delete {}?", dir)` asks `Is this OK? [y/N]`.
 - **Filesystem, strings, time, diff testing** included.
 - **Cross-platform**: Linux/macOS (POSIX) and Windows (MSVC, MinGW, clang-cl).
 
@@ -113,6 +114,17 @@ std::string merged;
 auto clang = bld::run(bld::Cmd{"clang", "-x", "c++", "-"}, bld::io_in{&src}, bld::io_out_err{&merged});
 
 // Captured output is normalized (\r\n -> \n), a no-op on Linux.
+```
+
+### Prompt
+
+```cpp
+if (bld::prompt("delete {}?", "build")) {
+    // user typed y/yes
+}
+// y/yes (any case, trimmed) -> true; n/no/empty/EOF/garbage -> false.
+// Testable form with injected streams:
+//   bld::prompt(in, out, "delete {}?", "build");
 ```
 
 ### Incremental dependency plan

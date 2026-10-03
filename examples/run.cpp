@@ -40,8 +40,6 @@
 #define B_LDR_IMPLEMENTATION
 #include "../b_ldr.hpp"
 
-#include <any>
-
 namespace {
 
 auto task_state_name(bld::Task_state s) -> const char *
